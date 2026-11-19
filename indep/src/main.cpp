@@ -311,6 +311,8 @@ struct ApplicationRuntime::Storage {
     std::unique_ptr<frontend::MemcardScreens> memcards;
     frontend::GameFlowBindings flowBindings{};
     std::unique_ptr<EcstasyFrame> frame{std::make_unique<EcstasyFrame>()};
+    // Pipelined hosts render one frame while the next is captured here.
+    std::unique_ptr<EcstasyFrame> spareFrame{std::make_unique<EcstasyFrame>()};
     int32_t skipStartSequence{},alternateSkin{};
     // PAL1BE910 requests the same bStartGlare consumed by StuffSunGlare.
     // The application's Sun owner retains its original textures and clock.
@@ -457,6 +459,7 @@ struct ApplicationRuntime::Storage {
         Require(width>0 && height>0,"Native render extent is unavailable");
         cameras.projection.nativeSourceVideoMode=gameTimeGetVideoMode(&clock);
         if(targets[0].width==width && targets[0].height==height && cameras.projection.horizontalResolution==width)return;
+        NativeDrainRendering(); // a pipelined frame may still read these extents
         for(std::size_t index=0;index<8;++index) {targets[index].width=width;targets[index].height=height;}
         cameras.projection.horizontalResolution=width;
         // The source view switch sets player/split/rear subrectangles. The
@@ -1207,7 +1210,10 @@ bool ApplicationRuntime::Tick()
         return !s.demo.ExitRequested();
     }
     if(!reusedPreparation) {
-        platform::ScopedNativeDuration measure(s.presentationTiming);s.host.SubmitFrame(*s.frame);
+        platform::ScopedNativeDuration measure(s.presentationTiming);
+        s.host.SetFramePipelining(s.flow.inGameFlag!=0);
+        s.host.SubmitFrame(*s.frame);
+        if(s.host.FrameInFlight())std::swap(s.frame,s.spareFrame);
     }
     // Native timings have separate clock domains. CPU work includes capture,
     // Gather and recording/submission; waiting and presentation are reported
@@ -1439,7 +1445,9 @@ bool ApplicationRuntime::Tick()
     s.slowFrame.diagnostics.Observe(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         s.host.FrameTime()-diagnosticsStarted).count()));
     const auto tailStarted=s.host.FrameTime();
-    Require(s.frame->State()==EcstasyFrame::Phase::Complete,"Physical presenter did not retire the CPU frame capture");
+    Require(s.frame->State()==EcstasyFrame::Phase::Complete ||
+        (s.frame->State()==EcstasyFrame::Phase::Building && s.frame->Commands().empty()),
+        "Physical presenter did not retire the CPU frame capture");
     if(advancedPresentation) {
         s.ServiceFrameResources();
     }
@@ -1542,6 +1550,7 @@ std::exception_ptr ApplicationRuntime::ShutdownNoThrow() noexcept
         return s.sound.CancelDeviceRequestsAfterClose();
     });
     s.Retire("CPU frame cancellation",[&] {
+        s.host.FinishFrames();
         Require(s.frame->State()!=EcstasyFrame::Phase::Submitted,
             "Shutdown precedes retirement of the submitted CPU frame capture");
         if(s.frame->State()!=EcstasyFrame::Phase::Complete)s.frame->CancelBeforeSubmit();

@@ -1314,6 +1314,14 @@ public:
     EcstasyVulkanDevice(const EcstasyVulkanDevice&)=delete;
     EcstasyVulkanDevice& operator=(const EcstasyVulkanDevice&)=delete;
     void Render(EcstasyFrame& frame);
+#if defined(HP2_ENABLE_VITAGL)
+    // Diagnostic: 0 idle, 1 setup, 2 gather, 3 upload, 100+id pass, 4 swap.
+    static int RenderStage() noexcept;
+#endif
+#if defined(HP2_ENABLE_VITAGL)
+    // Leave the rendered frame Submitted; the host retires it with Complete().
+    void SetDeferredRetire(bool defer) noexcept;
+#endif
     // The host must prove that source/presentation inputs have not advanced.
     // This reuses owned native preparation, then renders and submits a real
     // new GPU frame. It never re-presents an old colour image or advances time.
@@ -1507,6 +1515,7 @@ void graphicsNotifyPresentationComplete() noexcept;
 // source boundary. These are host adaptations, not additional PAL bodies.
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cfenv>
 #include <cmath>
 #include <condition_variable>
@@ -1590,7 +1599,7 @@ namespace hp2 {
 // affinity restrictions. Work is bounded by this count and the useful jobs,
 // never by a fixed application-wide limit on the number of worker threads.
 unsigned NativeSceneEffectiveHardwareConcurrency() noexcept;
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__vita__)
 void ConfigureNativeSceneWorker() noexcept;
 #else
 inline void ConfigureNativeSceneWorker() noexcept {}
@@ -1626,6 +1635,18 @@ struct NativeSceneFloatingPointState {
 // drains jobs. A nested dispatch executes inline in its existing worker:
 // it cannot create an oversubscribed per-worker pool or re-enter an active
 // batch. Every worker drains before borrowed scene data can be unwound.
+// Count of condition-variable waits that timed out with their predicate
+// already true (a lost wakeup the timed wait recovered). Diagnostic only.
+inline std::atomic<unsigned> nativeScenePoolRecoveries{0};
+// Timed predicate wait: the Vita pthread condition variable can lose a
+// notification under multi-pool load; re-check every 2 ms instead of hanging.
+template<class Predicate>
+inline void NativeScenePoolWait(std::condition_variable& condition,std::unique_lock<std::mutex>& guard,Predicate predicate) {
+    while(!predicate()) {
+        if(condition.wait_for(guard,std::chrono::milliseconds(2))==std::cv_status::timeout && predicate())
+            nativeScenePoolRecoveries.fetch_add(1,std::memory_order_relaxed);
+    }
+}
 class NativeSceneWorkerPool final {
 public:
     NativeSceneWorkerPool()=default;
@@ -1679,7 +1700,7 @@ public:
         std::exception_ptr failure;
         {
             std::unique_lock<std::mutex> guard(mutex_);
-            completed_.wait(guard,[this] {return remaining_==0;});
+            NativeScenePoolWait(completed_,guard,[this] {return remaining_==0;});
             failure=failure_;
             function_=nullptr;
             context_=nullptr;
@@ -1725,7 +1746,7 @@ private:
             bool assigned=false;
             {
                 std::unique_lock<std::mutex> guard(mutex_);
-                wake_.wait(guard,[this,&seen] {return stopping_ || generation_!=seen;});
+                NativeScenePoolWait(wake_,guard,[this,&seen] {return stopping_ || generation_!=seen;});
                 if(stopping_)return;
                 seen=generation_;
                 assigned=slot<active_;
