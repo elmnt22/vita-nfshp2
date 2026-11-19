@@ -442,6 +442,12 @@ GameResources::GameResources(const fs::path& input, GameResourceSource source) {
         sourcePath_=input.lexically_normal();
     else
 #endif
+#ifdef __vita__
+    // Vita device prefixes (ux0:, uma0:, ...) look relative to newlib.
+    if(input.native().find(':')!=std::string::npos)
+        sourcePath_=input.lexically_normal();
+    else
+#endif
     sourcePath_ = fs::absolute(input).lexically_normal();
     Require(fs::exists(sourcePath_), "Game resource source does not exist: " + sourcePath_.u8string());
     if (source == GameResourceSource::LooseDirectory) {

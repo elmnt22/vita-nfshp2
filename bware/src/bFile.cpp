@@ -11,6 +11,10 @@
 #include <cstring>
 #include <limits>
 #include <sstream>
+#ifdef __vita__
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
+#endif
 
 namespace hp2 {
 
@@ -29,6 +33,30 @@ void logPhysicalFile(const char* event,const std::filesystem::path& path,
 }
 }
 
+#ifdef __vita__
+RandomAccessFile::RandomAccessFile(std::filesystem::path path) : path_(std::move(path)) {
+    SceIoStat st{};
+    Require(sceIoGetstat(path_.c_str(),&st)>=0 && SCE_S_ISREG(st.st_mode), "Not a regular file: " + path_.u8string());
+    size_ = static_cast<std::uint64_t>(st.st_size);
+    fd_ = sceIoOpen(path_.c_str(), SCE_O_RDONLY, 0);
+    Require(fd_ >= 0, "Cannot open: " + path_.u8string());
+    logPhysicalFile("file.open",path_,0,size_);
+}
+RandomAccessFile::~RandomAccessFile() { if (fd_ >= 0) sceIoClose(fd_); }
+
+void RandomAccessFile::Read(std::uint64_t offset, void* buffer, std::size_t length) const {
+    if (!Inside(offset,length,size_))logPhysicalFile("file.read.invalid_range",path_,offset,length);
+    Require(Inside(offset, length, size_), "Read beyond end of: " + path_.u8string());
+    auto* out = static_cast<std::uint8_t*>(buffer);
+    while (length) {
+        const auto chunk = static_cast<SceSize>(std::min<std::size_t>(length, 16u<<20));
+        const int got = sceIoPread(fd_, out, chunk, static_cast<SceOff>(offset));
+        if (got <= 0) logPhysicalFile("file.read.short",path_,offset,length,got);
+        Require(got > 0, "Short read: " + path_.u8string());
+        out += got; offset += static_cast<std::uint64_t>(got); length -= static_cast<std::size_t>(got);
+    }
+}
+#else
 RandomAccessFile::RandomAccessFile(std::filesystem::path path) : path_(std::move(path)) {
     Require(std::filesystem::is_regular_file(path_), "Not a regular file: " + path_.u8string());
     size_ = std::filesystem::file_size(path_);
@@ -56,6 +84,8 @@ void RandomAccessFile::Read(std::uint64_t offset, void* buffer, std::size_t leng
     Require(stream_.gcount() == static_cast<std::streamsize>(length),
             "Short read: " + path_.u8string());
 }
+
+#endif
 
 FileRange::FileRange(std::shared_ptr<RandomAccessFile> file,
                      std::uint64_t offset, std::uint64_t size)
