@@ -86,6 +86,24 @@ EditorMarkerTexture* findModelTexture(EditorMarkerResources* root,uint32_t key)
 }
 
 extern uint32_t (*collisionWitnessClockMicros)();
+// Diagnostic: serial skinned strips copy/skin/capture us, [3] strips, [4] vertices.
+namespace hp2 {std::array<std::uint64_t,5> ecstasySkinSplitMicros{};
+// RenderModel parallel strip capture threshold (exact either way; PC
+// HP2_PARALLEL_MODEL_STRIPS, Vita model_par<N>.txt).
+int ecstasyParallelModelStrips=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_PARALLEL_MODEL_STRIPS"))return std::max(1,std::atoi(value));
+#endif
+    return 512;
+}();
+// Posed (skinned) models: parallel from this many strips; 0 = old threshold
+// only (PC HP2_PARALLEL_SKIN_STRIPS, Vita skin_serial.txt).
+int ecstasyParallelSkinStrips=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_PARALLEL_SKIN_STRIPS"))return std::max(0,std::atoi(value));
+#endif
+    return 16;
+}();}
 namespace hp2 {
 unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
 {
@@ -3741,8 +3759,14 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     for(const auto& run:visible)count+=run.count;
     // Task size amortizes queue publication; CPU count is discovered by the
     // shared scheduler and is never restricted to a fixed application cap.
-    constexpr std::size_t minimumParallelStrips=512,stripsPerChunk=64;
-    const bool parallel=count>=minimumParallelStrips && NativeSceneEffectiveHardwareConcurrency()>1;
+    // Posed models skin every strip on the CPU (~26 us/strip on Vita): they
+    // parallelize from a much smaller size, in small chunks.
+    const bool skinParallel=boneMatrices && ecstasyParallelSkinStrips>0 &&
+        count>=static_cast<std::size_t>(ecstasyParallelSkinStrips);
+    const std::size_t stripsPerChunk=boneMatrices ? 8:64;
+    const bool parallel=(skinParallel || count>=static_cast<std::size_t>(ecstasyParallelModelStrips)) &&
+        NativeSceneEffectiveHardwareConcurrency()>1;
+    auto& preposed=preposedScratch_;
     if(parallel) {
         // LookupDescriptor can rebuild a lazy resource index. Resolve every
         // binding on the owner after the original shared-table replacement;
@@ -3760,7 +3784,28 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     // This exact multiplication is shared by the model's ordered strip
     // packets. The owner does not advance the view or any borrowed input
     // before RunNativeSceneJobs has drained, including exceptional exits.
-    const auto capture=[&](std::size_t index,std::int32_t clipClass,
+    const auto skinStrip=[&](EditorMarkerSolidGeometry::Strip& posedStrip) {
+        for(auto& position:posedStrip.positions) {
+            std::array<std::uint32_t,3> encoded{};
+            std::memcpy(encoded.data(),position.data(),sizeof(encoded));
+            const auto first=encoded[0]&255u,second=encoded[1]&255u,weight=encoded[2]&255u;
+            const auto transformVertex=[&](std::uint32_t bone,float outputVertex[4]) {
+                Require(bone<boneMatrices->size(),"Animated vertex bone exceeds its retained skeleton");
+                eMulVector3(outputVertex,(*boneMatrices)[bone].data(),position.data());
+            };
+            float posed[4];
+            if(weight==0)transformVertex(first,posed);
+            else if(weight==1)transformVertex(second,posed);
+            else {
+                float other[4];transformVertex(first,posed);transformVertex(second,other);
+                const float blend=static_cast<float>(weight)*(1.0f/256.0f);
+                for(std::size_t axis=0;axis<3;++axis)
+                    posed[axis]=posed[axis]*(1.0f-blend)+other[axis]*blend;
+            }
+            std::copy(posed,posed+3,position.begin());
+        }
+    };
+    const auto capture=[&](std::size_t ordinal,std::size_t index,std::int32_t clipClass,
         std::vector<EcstasyDrawCommand>& output,
         std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>>& posedStrips,
         std::uint64_t& alphaGroups) {
@@ -3787,48 +3832,52 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         if (flags&2u)draw&=~0x80u;
         if (!lightContext)draw&=~0x1c0u; // released10DDE0 null-context mask
         const auto* submitted=&strip;
+        const bool skinTimed=boneMatrices && !parallel && collisionWitnessClockMicros;
+        std::uint32_t skinMark=skinTimed ? collisionWitnessClockMicros():0u;
+        const auto skinAt=[&](std::size_t part) {
+            if(!skinTimed)return;
+            const auto now=collisionWitnessClockMicros();ecstasySkinSplitMicros[part]+=now-skinMark;skinMark=now;
+        };
         if(boneMatrices) {
             // PAL10D778 DoBlendingOnStrip copies the actual strip packet and
             // changes XYZ only. Its three embedded low bytes are two bone
             // indices and an unscaled8-bit blend value, not extra channels.
-            std::unique_ptr<EditorMarkerSolidGeometry::Strip> animatedStrip;
-            if(!parallel && !animatedStripPool_.empty()) {
-                animatedStrip=std::move(animatedStripPool_.back());animatedStripPool_.pop_back();
-                *animatedStrip=strip;
-            } else animatedStrip=std::make_unique<EditorMarkerSolidGeometry::Strip>(strip);
+            // The owner takes pooled copies (parallel: pre-taken per ordinal).
+            auto animatedStrip=parallel ? std::move(preposed[ordinal]):TakePosedStrip(strip);
+            if(animatedStrip)*animatedStrip=strip;
+            else animatedStrip=std::make_unique<EditorMarkerSolidGeometry::Strip>(strip);
+            animatedStrip->nativePoseSource=&strip;
             animatedStrip->nativeVertexRevision=0;
-            for(auto& position:animatedStrip->positions) {
-                std::array<std::uint32_t,3> encoded{};
-                std::memcpy(encoded.data(),position.data(),sizeof(encoded));
-                const auto first=encoded[0]&255u,second=encoded[1]&255u,weight=encoded[2]&255u;
-                const auto transformVertex=[&](std::uint32_t bone,float outputVertex[4]) {
-                    Require(bone<boneMatrices->size(),"Animated vertex bone exceeds its retained skeleton");
-                    eMulVector3(outputVertex,(*boneMatrices)[bone].data(),position.data());
-                };
-                float posed[4];
-                if(weight==0)transformVertex(first,posed);
-                else if(weight==1)transformVertex(second,posed);
-                else {
-                    float other[4];transformVertex(first,posed);transformVertex(second,other);
-                    const float blend=static_cast<float>(weight)*(1.0f/256.0f);
-                    for(std::size_t axis=0;axis<3;++axis)
-                        posed[axis]=posed[axis]*(1.0f-blend)+other[axis]*blend;
-                }
-                std::copy(posed,posed+3,position.begin());
-            }
+            skinAt(0);
+            if(skinTimed) {++ecstasySkinSplitMicros[3];ecstasySkinSplitMicros[4]+=animatedStrip->positions.size();}
+            skinStrip(*animatedStrip);
             submitted=animatedStrip.get();posedStrips.push_back(std::move(animatedStrip));
+            skinAt(1);
         }
         CaptureStrip(output,alphaGroups,state,model,*submitted,*texture,material,localToWorld,
             view,clipClass,draw,alphaScale,lightContext);
+        skinAt(2);
     };
     if(!parallel) {
         for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index)
-            capture(index,run.clipClass,commands_,animatedStrips_,nextAlphaGroup_);
+            capture(0,index,run.clipClass,commands_,animatedStrips_,nextAlphaGroup_);
         return commands_.size()-start;
     }
     sources.reserve(count);
     for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index)
         sources.push_back({index,run.clipClass});
+    if(boneMatrices) {
+        preposed.clear();preposed.resize(count);
+        for(std::size_t ordinal=0;ordinal<count;++ordinal) {
+            const auto index=sources[ordinal].index;
+            if(index<geometry.strips.size() && !(geometry.strips[index].flags&0x400u))
+                preposed[ordinal]=TakePosedStrip(geometry.strips[index]);
+        }
+    }
+    struct ReturnPreposed {
+        EcstasyFrame& frame;bool active;
+        ~ReturnPreposed() {if(active)for(auto& strip:frame.preposedScratch_)frame.ReturnPosedStrip(strip);}
+    } returnPreposed{*this,boneMatrices!=nullptr};
     const auto chunkCount=count/stripsPerChunk+(count%stripsPerChunk!=0);
     if(chunks.size()<chunkCount)chunks.resize(chunkCount);
     clear.chunksUsed=chunkCount;
@@ -3838,7 +3887,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         const auto last=first+std::min(stripsPerChunk,count-first);
         chunk.commands.reserve((last-first)*3);
         for(auto index=first;index<last;++index)
-            capture(sources[index].index,sources[index].clipClass,
+            capture(index,sources[index].index,sources[index].clipClass,
                 chunk.commands,chunk.animatedStrips,chunk.alphaGroups);
     },2);
     std::size_t commandCount=0,posedCount=0;
@@ -3859,6 +3908,30 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         }
         nextAlphaGroup_+=chunk.alphaGroups;
     }
+#if !defined(__SWITCH__) && !defined(__vita__)
+    // PC HP2_VERIFY_SKIN=1: re-pose each parallel posed strip serially from
+    // its source and compare every channel (pooled copies included).
+    static const bool verifySkin=[] {const char* value=std::getenv("HP2_VERIFY_SKIN");return value && *value=='1';}();
+    if(verifySkin && boneMatrices) {
+        static std::uint64_t checks=0,mismatches=0;
+        for(auto at=animatedStrips_.size()-posedCount;at<animatedStrips_.size();++at) {
+            const auto& posedStrip=*animatedStrips_[at];++checks;
+            Require(posedStrip.nativePoseSource,"Posed strip lost its source");
+            auto expected=*posedStrip.nativePoseSource;skinStrip(expected);
+            const auto same=[](const auto& a,const auto& b) {
+                return a.size()==b.size() && (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(a[0]))==0);
+            };
+            if(!same(expected.positions,posedStrip.positions) || !same(expected.normals,posedStrip.normals) ||
+                !same(expected.textureCoordinates,posedStrip.textureCoordinates) || !same(expected.colors,posedStrip.colors) ||
+                expected.flags!=posedStrip.flags || expected.textureIndex!=posedStrip.textureIndex)++mismatches;
+        }
+        if((checks&4095u)<posedCount) {
+            char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
+                (unsigned long long)checks,(unsigned long long)mismatches);
+            platform::RecordSessionEvent("render.skin_verify",text);
+        }
+    }
+#endif
     return commands_.size()-start;
 }
 
@@ -4299,6 +4372,21 @@ void EcstasyFrame::BeginNextFrame()
     textureAnimationWorldFrames_=0;textureAnimationRealFrames_=0;
     phase_=Phase::Building;
 }
+std::unique_ptr<EditorMarkerSolidGeometry::Strip> EcstasyFrame::TakePosedStrip(const EditorMarkerSolidGeometry::Strip& source)
+{
+    std::unique_ptr<EditorMarkerSolidGeometry::Strip> strip;
+    const auto found=posedStripPool_.find(&source);
+    if(found!=posedStripPool_.end() && !found->second.empty()) {
+        strip=std::move(found->second.back());found->second.pop_back();--posedStripPooled_;
+    }
+    return strip;
+}
+void EcstasyFrame::ReturnPosedStrip(std::unique_ptr<EditorMarkerSolidGeometry::Strip>& strip) noexcept
+{
+    if(!strip || !strip->nativePoseSource || posedStripPooled_>=8192)return;
+    try {posedStripPool_[strip->nativePoseSource].push_back(std::move(strip));++posedStripPooled_;}
+    catch(...) {} // pool growth is optional
+}
 void EcstasyFrame::Release() noexcept
 {
     textureAnimationResources_=nullptr;environmentCameraFaces_=0;
@@ -4311,8 +4399,7 @@ void EcstasyFrame::Release() noexcept
     for(std::size_t index=0;index<liveParticleGroups_;++index)particleGroups_[index]->clear();
     liveParticleGroups_=0;
     worldStrips_.clear();
-    try {for(auto& strip:animatedStrips_)if(animatedStripPool_.size()<4096)animatedStripPool_.push_back(std::move(strip));}
-    catch(...) {} // pool growth is optional; unpooled strips are freed below
+    for(auto& strip:animatedStrips_)ReturnPosedStrip(strip); // unpooled strips are freed below
     animatedStrips_.clear();
     for (auto* strip:retainedStrips_)strip->pool->Complete(*strip);
     retainedStrips_.clear();

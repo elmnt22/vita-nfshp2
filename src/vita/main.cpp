@@ -45,11 +45,11 @@ unsigned int _newlib_heap_size_user = 330u * 1024u * 1024u;
 unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 }
 
-namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern std::atomic<int> debugDemoStarted; }
+namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern std::atomic<int> debugDemoStarted; extern int debugBenchMirror; }
 extern int collisionWitnessWarmProbe;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; }
+namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -190,15 +190,16 @@ public:
         // track. Autopad taps reach the main menu, the demo starts after 1 s
         // idle and lasts an hour; taps stop once it starts (input ends it).
         if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/demo_bench.txt").c_str(), "r")) {
-            int track = -1;
-            if (std::fscanf(file, "%d", &track) == 1 && track > 0) {
+            int track = -1, mirror = 0;
+            if (std::fscanf(file, "%d %d", &track, &mirror) >= 1 && track > 0) {
                 ::hp2::debugDemoTrack = track;
+                ::hp2::debugBenchMirror = mirror != 0;
                 applicationLaunchOptions.beginDemoSeconds = 1.0f;
                 applicationLaunchOptions.demoDurationSeconds = 3600.0f;
                 if (!autoPeriod_) {autoPeriod_ = 90; autoHold_ = 10; autoUntil_ = 100000;}
                 demoBench_ = true;
                 char detail[64];
-                std::snprintf(detail, sizeof(detail), "track=%d", track);
+                std::snprintf(detail, sizeof(detail), "track=%d mirror=%d", track, mirror);
                 log_.Line("vita.demo_bench", detail);
             }
             std::fclose(file);
@@ -570,6 +571,16 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_stripcull_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryStripCull = 0;
             log.Line("vita.diag", "scenery strip cull off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/skin_serial.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyParallelSkinStrips = 0;
+            log.Line("vita.diag", "skin parallel off");
+        }
+        for (const int threshold : {64, 128, 256}) {
+            if (sceIoGetstat((std::string(kDataDirectory) + "/model_par" + std::to_string(threshold) + ".txt").c_str(), &probe) >= 0) {
+                hp2::ecstasyParallelModelStrips = threshold;
+                log.Line("vita.diag", ("model parallel strips " + std::to_string(threshold)).c_str());
+            }
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/particles_serial.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyParallelParticles = 0;
