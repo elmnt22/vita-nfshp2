@@ -1,3 +1,4 @@
+#include <atomic>
 #include <exception>
 #include "Flags.hpp"
 #ifdef __SWITCH__
@@ -80,6 +81,7 @@ float applicationPreviousCpuFrameRate=0.0f;
 float applicationPreviousGpuFrameRate=0.0f;
 bool applicationGpuTimingAvailable=false;
 
+namespace hp2 {int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};}
 // PAL12EE30..12EE94; same process vector RNG. vectorRandomSeed performs
 // its actual initial bound1 draw; assigning a seed directly would differ.
 void applicationSeedRandomNumber(ReplayIntegerLog& log)
@@ -90,6 +92,12 @@ void applicationSeedRandomNumber(ReplayIntegerLog& log)
     if (log.replaying)seed=replayIntegerLogRead(&log,32,0);
     else {
         seed=hp2NativeTickerSource()+UINT32_C(0x12345678);
+        // Benchmark hosts only (demo bench): repeatable runs.
+        bool bench=hp2::debugDemoTrack>=0;
+#if !defined(__vita__) && !defined(__SWITCH__)
+        if (const char* text=std::getenv("HP2_DEMO_BENCH"))bench=bench || std::atoi(text)>0;
+#endif
+        if (bench)seed=UINT32_C(0x12345678);
         replayIntegerLogWrite(&log,seed,32,0);
     }
     (void)vectorRandomSeed(seed,&vectorDefaultRandomState);

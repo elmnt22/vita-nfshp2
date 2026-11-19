@@ -3450,7 +3450,7 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
         batch.textureRevision=0;
         batch.geometry=&geometry;
         batch.eligible=true;
-        batch.bindings.clear();batch.strips.clear();
+        batch.bindings.clear();batch.strips.clear();batch.uniqueTextures.clear();
         for(const auto& binding:geometry.textures)batch.bindings.push_back(binding.texture);
         for(const auto& strip:geometry.strips) {
             if((strip.flags&0x400u) || strip.positions.size()<3)continue;
@@ -3463,12 +3463,15 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
             }
             batch.strips.push_back({&strip,texture,
                 static_cast<std::uint32_t>(strip.flags)|(texture->drawFlag4Enabled?4u:0u)});
+            if(std::find(batch.uniqueTextures.begin(),batch.uniqueTextures.end(),texture)==batch.uniqueTextures.end())
+                batch.uniqueTextures.push_back(texture);
         }
         batch.textureRevision=revision;
         batch.runsValid=false;
     }
-    if(!batch.eligible || std::any_of(batch.strips.begin(),batch.strips.end(),
-        [](const auto& strip) {return !strip.texture->pixels.Data();}))return false;
+    // Same predicate as over every strip: each strip texture is one of these.
+    if(!batch.eligible || std::any_of(batch.uniqueTextures.begin(),batch.uniqueTextures.end(),
+        [](const TextureInfo* texture) {return !texture->pixels.Data();}))return false;
 
     Require(phase_==Phase::Building && view.target && view.target->enabled && view.matricesCalculated,
         "Opaque scenery batch lost its live view");
@@ -6687,6 +6690,18 @@ public:
         recency_.push_back(slot);entry.recency=std::prev(recency_.end());
         entries_[slot]=std::move(owned);source.variants[source.variantCount++]=slot;
         Touch(entry);prepare=true;cached=&entry;return &entry;
+    }
+    // Hint only: warms the lookup slot and source of a strip about to be
+    // acquired (scenery runs walk strips whose sources are cold).
+    void Prefetch(const EditorMarkerSolidGeometry::Strip* token) const noexcept {
+#if defined(__GNUC__) || defined(__clang__)
+        const auto identity=reinterpret_cast<std::uintptr_t>(token);
+        const auto* slot=&frameSources_[((identity>>4)^(identity>>12)^(identity>>20))&(frameSources_.size()-1)];
+        if(const auto* source=*slot)__builtin_prefetch(source);
+        __builtin_prefetch(token);
+#else
+        (void)token;
+#endif
     }
     void CompletePreparation() {
         for(const auto slot:active_)entries_[slot]->prepared=true;
