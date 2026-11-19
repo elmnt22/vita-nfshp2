@@ -514,6 +514,7 @@ std::size_t ResourceLoader::ServiceResourceLoading()
         if (file.transfersPending)return service.pendingFiles;
         const auto began=std::chrono::steady_clock::now();
         std::size_t decodedBytes=file.data.size();
+        NativeDrainRendering();
         logResourceEvent("resource.decode.begin",file.filename,file.bindings.kind,file.type,file.flags,
             0,decodedBytes,service.pendingFiles);
         try {
@@ -747,6 +748,7 @@ void ResourceLoader::RetireResourceFile(ResourceFile* file,bool terminal)
         service.queued.CancelAndWait(data.queuedId);data.queuedId=0;data.transfersPending=0;
     }
     Require(!data.queuedId && !data.transfersPending,"ResourceFile cannot retire an outstanding physical write");
+    NativeDrainRendering();
     logResourceEvent("resource.unload.begin",data.filename,data.bindings.kind,data.type,data.flags,
         0,data.physical.range.Size(),service.pendingFiles);
     data.animationData.reset();

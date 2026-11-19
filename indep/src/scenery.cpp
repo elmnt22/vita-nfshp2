@@ -966,7 +966,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 }
             }
         }
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__vita__)
         // Small opaque models can use the GPU clipper at the frustum edge.
         // Bound the extra submitted geometry before using the cached path.
         const auto* solid=draw.model->solid;
