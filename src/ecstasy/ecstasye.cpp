@@ -85,6 +85,7 @@ EditorMarkerTexture* findModelTexture(EditorMarkerResources* root,uint32_t key)
 }
 }
 
+extern uint32_t (*collisionWitnessClockMicros)();
 namespace hp2 {
 unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
 {
@@ -3426,6 +3427,9 @@ int ecstasySceneryRuns=[] {
 }();
 int ecstasySceneryStripCull=1;
 std::array<double,8> ecstasyWorldSplitMs{},ecstasyDiscardWorldSplitMs{};
+// Diagnostic (Vita micro clock, every 16th call): RenderOpaqueSceneryBatch
+// split = eligibility, instance+projection, run rebuild, cull setup, runs; [5] samples.
+std::array<std::uint64_t,8> ecstasySceneryEmitSplitMicros{}; // [6] command init, [7] CaptureInstance
 int ecstasySceneryFastMerge=1; // run union-box cull + template merge (Vita fastmerge_off.txt)
 int ecstasySceneryRunFastPath=[] {
 #if !defined(__vita__)
@@ -3437,6 +3441,15 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
     const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
     bool cullStrips)
 {
+    static std::uint32_t emitSampleCounter=0;
+    const bool emitSample=collisionWitnessClockMicros && ((++emitSampleCounter)&15u)==0;
+    std::uint32_t emitMark=emitSample ? collisionWitnessClockMicros():0u;
+    const auto emitAt=[&](std::size_t part) {
+        if(!emitSample)return;
+        const auto now=collisionWitnessClockMicros();
+        ecstasySceneryEmitSplitMicros[part]+=now-emitMark;emitMark=now;
+    };
+    if(emitSample)++ecstasySceneryEmitSplitMicros[5];
     const auto* solid=model.solid;
     if(!solid || !solid->geometry || model.replacement || solid->rigidAnimation ||
         solid->vertexAnimation || (solid->renderFlags&0x1000u) ||
@@ -3475,17 +3488,21 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
     if(!batch.eligible || std::any_of(batch.uniqueTextures.begin(),batch.uniqueTextures.end(),
         [](const TextureInfo* texture) {return !texture->pixels.Data();}))return false;
 
+    emitAt(0);
     Require(phase_==Phase::Building && view.target && view.target->enabled && view.matricesCalculated,
         "Opaque scenery batch lost its live view");
     EcstasyDrawCommand command;
     command.kind=EcstasyDrawKind::SolidStrip;command.model=&model;command.cachedOpaqueScenery=true;
     command.view=&view;command.target=view.target;command.clipClass=2;
     command.textureQScale=view.pixelScale;
+    emitAt(6);
     command.instance=&CaptureInstance(localToWorld,view,lightContext);
+    emitAt(7);
     const auto& projection=CaptureProjection(view);
     const auto* root=model.resources && model.resources->catalogueRoot ?
         model.resources->catalogueRoot:model.resources;
     const auto* fallback=root?root->defaultLightMaterial:nullptr;
+    emitAt(1);
     if(ecstasySceneryRuns) {
         const bool lit=lightContext!=nullptr;
         if(!batch.runsValid || batch.runLit!=lit || batch.runInGame!=inGameMaterials_ || batch.runFallback!=fallback) {
@@ -3528,6 +3545,7 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
         // An intersecting model drops the strips that ecstasyDetermineVisibleStrips
         // (mode 1, non-angular) drops: screen-clip bounds outside. A model inside
         // the clip volume keeps every strip, as there. GPU clipping does the rest.
+        emitAt(2);
         float screenClip[16];
         if(cullStrips) {
             ecstasyViewLocalToScreenClip(&view,screenClip,localToWorld);
@@ -3537,6 +3555,7 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
                 if(ecstasyClassifyBounds(solid->minimum,solid->maximum,clip)==2)cullStrips=false;
             } else cullStrips=false;
         }
+        emitAt(3);
         for(std::size_t runIndex=0;runIndex<batch.runs.size();++runIndex) {
             const auto& run=batch.runs[runIndex];
             const auto* texture=batch.strips[run.first].texture;
@@ -3587,6 +3606,7 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
             commands_.push_back(command);
         }
         if(reused)reusedOpaqueSceneryStrips_+=batch.strips.size();
+        emitAt(4);
         return true;
     }
     constexpr auto noRun=std::numeric_limits<std::size_t>::max();
@@ -3728,7 +3748,11 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
             // PAL10D778 DoBlendingOnStrip copies the actual strip packet and
             // changes XYZ only. Its three embedded low bytes are two bone
             // indices and an unscaled8-bit blend value, not extra channels.
-            auto animatedStrip=std::make_unique<EditorMarkerSolidGeometry::Strip>(strip);
+            std::unique_ptr<EditorMarkerSolidGeometry::Strip> animatedStrip;
+            if(!parallel && !animatedStripPool_.empty()) {
+                animatedStrip=std::move(animatedStripPool_.back());animatedStripPool_.pop_back();
+                *animatedStrip=strip;
+            } else animatedStrip=std::make_unique<EditorMarkerSolidGeometry::Strip>(strip);
             animatedStrip->nativeVertexRevision=0;
             for(auto& position:animatedStrip->positions) {
                 std::array<std::uint32_t,3> encoded{};
@@ -3986,7 +4010,11 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         worldSplitAt(1);
         // PAL113250 follows StuffScenery11321C and precedes the sun and
         // active camera mover. NIS actors retain their actual replay poses.
-        if(i<4 && scene.track && scene.track->NisManagers())
+        // A discarded capture publishes nothing: the NIS render-side setup
+        // (ground height, phase select) is recomputed from the world clock
+        // by the next rendered frame, so skipping it changes no state read
+        // by logic (placement bounds use the constant animation key only).
+        if(scene.emitRaceGeometry && i<4 && scene.track && scene.track->NisManagers())
             (void)DrawNisObjects(*scene.track->NisManagers(),view,frame);
         worldSplitAt(2);
         // PAL113284 follows NIS and precedes RenderClans. Only the source
@@ -4240,6 +4268,8 @@ void EcstasyFrame::Release() noexcept
     for(std::size_t index=0;index<liveParticleGroups_;++index)particleGroups_[index]->clear();
     liveParticleGroups_=0;
     worldStrips_.clear();
+    try {for(auto& strip:animatedStrips_)if(animatedStripPool_.size()<4096)animatedStripPool_.push_back(std::move(strip));}
+    catch(...) {} // pool growth is optional; unpooled strips are freed below
     animatedStrips_.clear();
     for (auto* strip:retainedStrips_)strip->pool->Complete(*strip);
     retainedStrips_.clear();
