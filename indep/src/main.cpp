@@ -62,6 +62,8 @@ namespace hp2 { extern std::array<double,4> ecstasyAttachSolidPartMs; extern dou
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
 extern uint64_t collisionWitnessWarmMismatches;
+extern uint32_t (*collisionWitnessProbeClock)();
+extern uint64_t collisionWitnessKindMicros[9],collisionWitnessKindSteps[9];
 static double soundUpdatePeakMs=0;
 extern std::array<double,8> carMoverModeMs;
 extern std::array<std::uint32_t,8> carMoverModeCalls;
@@ -1388,6 +1390,16 @@ bool ApplicationRuntime::Tick()
                         ::collisionWitnessWarmMilliseconds/count,static_cast<unsigned long long>(::collisionWitnessWarmMismatches));
                     ::collisionWitnessMilliseconds=::collisionWitnessWarmMilliseconds=0;
                     s.host.RecordSessionEvent("render.witness_window",detail);
+                    if(::collisionWitnessProbeClock) {
+                        // kinds: 0 vertex, 1 edge, 2 face; pairs are first*3+second.
+                        int used=0;
+                        for(int pair=0;pair<9;++pair)
+                            used+=std::snprintf(detail+used,sizeof(detail)-used,"k%d%d_steps=%.1f k%d%d_us=%.2f ",pair/3,pair%3,
+                                ::collisionWitnessKindSteps[pair]/count,pair/3,pair%3,
+                                ::collisionWitnessKindSteps[pair]?double(::collisionWitnessKindMicros[pair])/::collisionWitnessKindSteps[pair]:0.0);
+                        s.host.RecordSessionEvent("render.witness_kinds",detail);
+                        for(int pair=0;pair<9;++pair)::collisionWitnessKindMicros[pair]=::collisionWitnessKindSteps[pair]=0;
+                    }
                     ::collisionWitnessQueries=::collisionWitnessIterations=::collisionWitnessRestarts=::collisionWitnessExhausted=0;
                 }
                 solve={};

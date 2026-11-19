@@ -11,6 +11,17 @@
 #else
 #define NFSHP2_NATIVE_SSE2 0
 #endif
+#if !NFSHP2_NATIVE_SSE2 && defined(__ARM_NEON)
+#include <arm_neon.h>
+// NEON VMLA rounds the product before the add (no fusion), so the lane
+// order ((m0*x+m1*y)+m2*z)+m3*w matches the scalar path. NEON always flushes
+// denormals; the Vita host enables this only after confirming FPSCR.FZ and a
+// bit-exact self-test (vita/selftest.cpp), otherwise the scalar path runs.
+int bMatrixNeonEnabled = 0;
+#define NFSHP2_NATIVE_NEON 1
+#else
+#define NFSHP2_NATIVE_NEON 0
+#endif
 
 void rotationMatrixIdentity(float matrix[16])
 {
@@ -74,11 +85,31 @@ void vectorMatrixTransform(float output[4], const float matrix[16], const float 
     result = _mm_add_ps(result, _mm_mul_ps(_mm_loadu_ps(matrix + 12), _mm_set1_ps(w)));
     _mm_storeu_ps(output, result);
 #else
+#if NFSHP2_NATIVE_NEON
+    if (bMatrixNeonEnabled) {
+        float32x4_t result = vmulq_n_f32(vld1q_f32(matrix), x);
+        result = vmlaq_n_f32(result, vld1q_f32(matrix + 4), y);
+        result = vmlaq_n_f32(result, vld1q_f32(matrix + 8), z);
+        result = vmlaq_n_f32(result, vld1q_f32(matrix + 12), w);
+        vst1q_f32(output, result);
+        return;
+    }
+#endif
     float result[4];
     for (int row = 0; row < 4; ++row)
         result[row] = ((matrix[row]*x + matrix[row+4]*y) + matrix[row+8]*z) + matrix[row+12]*w;
     memcpy(output, result, sizeof(result));
 #endif
+}
+
+// Scalar reference for the Vita NEON self-test.
+void vectorMatrixTransformScalar(float output[4], const float matrix[16], const float input[4])
+{
+    const float x = input[0], y = input[1], z = input[2], w = input[3];
+    float result[4];
+    for (int row = 0; row < 4; ++row)
+        result[row] = ((matrix[row]*x + matrix[row+4]*y) + matrix[row+8]*z) + matrix[row+12]*w;
+    memcpy(output, result, sizeof(result));
 }
 
 float* vectorMatrixTranspose(float output[16], const float matrix[16])
