@@ -49,7 +49,7 @@ namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; }
 extern int collisionWitnessWarmProbe;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasySceneryRuns; }
+namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -536,6 +536,18 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_runs_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryRuns = 0;
             log.Line("vita.diag", "scenery strip runs off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_stripcull_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasySceneryStripCull = 0;
+            log.Line("vita.diag", "scenery strip cull off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/frag_mediump.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyFragmentMediump = 1;
+            log.Line("vita.diag", "fragment precision mediump");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/worker_prio.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasySceneWorkerPriority = 140;
+            log.Line("vita.diag", "scene worker priority 140");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/witness_probe.txt").c_str(), &probe) >= 0) {
             collisionWitnessWarmProbe = 1;

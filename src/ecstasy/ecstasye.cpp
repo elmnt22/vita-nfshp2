@@ -155,9 +155,13 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
 }
 
 #ifdef __vita__
+// Scene jobs are short owner-blocking bursts (the caller waits for them), so
+// they may preempt the long-running gather/GL threads on cores 1-2.
+int ecstasySceneWorkerPriority=0; // 0 keeps the default priority
 void ConfigureNativeSceneWorker() noexcept
 {
     (void)sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_1|SCE_KERNEL_CPU_MASK_USER_2);
+    if(ecstasySceneWorkerPriority)(void)sceKernelChangeThreadPriority(0,ecstasySceneWorkerPriority);
 }
 #endif
 #ifdef __SWITCH__
@@ -3407,8 +3411,16 @@ int ecstasySceneryRuns=[] {
 #endif
     return 1;
 }();
+int ecstasySceneryStripCull=1;
+int ecstasySceneryRunFastPath=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_SCENERY_RUN_FAST"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 1;
+}();
 bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
-    const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext)
+    const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
+    bool cullStrips)
 {
     const auto* solid=model.solid;
     if(!solid || !solid->geometry || model.replacement || solid->rigidAnimation ||
@@ -3440,6 +3452,7 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
                 static_cast<std::uint32_t>(strip.flags)|(texture->drawFlag4Enabled?4u:0u)});
         }
         batch.textureRevision=revision;
+        batch.runsValid=false;
     }
     if(!batch.eligible || std::any_of(batch.strips.begin(),batch.strips.end(),
         [](const auto& strip) {return !strip.texture->pixels.Data();}))return false;
@@ -3455,6 +3468,87 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
     const auto* root=model.resources && model.resources->catalogueRoot ?
         model.resources->catalogueRoot:model.resources;
     const auto* fallback=root?root->defaultLightMaterial:nullptr;
+    if(ecstasySceneryRuns) {
+        const bool lit=lightContext!=nullptr;
+        if(!batch.runsValid || batch.runLit!=lit || batch.runInGame!=inGameMaterials_ || batch.runFallback!=fallback) {
+            // Same per-strip values and grouping rule as the per-strip loop below.
+            batch.runs.clear();batch.runStrips.clear();batch.materials.clear();batch.drawFlags.clear();
+            for(const auto& strip:batch.strips) {
+                const auto flags=lit?strip.flags:strip.flags&~0x1c0u;
+                const auto index=static_cast<std::size_t>(strip.geometry->lightMaterialIndex);
+                auto* material=index<geometry.lightMaterials.size()?geometry.lightMaterials[index]:nullptr;
+                if(!material)material=fallback;
+                const EditorMarkerLightMaterial* resolved=material && inGameMaterials_ && material->inGameVariant ?
+                    material->inGameVariant.get():material;
+                const auto at=static_cast<std::uint32_t>(batch.runStrips.size());
+                if(!batch.runs.empty()) {
+                    auto& run=batch.runs.back();
+                    if(batch.strips[run.first].texture==strip.texture && batch.drawFlags[run.first]==flags &&
+                        batch.materials[run.first]==resolved && run.count<0xffffu) {
+                        ++run.count;batch.runStrips.push_back(strip.geometry);
+                        batch.materials.push_back(resolved);batch.drawFlags.push_back(flags);continue;
+                    }
+                }
+                batch.runs.push_back({at,1});batch.runStrips.push_back(strip.geometry);
+                batch.materials.push_back(resolved);batch.drawFlags.push_back(flags);
+            }
+            batch.runLit=lit;batch.runInGame=inGameMaterials_;batch.runFallback=fallback;batch.runsValid=true;
+        }
+        // An intersecting model drops the strips that ecstasyDetermineVisibleStrips
+        // (mode 1, non-angular) drops: screen-clip bounds outside. A model inside
+        // the clip volume keeps every strip, as there. GPU clipping does the rest.
+        float screenClip[16];
+        if(cullStrips) {
+            ecstasyViewLocalToScreenClip(&view,screenClip,localToWorld);
+            const auto whole=ecstasyClassifyBounds(solid->minimum,solid->maximum,screenClip);
+            if(whole==1) {
+                float clip[16];ecstasyViewLocalToClip(&view,clip,localToWorld);
+                if(ecstasyClassifyBounds(solid->minimum,solid->maximum,clip)==2)cullStrips=false;
+            } else cullStrips=false;
+        }
+        for(const auto& run:batch.runs) {
+            const auto* texture=batch.strips[run.first].texture;
+            if(cullStrips) {
+                const auto start=sceneryRunStrips_.size();
+                for(std::uint32_t at=run.first;at<run.first+run.count;++at) {
+                    const auto* geometryStrip=batch.runStrips[at];
+                    if(ecstasyClassifyBounds(geometryStrip->minimum.data(),geometryStrip->maximum.data(),screenClip))
+                        sceneryRunStrips_.push_back(geometryStrip);
+                }
+                const auto visible=sceneryRunStrips_.size()-start;
+                if(!visible)continue;
+                if(command.texture!=texture) {
+                    command.texture=texture;
+                    command.clipToScreen=&CaptureMaterialProjection(*texture,projection);
+                }
+                command.drawFlags=batch.drawFlags[run.first];command.lightMaterial=batch.materials[run.first];
+                command.strip=sceneryRunStrips_[start];
+                if(visible>1) {
+                    command.sceneryRunFirst=static_cast<std::uint32_t>(start);
+                    command.sceneryRunCount=static_cast<std::uint16_t>(visible);
+                } else {
+                    sceneryRunStrips_.pop_back();command.sceneryRunFirst=0;command.sceneryRunCount=0;
+                }
+                commands_.push_back(command);
+                continue;
+            }
+            if(command.texture!=texture) {
+                command.texture=texture;
+                command.clipToScreen=&CaptureMaterialProjection(*texture,projection);
+            }
+            command.strip=batch.runStrips[run.first];command.drawFlags=batch.drawFlags[run.first];
+            command.lightMaterial=batch.materials[run.first];
+            if(run.count>1) {
+                command.sceneryRunFirst=static_cast<std::uint32_t>(sceneryRunStrips_.size());
+                command.sceneryRunCount=static_cast<std::uint16_t>(run.count);
+                sceneryRunStrips_.insert(sceneryRunStrips_.end(),batch.runStrips.begin()+run.first,
+                    batch.runStrips.begin()+run.first+run.count);
+            } else {command.sceneryRunFirst=0;command.sceneryRunCount=0;}
+            commands_.push_back(command);
+        }
+        if(reused)reusedOpaqueSceneryStrips_+=batch.strips.size();
+        return true;
+    }
     constexpr auto noRun=std::numeric_limits<std::size_t>::max();
     std::size_t runCommand=noRun;
     for(const auto& strip:batch.strips) {
@@ -6149,6 +6243,11 @@ bool NativeResidentGeometryKey(const VkSolidStripJob& job,VkResidentGeometryKey&
 // Frame-owned immutable inputs share the existing fenced vertex/fragment
 // SSBO. Its offsets never enter resident geometry. Each decoded material is
 // snapshotted once per frame; FE and IG variants retain their actual tables.
+// calls, last-input hits, slot hits, lit record builds, unlit builds, dedupe hits
+std::array<std::uint64_t,6> nativeShadingCounters{};
+// Diagnostic: particle quad screen coverage (sum of clipped bbox area in
+// output-screen units) for the main view [0] and other targets [1]; quads [2].
+std::array<double,3> nativeParticleCoverage{};
 class VkNativeFrameShading {
     using Record=std::array<std::array<float,4>,19>;
     using Key=std::array<std::uint32_t,76>;
@@ -6210,11 +6309,14 @@ public:
         // Compare the consumed source bits before rebuilding the same record
         // for every strip. Snapshots also detect changes when a diagnostic
         // caller reuses the same draw object. Nothing survives Clear().
-        if(lastInput_<inputs_.size() && inputs_[lastInput_].Matches(job,mode))return inputs_[lastInput_].index;
+        ++nativeShadingCounters[0];
+        if(lastInput_<inputs_.size() && inputs_[lastInput_].Matches(job,mode)) {++nativeShadingCounters[1];return inputs_[lastInput_].index;}
         const auto inputSlot=InputSlot(job,mode);
         if(inputs_[inputSlot].Matches(job,mode)) {
+            ++nativeShadingCounters[2];
             lastInput_=inputSlot;return inputs_[inputSlot].index;
         }
+        ++nativeShadingCounters[(job.reflection || (draw.drawFlags&0xc0u)) ? 3:4];
         const auto remember=[&](std::uint32_t first) {
             inputs_[inputSlot].Capture(job,mode,first);lastInput_=inputSlot;return first;
         };
@@ -6252,7 +6354,7 @@ public:
         Key key{};
         static_assert(sizeof(record)==sizeof(key),"Native shading record packing changed");
         std::memcpy(key.data(),record.data(),sizeof(record));
-        if(lastIndex_ && key==lastKey_)return remember(lastIndex_);
+        if(lastIndex_ && key==lastKey_) {++nativeShadingCounters[5];return remember(lastIndex_);}
         const auto hash=RecordHash(key);
         if(!records_.empty()) {
             auto slot=static_cast<std::size_t>(hash)&(records_.size()-1);
@@ -6262,6 +6364,7 @@ public:
                 // frame table supplies all 304 exact bytes without a second
                 // large key allocation or a pointer tree rebuilt each frame.
                 if(entry.hash==hash && std::memcmp(data.data()+entry.first,record.data(),sizeof(record))==0) {
+                    ++nativeShadingCounters[5];
                     lastKey_=key;lastIndex_=entry.first;return remember(lastIndex_);
                 }
                 slot=(slot+1)&(records_.size()-1);

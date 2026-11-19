@@ -17,6 +17,7 @@
 #include <set>
 
 namespace { int32_t currentZoneNumber=-1; } // PAL3302B0.
+namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; }
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
 
 SceneryInstance* sceneryFindInstanceByIndex(const Scenery* scenery,int32_t section,int32_t instance)
@@ -950,6 +951,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     }
     const auto splitLit=std::chrono::steady_clock::now();
     std::size_t splitBatched=0,splitInlineLights=0;double splitInlineLightMs=0,splitModelMs=0;
+    std::size_t splitRejected=0,splitRejectedStrips=0,splitOverLimit=0,splitOverLimitStrips=0,splitModelCommands=0;
     for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
         auto& draw=draws[drawIndex];
         std::optional<SceneLightContext> localContext;
@@ -986,29 +988,36 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         // Small opaque models can use the GPU clipper at the frustum edge.
         // Bound the extra submitted geometry before using the cached path.
         const auto* solid=draw.model->solid;
+        const bool stripCull=draw.clip==1 && hp2::ecstasySceneryStripCull && hp2::ecstasySceneryRuns;
         const bool gpuClip=draw.clip==1 && solid && solid->geometry &&
-            solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips;
+            (stripCull || solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips);
         if(solid && (draw.clip==2 || gpuClip)) {
             auto& batch=opaqueBatches_[draw.model->solid];
-            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context)) {++splitBatched;continue;}
+            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context,stripCull)) {++splitBatched;continue;}
+            ++splitRejected;splitRejectedStrips+=solid->geometry->strips.size();
+        } else if(solid && solid->geometry) {++splitOverLimit;splitOverLimitStrips+=solid->geometry->strips.size();}
         }
-        }
+        const auto commandsBefore=frame.Commands().size();
         const auto modelStart=std::chrono::steady_clock::now();
         frame.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context);
         splitModelMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-modelStart).count();
+        splitModelCommands+=frame.Commands().size()-commandsBefore;
     }
     {
         // Diagnostic: prepare / light / emit split per view (logged every 300 renders).
-        static std::array<double,5> split{};static std::array<double,4> counts{};static unsigned renders=0;
+        static std::array<double,5> split{};static std::array<double,9> counts{};static unsigned renders=0;
         const auto now=std::chrono::steady_clock::now();
         const auto ms=[](auto a,auto b){return std::chrono::duration<double,std::milli>(b-a).count();};
         split[0]+=ms(splitStarted,splitPrepared);split[1]+=ms(splitPrepared,splitLit);split[2]+=ms(splitLit,now);
         counts[0]+=draws.size();counts[1]+=splitBatched;counts[2]+=lightJobs.size();counts[3]+=splitInlineLights;
         split[3]+=splitInlineLightMs;split[4]+=splitModelMs;
+        counts[4]+=splitRejected;counts[5]+=splitRejectedStrips;counts[6]+=splitOverLimit;counts[7]+=splitOverLimitStrips;
+        counts[8]+=splitModelCommands;
         if(++renders==300) {
-            char text[256];
-            std::snprintf(text,sizeof(text),"renders=300 prepare_ms=%.3f light_ms=%.3f emit_ms=%.3f inline_light_ms=%.3f model_ms=%.3f draws=%.1f batched=%.1f light_jobs=%.1f inline_lights=%.1f",
-                split[0]/300,split[1]/300,split[2]/300,split[3]/300,split[4]/300,counts[0]/300,counts[1]/300,counts[2]/300,counts[3]/300);
+            char text[420];
+            std::snprintf(text,sizeof(text),"renders=300 prepare_ms=%.3f light_ms=%.3f emit_ms=%.3f inline_light_ms=%.3f model_ms=%.3f draws=%.1f batched=%.1f light_jobs=%.1f inline_lights=%.1f rejected=%.1f rejected_strips=%.1f over_limit=%.1f over_limit_strips=%.1f model_commands=%.1f",
+                split[0]/300,split[1]/300,split[2]/300,split[3]/300,split[4]/300,counts[0]/300,counts[1]/300,counts[2]/300,counts[3]/300,
+                counts[4]/300,counts[5]/300,counts[6]/300,counts[7]/300,counts[8]/300);
             platform::RecordSessionEvent("render.scenery_split",text);
             split={};counts={};renders=0;
         }

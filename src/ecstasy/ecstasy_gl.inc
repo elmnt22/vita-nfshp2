@@ -713,6 +713,7 @@ void GlWriteProgramCache(std::uint32_t key,GLuint program)
 }
 }
 
+int ecstasyFragmentMediump=0; // Vita frag_mediump.txt (A/B: GPU fragment cost)
 GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
 {
     auto& program=programs[key];
@@ -725,7 +726,8 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
         "#define CLAMPTL %u\n#define GPUPOS %u\n#define SHADE %u\n",
         function,texturing,alphaTest,showcase,fixedAlpha,clamp,gpuPosition,shade);
     const auto compile=[&](GLenum kind,const char* body)->GLuint {
-        const char* prelude=kind==GL_VERTEX_SHADER ? "":"precision highp float;\n";
+        const char* prelude=kind==GL_VERTEX_SHADER ? "":
+            ecstasyFragmentMediump ? "precision mediump float;\n":"precision highp float;\n";
         const char* sources[3]={prelude,defines,body};
         const GLuint shader=glCreateShader(kind);
         glShaderSource(shader,3,sources,nullptr);
@@ -909,12 +911,19 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     if((++gatherJournalFrames%300u)==0) {
         auto& steps=nativeGatherStepMilliseconds;
         if(steps[6]>0.0) {
-            char detail[400];
+            char detail[600];
             const double n=steps[6];
             std::snprintf(detail,sizeof(detail),
-                "sampled=%.0f x8 lead_ms=%.2f batch_setup_ms=%.2f solid_preamble_ms=%.2f shading_ms=%.2f acquire_ms=%.2f solid_rest_ms=%.2f append_ms=%.2f other_draws_ms=%.2f segments=%.0f prepare_ms=%.2f",
-                n,8*steps[8]/n,8*steps[9]/n,8*steps[0]/n,8*steps[1]/n,8*steps[2]/n,8*steps[3]/n,8*steps[4]/n,8*steps[5]/n,8*steps[7]/n,milliseconds(Clock::now()-renderBegin));
+                "sampled=%.0f x8 lead_ms=%.2f batch_setup_ms=%.2f solid_preamble_ms=%.2f shading_ms=%.2f acquire_ms=%.2f solid_rest_ms=%.2f append_ms=%.2f other_draws_ms=%.2f segments=%.0f prepare_ms=%.2f shading_calls=%llu last_hits=%llu slot_hits=%llu lit_builds=%llu unlit_builds=%llu dedupe=%llu",
+                n,8*steps[8]/n,8*steps[9]/n,8*steps[0]/n,8*steps[1]/n,8*steps[2]/n,8*steps[3]/n,8*steps[4]/n,8*steps[5]/n,8*steps[7]/n,milliseconds(Clock::now()-renderBegin),
+                (unsigned long long)nativeShadingCounters[0],(unsigned long long)nativeShadingCounters[1],(unsigned long long)nativeShadingCounters[2],
+                (unsigned long long)nativeShadingCounters[3],(unsigned long long)nativeShadingCounters[4],(unsigned long long)nativeShadingCounters[5]);
+            nativeShadingCounters={};
             platform::RecordSessionEvent("renderer.vitagl.gather_steps",detail);
+            std::snprintf(detail,sizeof(detail),"per_frame main_screens=%.2f other_screens=%.3f quads=%.0f",
+                nativeParticleCoverage[0]/300,nativeParticleCoverage[1]/300,nativeParticleCoverage[2]/300);
+            nativeParticleCoverage={};
+            platform::RecordSessionEvent("renderer.vitagl.particle_coverage",detail);
             steps={};
             auto& breaks=nativeBatchBreaks;
             std::snprintf(detail,sizeof(detail),"per_frame solids texture=%.0f state=%.0f index_gap=%.0f transform=%.0f shading=%.0f other=%.0f scenery texture=%.0f state=%.0f index_gap=%.0f transform=%.0f shading=%.0f other=%.0f",
