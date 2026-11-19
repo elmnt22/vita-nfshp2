@@ -57,8 +57,10 @@
 // Native terminal lifetime API in the proven weatherman.cpp definition path.
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
+static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
 namespace hp2 { void InitDisplaySystem(const GameResources& files,GameTime& clock); }
 extern std::array<double,4> worldCollisionSubPhaseMs; // indep/src/world.cpp diagnostic
+extern std::array<double,4> worldCollisionSolveMs;
 
 ApplicationBootState applicationBootState={-1};
 ApplicationFrameTiming applicationFrameTiming{};
@@ -1163,6 +1165,11 @@ bool ApplicationRuntime::Tick()
         s.frame->Seal();
         const auto sealCompleted=std::chrono::steady_clock::now();
         captureMilliseconds+=std::chrono::duration<double,std::milli>(sealStarted-captureStarted).count();
+        if(!sceneGeometryEmitted) {
+            // Diagnostic: catch-up captures that publish no geometry.
+            nativeDiscardedCaptureMs+=std::chrono::duration<double,std::milli>(sealStarted-captureStarted).count();
+            ++nativeDiscardedCaptures;
+        }
         sealMilliseconds+=std::chrono::duration<double,std::milli>(sealCompleted-sealStarted).count();
         ++captures;
         if(advancedPresentation) {
@@ -1349,6 +1356,11 @@ bool ApplicationRuntime::Tick()
                     sub[0]/count,sub[1]/count,sub[2]/count,sub[3]/count);
                 s.host.RecordSessionEvent("render.collision_window",detail);
                 sub={};
+                auto& solve=worldCollisionSolveMs;
+                std::snprintf(detail,sizeof(detail),"find_ms=%.3f queue_ms=%.3f resolve_ms=%.3f tail_ms=%.3f",
+                    solve[0]/count,solve[1]/count,solve[2]/count,solve[3]/count);
+                s.host.RecordSessionEvent("render.collision_solve",detail);
+                solve={};
             }
             const auto effectSteps=static_cast<double>(std::max<std::uint64_t>(1,s.worldProfile.sampledSteps));
             std::snprintf(detail,sizeof(detail),
@@ -1391,6 +1403,11 @@ bool ApplicationRuntime::Tick()
                 static_cast<unsigned long long>(capture.emittedCaptures),
                 static_cast<unsigned long long>(capture.discardedCaptures));
             s.host.RecordSessionEvent("render.capture_detail",detail);
+            std::snprintf(detail,sizeof(detail),"discarded=%llu discarded_ms_per_capture=%.3f discarded_ms_per_frame=%.3f",
+                static_cast<unsigned long long>(nativeDiscardedCaptures),
+                nativeDiscardedCaptures ? nativeDiscardedCaptureMs/nativeDiscardedCaptures:0.0,nativeDiscardedCaptureMs/count);
+            s.host.RecordSessionEvent("render.discarded_capture",detail);
+            nativeDiscardedCaptureMs=0;nativeDiscardedCaptures=0;
             const auto& phases=cpu.submitPhaseMilliseconds;
             double accounted=cpu.pipelineLookupMilliseconds+cpu.recordSceneMilliseconds+cpu.queueSubmitMilliseconds;
             for(const auto phase:phases)accounted+=phase;

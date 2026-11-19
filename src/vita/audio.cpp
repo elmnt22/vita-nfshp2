@@ -16,6 +16,7 @@
 #include <cmath>
 #include <chrono>
 #include <deque>
+#include <unordered_map>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -332,38 +333,43 @@ struct AudioDevice::State {
     // Stream decodes for the next request, done before taking the voice
     // lock so neither the mixer nor the game thread waits on a decode.
     using JukeboxStart=decltype(PrepareJukeboxStream(CaptureStreamDecodeRange(std::declval<const WorldAudioRequest&>())));
-    std::optional<PcmWave> predecoded;
     std::shared_ptr<AsyncResult<JukeboxStart>> jukeboxOpen;
     uint64_t jukeboxOpenSequence{};
     AudioWorker worker;
-    void PreDecode(const WorldAudioRequest& operation)
+    void PreDecode(const WorldAudioRequest&) {}
+    // Stream/chain ranges (speech, scanner) read the memory card and decode
+    // ADPCM on the worker; Apply returns Blocked until this request's PCM is
+    // ready, so the game thread never waits on file I/O. Order is unchanged.
+    // Keyed by request sequence: the queue may apply later independent
+    // requests while an earlier one is still Blocked on its decode.
+    std::unordered_map<uint64_t,std::shared_ptr<AsyncResult<PcmWave>>> streamDecodes;
+    bool DecodedRange(const WorldAudioRequest& operation,PcmWave& pcm)
     {
-        predecoded.reset();
-        if(operation.instance && operation.instance->retiring && operation.kind!=WORLD_AUDIO_STOP)return;
-        switch(operation.kind) {
-        case WORLD_AUDIO_OPEN_STREAM:
-            if(!operation.streamSource || !operation.instance || operation.streamSource->movie)return;
-            // Jukebox opens decode on the worker (Apply returns Blocked meanwhile).
-            if(operation.instance->completionKind!=WORLD_AUDIO_COMPLETION_JUKEBOX)
-                predecoded.emplace(DecodeSoundStreamRange(operation));
-            return;
-        case WORLD_AUDIO_APPEND_CHAIN:
-        case WORLD_AUDIO_OPEN_CHAIN:
-            predecoded.emplace(DecodeSoundStreamRange(operation));
-            return;
-        default:
-            return;
+        auto found=streamDecodes.find(operation.sequence);
+        if(found==streamDecodes.end()) {
+            auto range=CaptureStreamDecodeRange(operation);
+            auto job=std::make_shared<AsyncResult<PcmWave>>();
+            found=streamDecodes.emplace(operation.sequence,job).first;
+            worker.Post([job,range=std::move(range)]() {
+                try {job->value.emplace(DecodeStreamRangeSnapshot(range));}
+                catch(...) {job->error=std::current_exception();}
+                job->done.store(true,std::memory_order_release);
+            });
         }
-    }
-    PcmWave DecodedRange(const WorldAudioRequest& operation)
-    {
-        if(predecoded) {auto pcm=std::move(*predecoded);predecoded.reset();return pcm;}
-        return DecodeSoundStreamRange(operation);
+        if(!found->second->done.load(std::memory_order_acquire))return false;
+        auto job=std::move(found->second);
+        streamDecodes.erase(found);
+        pcm=job->Take();
+        return true;
     }
     NativeAudioApply Apply(const WorldAudioRequest& operation)
     {
-        if(operation.instance && operation.instance->retiring && operation.kind!=WORLD_AUDIO_STOP)
+        if(operation.instance && operation.instance->retiring && operation.kind!=WORLD_AUDIO_STOP) {
+            // A cancelled request never returns for its decode; finished
+            // jobs are dropped here, unfinished ones when they complete.
+            streamDecodes.erase(operation.sequence);
             return NativeAudioApply::Cancelled;
+        }
         switch(operation.kind) {
         case WORLD_AUDIO_INITIALIZE_DEVICE:
             StartOutput();
@@ -460,7 +466,8 @@ struct AudioDevice::State {
                 voice.Append(std::move(stream.first.pcm));
                 voice.opened=true;
             } else {
-                auto pcm=DecodedRange(operation);
+                PcmWave pcm;
+                if(!DecodedRange(operation,pcm))return NativeAudioApply::Blocked;
                 auto& voice=Allocate(operation,pcm.channels);
                 voice.Append(std::move(pcm));
                 voice.opened=true;
@@ -469,7 +476,8 @@ struct AudioDevice::State {
         }
         case WORLD_AUDIO_APPEND_CHAIN:
         case WORLD_AUDIO_OPEN_CHAIN: {
-            auto pcm=DecodedRange(operation);
+            PcmWave pcm;
+            if(!DecodedRange(operation,pcm))return NativeAudioApply::Blocked;
             auto* voice=Find(operation);
             if(!voice) {
                 if(operation.kind==WORLD_AUDIO_APPEND_CHAIN)

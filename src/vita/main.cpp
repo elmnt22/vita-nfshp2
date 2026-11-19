@@ -45,6 +45,8 @@ unsigned int _newlib_heap_size_user = 330u * 1024u * 1024u;
 unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 }
 
+namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; }
+
 namespace {
 class VitaLog;
 VitaLog* g_log{};
@@ -98,6 +100,13 @@ public:
                 char detail[96];
                 std::snprintf(detail, sizeof(detail), "cross period=%u hold=%u until=%u", period, hold, until);
                 log_.Line("vita.autopad", detail);
+                // Optional 4th/5th fields: quick-race track number and direction.
+                int track = -1, reverse = 0;
+                if (std::fscanf(file, "%d %d", &track, &reverse) >= 1 && track >= 0) {
+                    ::hp2::debugQuickRaceTrack = track; ::hp2::debugQuickRaceReverse = reverse;
+                    std::snprintf(detail, sizeof(detail), "track=%d reverse=%d", track, reverse);
+                    log_.Line("vita.autopad_track", detail);
+                }
             }
             std::fclose(file);
         }

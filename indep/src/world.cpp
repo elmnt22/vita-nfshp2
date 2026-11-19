@@ -10,6 +10,8 @@
 #include "indep/inc/CarDriver.hpp"
 #include "indep/inc/Player.hpp"
 std::array<double,4> worldCollisionSubPhaseMs{};
+// Diagnostic split of collisionSystemStep: obsolete+find, queue, resolve loop, tail.
+std::array<double,4> worldCollisionSolveMs{};
 #include "indep/inc/World.hpp"
 #include "indep/inc/RaceCoordinator.hpp"
 #include "indep/inc/Race.hpp"
@@ -662,13 +664,22 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         if (collisionPairObsolete(system,pair)) collisionPairDestroy(system,pair);
         pair=next;
     }
+    using SolveClock=std::chrono::steady_clock;
+    auto solveMark=SolveClock::now();
+    const auto solvePhase=[&](int index) {
+        const auto now=SolveClock::now();
+        worldCollisionSolveMs[index]+=std::chrono::duration<double,std::milli>(now-solveMark).count();
+        solveMark=now;
+    };
     for (CollisionShape* shape=system->space->root.next;shape!=&system->space->root;shape=shape->next)
         if (shape->active && shape->dirty) collisionSystemFindPairs(system,system->participants[shape->id]);
+    solvePhase(0);
     for (pair=system->pairRoot.next;pair!=&system->pairRoot;pair=pair->next) {
         pair->processedCount=0;
         collisionPairQueueContact(system,pair);
         if (system->result!=COLLISION_SYSTEM_OK) return system->result;
     }
+    solvePhase(1);
     system->responseIterations=0;
     while (system->contactRoot.next!=&system->contactRoot && system->responseIterations<20) {
         CollisionQueuedContact* contact=system->contactRoot.next;
@@ -699,6 +710,7 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
                     }
         if (system->result!=COLLISION_SYSTEM_OK) return system->result;
     }
+    solvePhase(2);
     while (system->contactRoot.next!=&system->contactRoot) collisionSystemDetachContact(system->contactRoot.next);
     // PAL14DC58..14DC8C traverses the live collision list, including
     // expanded pool blocks. Save next before the actual destructor unlinks.
@@ -709,6 +721,7 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         if (!((float)ticks*0.0002500000118743628f<0.3f)) collisionSystemRemoveImpact(system,impact->pair);
         impact=next;
     }
+    solvePhase(3);
     return system->result;
 }
 
