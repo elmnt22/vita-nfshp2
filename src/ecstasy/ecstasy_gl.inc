@@ -199,7 +199,11 @@ varying vec4 v_col;
 void main()
 {
 #if TEXTURING
+#if AFFINE
+    vec2 uv=v_uvq.xy;
+#else
     vec2 uv=v_uvq.xy/v_uvq.z;
+#endif
 #if CLAMPTL
     uv=clamp(uv,u_fparam.yz*0.5,u_fparam.yz*1.5);
 #endif
@@ -713,18 +717,19 @@ void GlWriteProgramCache(std::uint32_t key,GLuint program)
 }
 }
 
+int ecstasyAffineUV=1; // Vita affine_off.txt restores the projective divide everywhere
 int ecstasyFragmentMediump=0; // Vita frag_mediump.txt (A/B: GPU fragment cost)
 GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
 {
     auto& program=programs[key];
     if(program.program || program.failed)return program;
     const unsigned function=key&3u,texturing=(key>>2)&1u,alphaTest=(key>>3)&3u,showcase=(key>>5)&1u,
-        fixedAlpha=(key>>6)&1u,clamp=(key>>7)&1u,gpuPosition=(key>>8)&1u,shade=(key>>9)&1u;
-    char defines[256];
+        fixedAlpha=(key>>6)&1u,clamp=(key>>7)&1u,gpuPosition=(key>>8)&1u,shade=(key>>9)&1u,affine=(key>>10)&1u;
+    char defines[288];
     std::snprintf(defines,sizeof(defines),
         "#define FUNC %u\n#define TEXTURING %u\n#define ATEST %u\n#define SHOWCASE %u\n#define AFIX %u\n"
-        "#define CLAMPTL %u\n#define GPUPOS %u\n#define SHADE %u\n",
-        function,texturing,alphaTest,showcase,fixedAlpha,clamp,gpuPosition,shade);
+        "#define CLAMPTL %u\n#define GPUPOS %u\n#define SHADE %u\n#define AFFINE %u\n",
+        function,texturing,alphaTest,showcase,fixedAlpha,clamp,gpuPosition,shade,affine);
     const auto compile=[&](GLenum kind,const char* body)->GLuint {
         const char* prelude=kind==GL_VERTEX_SHADER ? "":
             ecstasyFragmentMediump ? "precision mediump float;\n":"precision highp float;\n";
@@ -744,7 +749,7 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     };
     const auto compileStarted=std::chrono::steady_clock::now();
     bool cached=false;
-    if(const auto binary=GlReadProgramCache(key);!binary.empty()) {
+    if(const auto binary=GlReadProgramCache(key|(ecstasyFragmentMediump ? 0x80000000u:0u));!binary.empty()) {
         program.program=glCreateProgram();
         glProgramBinary(program.program,0,binary.data(),static_cast<GLsizei>(binary.size()));
         GLint linked=0;glGetProgramiv(program.program,GL_LINK_STATUS,&linked);
@@ -772,7 +777,7 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
         platform::RecordSessionEvent("renderer.vitagl.link_failed",detail);
         glDeleteProgram(program.program);program.program=0;program.failed=true;return program;
     }
-    GlWriteProgramCache(key,program.program);
+    GlWriteProgramCache(key|(ecstasyFragmentMediump ? 0x80000000u:0u),program.program);
     }
     const auto location=[&](const char* name) {return glGetUniformLocation(program.program,name);};
     program.m0=location("u_m0");program.m1=location("u_m1");program.m2=location("u_m2");program.m3=location("u_m3");
@@ -1106,6 +1111,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             key|=(batch.clampTopLeft && texturing ? 1u:0u)<<7;
             key|=(batch.nativeGpuPosition ? 1u:0u)<<8;
             key|=(shade ? 1u:0u)<<9;
+            key|=(batch.affineUV && texturing && ecstasyAffineUV ? 1u:0u)<<10;
             auto& program=Program(key);
             if(!program.program) {++skipped;return;}
             if(&program!=activeProgram) {

@@ -1094,6 +1094,7 @@ private:
     std::uint32_t nextFeedbackGroup_{};
     std::vector<EcstasyDrawCommand> pendingAlphaCommands_;
     std::vector<std::uint64_t> attachPermuteScratch_; // raw command bytes (AttachSolidPolys)
+    std::vector<EcstasyDrawCommand> attachSwap_; // spare command buffer (AttachSolidPolys swap)
     std::vector<const EditorMarkerSolidGeometry::Strip*> sceneryRunStrips_;
     // Native temporary capacity only. Neither scratch list survives a call
     // with live elements, so it cannot retain a track/texture borrower.
