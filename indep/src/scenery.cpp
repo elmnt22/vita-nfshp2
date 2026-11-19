@@ -1,3 +1,4 @@
+#include <chrono>
 #include "indep/inc/Scenery.hpp"
 #include "indep/inc/NativeRenderSettings.hpp"
 #include "indep/inc/Ecstasy.hpp"
@@ -623,6 +624,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     // original temporary cull-list allocation; their entries still borrow
     // the same models, placements, source trees and viewport camera.
     Require(view.view && view.matricesCalculated,"Scenery rendering requires current view matrices");
+    const auto splitStarted=std::chrono::steady_clock::now();
     Require(std::isfinite(view.sourcePixelScale) && view.sourcePixelScale>0.0f,
         "Scenery thresholds require the calculated source focal scale");
     // Copy the issuing camera/projection values once. Loaded section/model
@@ -922,6 +924,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     }
     // StuffScenery publishes in the exact leaf traversal order. Fully inside
     // entries set eModel flag4; intersecting entries use strip-level culling.
+    const auto splitPrepared=std::chrono::steady_clock::now();
     auto* resources=models_->resourceRegistry;
     std::optional<SceneLightContext> worldContext;
     std::vector<std::size_t> lightJobs;
@@ -942,6 +945,8 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             },128);
         }
     }
+    const auto splitLit=std::chrono::steady_clock::now();
+    std::size_t splitBatched=0;
     for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
         auto& draw=draws[drawIndex];
         std::optional<SceneLightContext> localContext;
@@ -974,10 +979,25 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips;
         if(solid && (draw.clip==2 || gpuClip)) {
             auto& batch=opaqueBatches_[draw.model->solid];
-            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context))continue;
+            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context)) {++splitBatched;continue;}
         }
 #endif
         frame.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context);
+    }
+    {
+        // Diagnostic: prepare / light / emit split per view (logged every 300 renders).
+        static std::array<double,3> split{};static std::array<double,3> counts{};static unsigned renders=0;
+        const auto now=std::chrono::steady_clock::now();
+        const auto ms=[](auto a,auto b){return std::chrono::duration<double,std::milli>(b-a).count();};
+        split[0]+=ms(splitStarted,splitPrepared);split[1]+=ms(splitPrepared,splitLit);split[2]+=ms(splitLit,now);
+        counts[0]+=draws.size();counts[1]+=splitBatched;counts[2]+=lightJobs.size();
+        if(++renders==300) {
+            char text[256];
+            std::snprintf(text,sizeof(text),"renders=300 prepare_ms=%.3f light_ms=%.3f emit_ms=%.3f draws=%.1f batched=%.1f light_jobs=%.1f",
+                split[0]/300,split[1]/300,split[2]/300,counts[0]/300,counts[1]/300,counts[2]/300);
+            platform::RecordSessionEvent("render.scenery_split",text);
+            split={};counts={};renders=0;
+        }
     }
     if(journalSample) {
         char detail[1536]{};
