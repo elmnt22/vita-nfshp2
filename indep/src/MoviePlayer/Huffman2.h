@@ -32,6 +32,10 @@ public:
     void BuildDecodeTab();
     void InitDecompress(const std::uint8_t* input, std::size_t bytes);
     void Decompress(std::int16_t* output, std::uint32_t count);
+    void DecompressReference(std::int16_t* output, std::uint32_t count);
+    bool SameState(const Huffman& other) const noexcept {
+        return bits_ == other.bits_ && bitCount_ == other.bitCount_ && inputAt_ == other.inputAt_;
+    }
     std::uint32_t GETBITS(std::uint32_t count);
 
     // Bounded native byte-view diagnostics, not additional original methods.

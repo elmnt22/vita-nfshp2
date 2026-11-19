@@ -596,6 +596,11 @@ std::shared_ptr<const PcmWave> NativeSoundBankCache::Acquire(size_t metadataOffs
     }
     auto result=std::make_shared<const PcmWave>(std::move(pcm));
     entry.pcm=result;++decodeCount_;
+#if defined(__vita__)
+    constexpr size_t retainedBudget=8u*1024u*1024u;
+    const auto bytes=result->samples.size()*sizeof(int16_t);
+    if (retainedBytes_+bytes<=retainedBudget) {entry.retained=result;retainedBytes_+=bytes;}
+#endif
     return result;
 }
 
