@@ -578,30 +578,72 @@ std::shared_ptr<const PcmWave> NativeSoundBankCache::Acquire(size_t metadataOffs
     if (metadataOffset<12u || (metadataOffset-12u)%52u ||
         (metadataOffset-12u)/52u>=entries_.size())
         throw std::out_of_range("PCM request is outside the retained MSH table");
-    auto& entry=entries_[(metadataOffset-12u)/52u];
+    const auto index=(metadataOffset-12u)/52u;
+    auto& entry=entries_[index];
     if (!entry.resident)throw std::invalid_argument("Stream descriptor is not a resident PCM cue");
     if (auto existing=entry.pcm.lock())return existing;
-    const auto* encoded=bank_->encodedSamples+entry.offset;
-    PcmWave pcm;
+    std::shared_ptr<const PcmWave> result;
     try {
-        pcm=entry.bytes>=12u && word(encoded,entry.bytes,0)==0x46464952u ?
-            DecodePcmWave(encoded,entry.bytes):
-            DecodePs2Adpcm(encoded,entry.bytes,entry.rate,1,16,true);
-        if (pcm.channels!=1)
-            throw std::invalid_argument("PCM channels disagree with the authored mono MSH cue");
+        result=DecodeEntry(index);
     } catch (const std::exception& error) {
         const char* name=reinterpret_cast<const char*>(bank_->metadata+metadataOffset);
         const char* end=std::find(name,name+32,'\0');
         throw std::runtime_error(std::string("MSH cue '")+std::string(name,end)+"': "+error.what());
     }
-    auto result=std::make_shared<const PcmWave>(std::move(pcm));
     entry.pcm=result;++decodeCount_;
+    Retain(index,result);
+    return result;
+}
+
+std::shared_ptr<const PcmWave> NativeSoundBankCache::DecodeEntry(size_t index) const
+{
+    const auto& entry=entries_[index];
+    const auto* encoded=bank_->encodedSamples+entry.offset;
+    PcmWave pcm=entry.bytes>=12u && word(encoded,entry.bytes,0)==0x46464952u ?
+        DecodePcmWave(encoded,entry.bytes):
+        DecodePs2Adpcm(encoded,entry.bytes,entry.rate,1,16,true);
+    if (pcm.channels!=1)
+        throw std::invalid_argument("PCM channels disagree with the authored mono MSH cue");
+    return std::make_shared<const PcmWave>(std::move(pcm));
+}
+
+void NativeSoundBankCache::Retain(size_t index,const std::shared_ptr<const PcmWave>& pcm)
+{
 #if defined(__vita__)
     constexpr size_t retainedBudget=8u*1024u*1024u;
-    const auto bytes=result->samples.size()*sizeof(int16_t);
-    if (retainedBytes_+bytes<=retainedBudget) {entry.retained=result;retainedBytes_+=bytes;}
+    auto& entry=entries_[index];
+    const auto bytes=pcm->samples.size()*sizeof(int16_t);
+    if (!entry.retained && retainedBytes_+bytes<=retainedBudget) {entry.retained=pcm;retainedBytes_+=bytes;}
+#else
+    (void)index;(void)pcm;
 #endif
-    return result;
+}
+
+std::vector<std::shared_ptr<const PcmWave>> NativeSoundBankCache::DecodeResidentRange(size_t first,size_t count) const
+{
+    std::vector<std::shared_ptr<const PcmWave>> decoded;
+    for (size_t index=first;index<entries_.size() && index<first+count;++index) {
+        std::shared_ptr<const PcmWave> pcm;
+        if (entries_[index].resident) {
+            try {pcm=DecodeEntry(index);} catch (const std::exception&) {}
+        }
+        decoded.push_back(std::move(pcm));
+    }
+    return decoded;
+}
+
+void NativeSoundBankCache::InstallDecoded(size_t first,std::vector<std::shared_ptr<const PcmWave>>&& decoded)
+{
+    for (size_t offset=0;offset<decoded.size() && first+offset<entries_.size();++offset) {
+        auto& pcm=decoded[offset];
+        if (!pcm)continue;
+        auto& entry=entries_[first+offset];
+        if (entry.retained || !entry.pcm.expired())continue;
+        // Same bytes Acquire would decode; installed only within budget
+        // (an unretained warm result would just expire again).
+        Retain(first+offset,pcm);
+        if (entry.retained) {entry.pcm=pcm;++decodeCount_;}
+    }
 }
 
 size_t NativeSoundBankCache::ResidentBytes() const

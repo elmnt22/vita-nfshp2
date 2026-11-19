@@ -58,6 +58,11 @@
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
+namespace hp2 { extern std::array<double,4> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; }
+extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
+extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
+extern uint64_t collisionWitnessWarmMismatches;
+static double soundUpdatePeakMs=0;
 extern std::array<double,8> carMoverModeMs;
 extern std::array<std::uint32_t,8> carMoverModeCalls;
 namespace hp2 { void InitDisplaySystem(const GameResources& files,GameTime& clock); }
@@ -1107,7 +1112,9 @@ bool ApplicationRuntime::Tick()
                 Require(carCinematicAdvanceOwned(screen.last)==CAR_CINEMATIC_OK,"Active camera mover update failed");
             {
                 platform::ScopedNativeDuration measure(s.audioTiming,&s.slowFrame.audio);
+                const auto soundStarted=std::chrono::steady_clock::now();
                 s.AudioResult(soundUpdate(s.soundBindings,s.trackPhase->Simulation(),s.speechStream,s.profilesOwner,s.parameters,s.flow,&s.joylog),"Original sound frame");
+                soundUpdatePeakMs=std::max(soundUpdatePeakMs,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-soundStarted).count());
                 if(s.audioOpened)s.AudioResult(s.host.PumpAudio(s.sound),"Physical audio frame");
             }
             joystickUpdatePortRumblers(s.input,s.clock);
@@ -1352,6 +1359,9 @@ bool ApplicationRuntime::Tick()
                 s.longestPresentIntervalMs,static_cast<unsigned long long>(s.presentsOver33ms),
                 static_cast<unsigned long long>(s.presentsOver50ms));
             s.host.RecordSessionEvent("render.phase_window",detail);
+            std::snprintf(detail,sizeof(detail),"sound_update_peak_ms=%.3f",soundUpdatePeakMs);
+            s.host.RecordSessionEvent("render.sound_update",detail);
+            soundUpdatePeakMs=0;
             {
                 auto& sub=worldCollisionSubPhaseMs;
                 std::snprintf(detail,sizeof(detail),"pre_step_ms=%.3f participants_ms=%.3f solve_ms=%.3f post_step_ms=%.3f",
@@ -1371,6 +1381,15 @@ bool ApplicationRuntime::Tick()
                 std::snprintf(detail,sizeof(detail),"find_ms=%.3f queue_ms=%.3f resolve_ms=%.3f tail_ms=%.3f",
                     solve[0]/count,solve[1]/count,solve[2]/count,solve[3]/count);
                 s.host.RecordSessionEvent("render.collision_solve",detail);
+                {
+                    std::snprintf(detail,sizeof(detail),"queries_per_frame=%.1f iterations_per_query=%.2f restarts_per_frame=%.2f exhausted_per_frame=%.2f witness_ms=%.3f warm_ms=%.3f warm_mismatches=%llu",
+                        ::collisionWitnessQueries/count,::collisionWitnessQueries?double(::collisionWitnessIterations)/::collisionWitnessQueries:0.0,
+                        ::collisionWitnessRestarts/count,::collisionWitnessExhausted/count,::collisionWitnessMilliseconds/count,
+                        ::collisionWitnessWarmMilliseconds/count,static_cast<unsigned long long>(::collisionWitnessWarmMismatches));
+                    ::collisionWitnessMilliseconds=::collisionWitnessWarmMilliseconds=0;
+                    s.host.RecordSessionEvent("render.witness_window",detail);
+                    ::collisionWitnessQueries=::collisionWitnessIterations=::collisionWitnessRestarts=::collisionWitnessExhausted=0;
+                }
                 solve={};
             }
             const auto effectSteps=static_cast<double>(std::max<std::uint64_t>(1,s.worldProfile.sampledSteps));
@@ -1414,6 +1433,15 @@ bool ApplicationRuntime::Tick()
                 static_cast<unsigned long long>(capture.emittedCaptures),
                 static_cast<unsigned long long>(capture.discardedCaptures));
             s.host.RecordSessionEvent("render.capture_detail",detail);
+            {
+                const auto& parts=hp2::ecstasyAttachSolidPartMs;
+                std::snprintf(detail,sizeof(detail),"attach_solid_ms=%.3f calls_per_frame=%.2f commands_per_frame=%.1f command_bytes=%u partition_ms=%.3f chains_ms=%.3f priority_ms=%.3f permute_ms=%.3f",
+                    hp2::ecstasyAttachSolidMs/count,hp2::ecstasyAttachSolidCalls/count,hp2::ecstasyAttachSolidCommands/count,
+                    static_cast<unsigned>(sizeof(EcstasyDrawCommand)),parts[0]/count,parts[1]/count,parts[2]/count,parts[3]/count);
+                hp2::ecstasyAttachSolidPartMs={};
+                s.host.RecordSessionEvent("render.attach_solid",detail);
+                hp2::ecstasyAttachSolidMs=0;hp2::ecstasyAttachSolidCalls=0;hp2::ecstasyAttachSolidCommands=0;
+            }
             std::snprintf(detail,sizeof(detail),"discarded=%llu discarded_ms_per_capture=%.3f discarded_ms_per_frame=%.3f",
                 static_cast<unsigned long long>(nativeDiscardedCaptures),
                 nativeDiscardedCaptures ? nativeDiscardedCaptureMs/nativeDiscardedCaptures:0.0,nativeDiscardedCaptureMs/count);
