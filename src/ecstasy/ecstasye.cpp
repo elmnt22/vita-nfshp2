@@ -6541,6 +6541,10 @@ struct VkDrawTexture {
     std::uint64_t generation{};
     std::uint64_t validatedGather{};
     bool uploadCompleted{};
+    // vitaGL: earlier uploads of this same TextureInfo whose pixels came
+    // from a different immutable buffer (texture animations swap frame
+    // pointers). Reused by exact Matches instead of decoding again.
+    std::vector<VkDrawTexture> variants;
     bool OwnersAlive() const noexcept
     {
         return !metadataOwner.expired() && !pixelOwner.expired() &&
