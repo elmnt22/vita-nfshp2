@@ -151,10 +151,14 @@ private:
         uint32_t rate{};
         bool resident{};
         std::weak_ptr<const PcmWave> pcm;
+        // Vita only: decoded cues stay resident (bounded per bank) so a
+        // replayed effect is not re-decoded on the game thread.
+        std::shared_ptr<const PcmWave> retained;
     };
     const WorldAudioBank* bank_;
     std::vector<Entry> entries_;
     size_t decodeCount_{};
+    size_t retainedBytes_{};
 };
 
 // Native consumer policy belongs to this individually proven audio owner.

@@ -275,10 +275,11 @@ public:
         if (result != WORLD_AUDIO_OK) log_.Line("audio.failure", audio_.Error().c_str());
         if (++audioPumps_ % 300u == 0) {
             const auto audio = audio_.TakeStatistics();
-            char detail[200];
+            char detail[256];
             std::snprintf(detail, sizeof(detail),
-                "pumps=300 decode_ms=%.3f commands_ms=%.3f pump_peak_ms=%.3f mix_ms_total=%.1f buffers=%llu voices_peak=%u",
-                audio.decodeMilliseconds / 300.0, audio.commandMilliseconds / 300.0, pumpPeakUs_ / 1000.0, audio.mixMilliseconds,
+                "pumps=300 decode_ms=%.3f commands_ms=%.3f pump_peak_ms=%.3f apply_peak_ms=%.3f apply_peak_kind=%d mix_ms_total=%.1f buffers=%llu voices_peak=%u",
+                audio.decodeMilliseconds / 300.0, audio.commandMilliseconds / 300.0, pumpPeakUs_ / 1000.0,
+                audio.applyPeakMilliseconds, audio.applyPeakKind, audio.mixMilliseconds,
                 static_cast<unsigned long long>(audio.buffers), audio.voicesPeak);
             pumpPeakUs_ = 0;
             log_.Line("audio.backend_window", detail);

@@ -623,7 +623,14 @@ WorldAudioResult AudioDevice::Pump()
         check(state_->commands.Pump(state_->queue,256,[this](const auto& request) {
             state_->PreDecode(request);
             std::lock_guard<std::mutex> lock(state_->mutex);
-            return state_->Apply(request);
+            const auto applyStarted=std::chrono::steady_clock::now();
+            const auto applied=state_->Apply(request);
+            const auto applyMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-applyStarted).count();
+            if(applyMs>state_->statistics.applyPeakMilliseconds) {
+                state_->statistics.applyPeakMilliseconds=applyMs;
+                state_->statistics.applyPeakKind=static_cast<int>(request.kind);
+            }
+            return applied;
         }),"Pump retained Vita audio commands");
         std::lock_guard<std::mutex> statisticsLock(state_->mutex);
         state_->statistics.decodeMilliseconds+=std::chrono::duration<double,std::milli>(commandsStarted-decodeStarted).count();
