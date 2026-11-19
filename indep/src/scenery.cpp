@@ -984,8 +984,8 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         const auto written=std::snprintf(detail,sizeof(detail),
             "view=%d world_frame=%d eye=(%.3f,%.3f,%.3f) forward=(%.4f,%.4f,%.4f) "
             "fov=%.3f source_focal=%.3f output_focal=%.3f pvs_zone=%d pvs_fallback=%d "
-            "loaded_sections=%zu selected_sections=%zu candidate_instances=%zu tree_nodes=%zu "
-            "visible_instances=%zu lod=(%zu,%zu,%zu) commands=%zu sections=",
+            "loaded_sections=%" HP2_ZU " selected_sections=%" HP2_ZU " candidate_instances=%" HP2_ZU " tree_nodes=%" HP2_ZU " "
+            "visible_instances=%" HP2_ZU " lod=(%" HP2_ZU ",%" HP2_ZU ",%" HP2_ZU ") commands=%" HP2_ZU " sections=",
             view.id,worldFrames,static_cast<double>(camera.eye[0]),static_cast<double>(camera.eye[1]),
             static_cast<double>(camera.eye[2]),static_cast<double>(camera.forward[0]),
             static_cast<double>(camera.forward[1]),static_cast<double>(camera.forward[2]),

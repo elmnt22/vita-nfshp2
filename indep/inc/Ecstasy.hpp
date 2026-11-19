@@ -1266,7 +1266,7 @@ struct EcstasyVulkanFrameStatistics {
     bool reusedPreparation{};
 };
 
-#ifdef HP2_ENABLE_VULKAN
+#if defined(HP2_ENABLE_VULKAN) || defined(HP2_ENABLE_VITAGL)
 // Physical graphics transport in the individually proven EcstasyE.cpp owner.
 // Handles and upload allocations belong to this device; authored resources
 // and gameplay state remain in their existing owners. Zero ELF-body credit.

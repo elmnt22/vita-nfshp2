@@ -63,7 +63,7 @@ void logResourceEvent(const char* event,const std::string& filename,ResourceFile
     char detail[1792]{};
     char pendingText[32]{};
     if (pending==std::numeric_limits<std::size_t>::max())std::snprintf(pendingText,sizeof(pendingText),"unknown");
-    else std::snprintf(pendingText,sizeof(pendingText),"%zu",pending);
+    else std::snprintf(pendingText,sizeof(pendingText),"%" HP2_ZU "",pending);
     std::snprintf(detail,sizeof(detail),
         "file=\"%.650s\" kind=%s type=%d flags=0x%X request=%d bytes=%llu pending=%s elapsed_ms=%.3f error=\"%.700s\"",
         filename.c_str(),resourceKindName(kind),type,static_cast<unsigned>(flags),request,
