@@ -5,6 +5,12 @@
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
+#include <cstdio>
+#include <cstring>
+#include "bware/inc/bWare.hpp"
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 namespace hp2::movie {
 DCTBlockState movieDctBlockState{2, 2, 0, 0};
@@ -43,18 +49,19 @@ std::array<std::int32_t, 8> twoFrequencies(std::int32_t dc, std::int32_t ac) noe
               sum(dc, third), difference(dc, second), difference(dc, first), difference(dc, ac)}};
 }
 
-std::uint8_t clipped(std::int32_t value, bool centered) {
-    // Both pointers borrow the SAME actual768-byte Codec-owned clamp array.
-    // This is an inlined source table lookup, not a second clipping owner.
+// Both pointers borrow the SAME 768-byte Codec-owned clamp array at fixed
+// offsets (+384 centered, +256 plain; never reassigned). The unsigned-wrap
+// index test accepts exactly the addresses the 64-bit range test accepted.
+[[noreturn]] HP2_MOVIE_COLD void clampOutOfRange() {
+    throw std::out_of_range("MV3 IDCT sample exceeds authored clamp storage");
+}
+inline std::uint8_t clipped(std::int32_t value, bool centered) {
     const auto& state = movieCodecShared;
-    const auto base = reinterpret_cast<std::uintptr_t>(state.clamp.data());
-    const auto zero = reinterpret_cast<std::uintptr_t>(
-        centered ? state.dctClampZero : state.clampZero);
-    const auto address = static_cast<std::int64_t>(zero) + value;
-    if (address < static_cast<std::int64_t>(base) ||
-        address >= static_cast<std::int64_t>(base + state.clamp.size()))
-        throw std::out_of_range("MV3 IDCT sample exceeds authored clamp storage");
-    return *reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(address));
+    const auto zero = static_cast<std::uint32_t>(
+        (centered ? state.dctClampZero : state.clampZero) - state.clamp.data());
+    const auto index = static_cast<std::uint32_t>(value) + zero;
+    if (HP2_MOVIE_UNLIKELY(index >= state.clamp.size())) clampOutOfRange();
+    return state.clamp[index];
 }
 
 void requireBlock(const std::int16_t* coefficients, const std::int16_t* quantizer,
@@ -202,6 +209,103 @@ void recordButterflyRange(const std::array<std::int32_t, 8>& x,
     range.Include(middleC); range.Include(middleB); range.Include(middleA);
     for (auto value : transformed) range.Include(value);
 }
+#if defined(__ARM_NEON)
+// Lane-parallel eightFrequencies: wrapped 32-bit adds/products and
+// arithmetic shifts, exactly the scalar sum/difference/product/shifted.
+inline void eightFrequenciesNeon(const int32x4_t* f, int32x4_t* out) noexcept {
+    const auto evenSum = vaddq_s32(f[2], f[6]);
+    const auto evenRotation = vshrq_n_s32(vmulq_n_s32(vsubq_s32(f[2], f[6]), 362), 8);
+    const auto evenDifference = vsubq_s32(evenRotation, evenSum);
+    const auto oddDifferenceA = vsubq_s32(f[5], f[3]);
+    const auto oddDifferenceB = vsubq_s32(f[1], f[7]);
+    const auto oddSumA = vaddq_s32(f[5], f[3]);
+    const auto oddSumB = vaddq_s32(f[1], f[7]);
+    const auto coupled = vshrq_n_s32(vmulq_n_s32(vaddq_s32(oddDifferenceA, oddDifferenceB), 473), 8);
+    const auto oddRotatedA = vaddq_s32(vshrq_n_s32(vmulq_n_s32(oddDifferenceA, -669), 8), coupled);
+    const auto oddRotatedB = vsubq_s32(vshrq_n_s32(vmulq_n_s32(oddDifferenceB, 277), 8), coupled);
+    const auto oddRotation = vshrq_n_s32(vmulq_n_s32(vsubq_s32(oddSumB, oddSumA), 362), 8);
+    const auto oddTotal = vaddq_s32(oddSumA, oddSumB);
+    const auto oddMiddleA = vsubq_s32(oddRotatedA, oddTotal);
+    const auto oddMiddleB = vsubq_s32(oddRotation, oddMiddleA);
+    const auto oddMiddleC = vaddq_s32(oddRotatedB, oddMiddleB);
+    const auto baseSum = vaddq_s32(f[0], f[4]);
+    const auto baseDifference = vsubq_s32(f[0], f[4]);
+    const auto even0 = vaddq_s32(baseSum, evenSum);
+    const auto even1 = vaddq_s32(baseDifference, evenDifference);
+    const auto even2 = vsubq_s32(baseDifference, evenDifference);
+    const auto even3 = vsubq_s32(baseSum, evenSum);
+    out[0] = vaddq_s32(even0, oddTotal); out[1] = vaddq_s32(even1, oddMiddleA);
+    out[2] = vaddq_s32(even2, oddMiddleB); out[3] = vsubq_s32(even3, oddMiddleC);
+    out[4] = vaddq_s32(even3, oddMiddleC); out[5] = vsubq_s32(even2, oddMiddleB);
+    out[6] = vsubq_s32(even1, oddMiddleA); out[7] = vsubq_s32(even0, oddTotal);
+}
+inline void transpose4(int32x4_t& a, int32x4_t& b, int32x4_t& c, int32x4_t& d) noexcept {
+    const auto ab = vtrnq_s32(a, b), cd = vtrnq_s32(c, d);
+    a = vcombine_s32(vget_low_s32(ab.val[0]), vget_low_s32(cd.val[0]));
+    b = vcombine_s32(vget_low_s32(ab.val[1]), vget_low_s32(cd.val[1]));
+    c = vcombine_s32(vget_high_s32(ab.val[0]), vget_high_s32(cd.val[0]));
+    d = vcombine_s32(vget_high_s32(ab.val[1]), vget_high_s32(cd.val[1]));
+}
+// m[row*2+half] holds columns 4*half..4*half+3 of the row; transposes in place.
+inline void transpose8(int32x4_t* m) noexcept {
+    transpose4(m[0], m[2], m[4], m[6]);
+    transpose4(m[9], m[11], m[13], m[15]);
+    transpose4(m[1], m[3], m[5], m[7]);
+    transpose4(m[8], m[10], m[12], m[14]);
+    for (int i = 0; i < 4; ++i) {const auto t = m[i * 2 + 1]; m[i * 2 + 1] = m[8 + i * 2]; m[8 + i * 2] = t;}
+}
+// Both passes; result rows (row*2+half), already shifted by 5.
+inline void fullIdctNeon(const std::int16_t* coefficients, const std::int16_t* quantizer, int32x4_t* rows) noexcept {
+    int32x4_t m[16];
+    for (int row = 0; row < 8; ++row) for (int half = 0; half < 2; ++half)
+        m[row * 2 + half] = vmull_s16(vld1_s16(coefficients + row * 8 + half * 4), vld1_s16(quantizer + row * 8 + half * 4));
+    int32x4_t frequency[8], transformed[8];
+    for (int half = 0; half < 2; ++half) {
+        for (int row = 0; row < 8; ++row) frequency[row] = m[row * 2 + half];
+        eightFrequenciesNeon(frequency, transformed);
+        for (int row = 0; row < 8; ++row) m[row * 2 + half] = transformed[row];
+    }
+    transpose8(m); // m[column*2+half] = rows 4*half.. of that column
+    for (int half = 0; half < 2; ++half) {
+        for (int column = 0; column < 8; ++column) frequency[column] = m[column * 2 + half];
+        eightFrequenciesNeon(frequency, transformed);
+        for (int column = 0; column < 8; ++column) m[column * 2 + half] = vshrq_n_s32(transformed[column], 5);
+    }
+    transpose8(m);
+    for (int i = 0; i < 16; ++i) rows[i] = m[i];
+}
+// True when every lane's clamp index (value+zero) is inside the 768-byte table.
+inline bool clampable(const int32x4_t* values, std::int32_t zero) noexcept {
+    auto ok = vdupq_n_u32(0xffffffffu);
+    const auto limit = vdupq_n_u32(768);
+    for (int i = 0; i < 16; ++i)
+        ok = vandq_u32(ok, vcltq_u32(vreinterpretq_u32_s32(vaddq_s32(values[i], vdupq_n_s32(zero))), limit));
+    const auto folded = vand_u32(vget_low_u32(ok), vget_high_u32(ok));
+    return (vget_lane_u32(folded, 0) & vget_lane_u32(folded, 1)) == 0xffffffffu;
+}
+inline uint8x8_t narrowRow(int32x4_t low, int32x4_t high) noexcept {
+    return vqmovn_u16(vcombine_u16(vqmovun_s32(low), vqmovun_s32(high)));
+}
+#endif
+
+#if defined(__ARM_NEON)
+thread_local bool scalarIdctOnly = false;
+// Verifies the first blocks of each kind against the scalar transform.
+struct NeonIdctCheck {
+    const char* name; unsigned blocks = 0, mismatches = 0;
+    bool Want() const noexcept { return blocks < 4000 && !scalarIdctOnly; }
+    void Record(const std::uint8_t* neon, std::int32_t pitch, const std::uint8_t* scalar) {
+        for (int row = 0; row < 8; ++row) mismatches += std::memcmp(neon + row * pitch, scalar + row * 8, 8) != 0;
+        if (++blocks == 4000) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "kind=%s blocks=4000 mismatched_rows=%u", name, mismatches);
+            platform::RecordSessionEvent("movie.neon_idct_verify", text);
+        }
+    }
+};
+NeonIdctCheck idctCheck{"intra"}, idctAddCheck{"residual"};
+#endif
+
 } // namespace
 
 // PAL232498..2328B0. Every input and quantizer is read before the first
@@ -245,6 +349,26 @@ void DCTImage::IDCT(std::int16_t* coefficients, const std::int16_t* quantizer,
             IDCTColReference(coefficients + column, output + column, pitch);
         return;
     }
+#if defined(__ARM_NEON)
+    if (mode != 0 && !scalarIdctOnly) {
+        int32x4_t rows[16];
+        fullIdctNeon(coefficients, quantizer, rows);
+        // Centered table (zero at +384): in range it equals saturate(value+128).
+        if (clampable(rows, 384)) {
+            const auto bias = vdupq_n_s32(128);
+            auto* first = output;
+            for (int row = 0; row < 8; ++row, output += pitch)
+                vst1_u8(output, narrowRow(vaddq_s32(rows[row * 2], bias), vaddq_s32(rows[row * 2 + 1], bias)));
+            if (idctCheck.Want()) {
+                std::uint8_t reference[64];
+                scalarIdctOnly = true; IDCT(coefficients, quantizer, reference, 8); scalarIdctOnly = false;
+                idctCheck.Record(first, pitch, reference);
+            }
+            return;
+        }
+        // Out-of-table lanes: the scalar path below raises the same error.
+    }
+#endif
     std::array<std::array<std::int32_t, 8>, 8> intermediate;
     ButterflyRange range;
     for (std::size_t column = 0; column < 8; ++column) {
@@ -328,6 +452,31 @@ void DCTImage::IDCTAdd4(const std::int16_t* coefficients, const std::int16_t* qu
 void DCTImage::IDCTAdd(const std::int16_t* coefficients, const std::int16_t* quantizer,
                        std::uint8_t* output, std::int32_t pitch) const {
     requireBlock(coefficients, quantizer, output, pitch);
+#if defined(__ARM_NEON)
+    if (!scalarIdctOnly) {
+        std::uint8_t original[64];
+        const bool check = idctAddCheck.Want();
+        if (check) for (int row = 0; row < 8; ++row) std::memcpy(original + row * 8, output + row * pitch, 8);
+        int32x4_t rows[16];
+        fullIdctNeon(coefficients, quantizer, rows);
+        for (int row = 0; row < 8; ++row) {
+            const auto pixels = vmovl_u8(vld1_u8(output + row * pitch));
+            rows[row * 2] = vaddq_s32(rows[row * 2], vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(pixels))));
+            rows[row * 2 + 1] = vaddq_s32(rows[row * 2 + 1], vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(pixels))));
+        }
+        // Plain table (zero at +256): in range it equals saturate(delta+pixel).
+        if (clampable(rows, 256)) {
+            auto* first = output;
+            for (int row = 0; row < 8; ++row, output += pitch)
+                vst1_u8(output, narrowRow(rows[row * 2], rows[row * 2 + 1]));
+            if (check) {
+                scalarIdctOnly = true; IDCTAdd(coefficients, quantizer, original, 8); scalarIdctOnly = false;
+                idctAddCheck.Record(first, pitch, original);
+            }
+            return;
+        }
+    }
+#endif
     const auto intermediate = fullFirstPass(coefficients, quantizer);
     for (const auto& row : intermediate) {
         const auto residual = eightFrequencies(row);

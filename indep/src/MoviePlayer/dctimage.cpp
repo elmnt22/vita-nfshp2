@@ -3,6 +3,14 @@
 #include "Huffman2.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <vector>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+#include "bware/inc/bWare.hpp"
 #include <limits>
 #include <cstring>
 #include <new>
@@ -54,13 +62,16 @@ std::int16_t scaledQuantizer(std::int16_t value, std::int16_t scale) {
         static_cast<std::int16_t>(-1 - static_cast<std::int32_t>(low ^ 65535u));
 }
 
-std::uint8_t moviePixel(std::int32_t value) {
+[[noreturn]] HP2_MOVIE_COLD void moviePixelOutOfRange() {
+    throw std::out_of_range("MV3 converted pixel exceeds shared clamp storage");
+}
+// Same accepted range as the 64-bit address test (unsigned wrap below zero).
+inline std::uint8_t moviePixel(std::int32_t value) {
     const auto& state = movieCodecShared;
-    const auto base = reinterpret_cast<std::uintptr_t>(state.clamp.data());
-    const auto address = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(state.clampZero)) + value;
-    if (address < static_cast<std::int64_t>(base) || address >= static_cast<std::int64_t>(base + state.clamp.size()))
-        throw std::out_of_range("MV3 converted pixel exceeds shared clamp storage");
-    return *reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(address));
+    const auto index = static_cast<std::uint32_t>(value) +
+        static_cast<std::uint32_t>(state.clampZero - state.clamp.data());
+    if (HP2_MOVIE_UNLIKELY(index >= state.clamp.size())) moviePixelOutOfRange();
+    return state.clamp[index];
 }
 
 // Actual source dependency2361D0: pack8x4 tiles in scan order. This is an
@@ -262,10 +273,84 @@ void DCTImage::IDCTAddImageData4(std::uint8_t* output, std::int32_t pitch,
 
 // PAL2363A8..236614. Original2x2 chroma reuse, integer products/truncation,
 // channel/alpha store order and optional signed output pitch are retained.
+#if defined(__ARM_NEON)
+namespace {
+// (a*ka + b*kb)/256 with C truncation toward zero, eight lanes.
+inline int16x8_t chromaTerm(int16x8_t a, std::int16_t ka, int16x8_t b, std::int16_t kb) {
+    int32x4_t low = vmlal_n_s16(vmull_n_s16(vget_low_s16(a), ka), vget_low_s16(b), kb);
+    int32x4_t high = vmlal_n_s16(vmull_n_s16(vget_high_s16(a), ka), vget_high_s16(b), kb);
+    const auto bias = vdupq_n_s32(255);
+    low = vshrq_n_s32(vaddq_s32(low, vandq_s32(vshrq_n_s32(low, 31), bias)), 8);
+    high = vshrq_n_s32(vaddq_s32(high, vandq_s32(vshrq_n_s32(high, 31), bias)), 8);
+    return vcombine_s16(vmovn_s32(low), vmovn_s32(high));
+}
+inline void storeRow(std::uint8_t* destination, const std::uint8_t* luma,
+                     const int16x8x2_t& first, const int16x8x2_t& second, const int16x8x2_t& third) {
+    const auto y = vld1q_u8(luma);
+    const auto low = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(y)));
+    const auto high = vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(y)));
+    uint8x16x4_t pixels;
+    // Saturating narrow == the 0/identity/255 clamp table for |term|<=256.
+    pixels.val[0] = vcombine_u8(vqmovun_s16(vaddq_s16(low, first.val[0])), vqmovun_s16(vaddq_s16(high, first.val[1])));
+    pixels.val[1] = vcombine_u8(vqmovun_s16(vaddq_s16(low, second.val[0])), vqmovun_s16(vaddq_s16(high, second.val[1])));
+    pixels.val[2] = vcombine_u8(vqmovun_s16(vaddq_s16(low, third.val[0])), vqmovun_s16(vaddq_s16(high, third.val[1])));
+    pixels.val[3] = vdupq_n_u8(255);
+    vst4q_u8(destination, pixels);
+}
+} // namespace
+
+// NEON form of ToImage32 below (same bytes); width must be a multiple of 16.
+static void toImage32Neon(std::uint8_t* output, const DCTFrameView& frame,
+                          std::int32_t width, std::int32_t height, bool flip) {
+    const std::ptrdiff_t pitch = flip ? -static_cast<std::ptrdiff_t>(width) * 4 : static_cast<std::ptrdiff_t>(width) * 4;
+    auto* top = flip ? output + static_cast<std::ptrdiff_t>(height - 1) * width * 4 : output;
+    const auto offset = vdup_n_u8(128);
+    for (std::int32_t y = 0; y < height; y += 2, top += pitch * 2) {
+        const auto* chromaU = frame.u + static_cast<std::size_t>(y / 2) * (width / 2);
+        const auto* chromaV = frame.v + static_cast<std::size_t>(y / 2) * (width / 2);
+        const auto* lumaTop = frame.y + static_cast<std::size_t>(y) * width;
+        for (std::int32_t x = 0; x < width; x += 16) {
+            const auto u = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(chromaU + x / 2), offset));
+            const auto v = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(chromaV + x / 2), offset));
+            const auto first = chromaTerm(v, 359, v, 0);
+            const auto second = chromaTerm(u, -88, v, -183);
+            const auto third = chromaTerm(u, 454, u, 0);
+            const auto f = vzipq_s16(first, first), g = vzipq_s16(second, second), b = vzipq_s16(third, third);
+            storeRow(top + x * 4, lumaTop + x, f, g, b);
+            storeRow(top + pitch + x * 4, lumaTop + width + x, f, g, b);
+        }
+    }
+}
+#endif
+
 void DCTImage::ToImage32(std::uint8_t* output, std::uint32_t flags) const {
     const auto& state = *storage_;
     if (output == nullptr || !state.current || (state.width & 1) || (state.height & 1))
         throw std::invalid_argument("MV3 pixel conversion requires an even initialized frame and output");
+    const auto frame = state.View(state.current);
+#if defined(__ARM_NEON)
+    if ((state.width & 15) == 0) {
+        toImage32Neon(output, frame, state.width, state.height, (flags & 1u) != 0);
+        // One-time on-device proof against the scalar conversion below.
+        static std::atomic<bool> verified{false};
+        if (!verified.exchange(true)) {
+            std::vector<std::uint8_t> reference(static_cast<std::size_t>(state.width) * state.height * 4);
+            ToImage32Scalar(reference.data(), flags);
+            std::size_t mismatches = 0;
+            for (std::size_t at = 0; at < reference.size(); ++at) mismatches += reference[at] != output[at];
+            char text[96];
+            std::snprintf(text, sizeof(text), "bytes=%u mismatches=%u", static_cast<unsigned>(reference.size()),
+                static_cast<unsigned>(mismatches));
+            platform::RecordSessionEvent("movie.neon_verify", text);
+        }
+        return;
+    }
+#endif
+    ToImage32Scalar(output, flags);
+}
+
+void DCTImage::ToImage32Scalar(std::uint8_t* output, std::uint32_t flags) const {
+    const auto& state = *storage_;
     const auto frame = state.View(state.current);
     const std::ptrdiff_t pitch = (flags & 1u) ? -static_cast<std::ptrdiff_t>(state.width) * 4 :
         static_cast<std::ptrdiff_t>(state.width) * 4;
@@ -392,6 +477,7 @@ void DCTImage::CopyMotionBlocks(std::uint8_t* planarOutput) const {
 // PAL234B38..2361CC. Whole release decoder: actual kind/motion packet,
 // Huffman row stream, signed DC prediction, current/previous planar owners,
 // six-block transform order, conversion and allocation-role swap.
+static unsigned movieKindCounts[8] = {};
 void DCTImage::ToImage(std::uint8_t* output, std::size_t outputBytes,
                        std::int8_t quality, std::int8_t qualityDelta, std::uint32_t flags) {
     auto& state = *storage_;
@@ -402,6 +488,7 @@ void DCTImage::ToImage(std::uint8_t* output, std::size_t outputBytes,
         if (at > state.encodedBytes || bytes > state.encodedBytes - at)
             throw std::out_of_range("MV3 coded packet exceeds its retained readable byte span");
     };
+    const auto phaseStart = std::chrono::steady_clock::now();
     InitIDCTTables(quality, qualityDelta);
     const bool intra = (flags & 2u) != 0;
     requireBytes(0, intra ? 2 : 4);
@@ -478,6 +565,7 @@ void DCTImage::ToImage(std::uint8_t* output, std::size_t outputBytes,
                 const auto pitch = planeBlock < 4 ? state.width : state.width / 2;
                 const auto& table = state.quantizers[(planeBlock < 4 ? 0u : 2u) + (residual ? 1u : 0u)];
                 const auto* coefficients = state.coefficients.get() + coefficientAt;
+                ++movieKindCounts[(residual ? 4u : 0u) + kind];
                 if (residual) {
                     if (kind == 1) IDCTAddImageData1(destination, pitch, coefficients, table.data());
                     else if (kind == 2) IDCTAddImageData4(destination, pitch, coefficients, table.data());
@@ -492,10 +580,28 @@ void DCTImage::ToImage(std::uint8_t* output, std::size_t outputBytes,
             }
         }
     }
+    const auto phaseBlocks = std::chrono::steady_clock::now();
     if ((flags & 4u) && (state.initializationOption == 0 || state.initializationOption == 1)) {
         const auto required = static_cast<std::size_t>(state.pixelCount) * 4;
         if (output == nullptr || outputBytes < required) throw std::out_of_range("MV332-bit output span");
         ToImage32(output, flags);
+    }
+    {
+        // Diagnostic: block decode vs colour conversion (every 100 frames).
+        static double blockMs = 0, convertMs = 0; static unsigned frames = 0, intraFrames = 0;
+        const auto now = std::chrono::steady_clock::now();
+        blockMs += std::chrono::duration<double, std::milli>(phaseBlocks - phaseStart).count();
+        convertMs += std::chrono::duration<double, std::milli>(now - phaseBlocks).count();
+        intraFrames += intra ? 1u : 0u;
+        if (++frames == 100) {
+            char text[224];
+            std::snprintf(text, sizeof(text), "frames=100 intra=%u block_ms=%.2f convert_ms=%.2f kinds=%u/%u/%u/%u residual=%u/%u/%u/%u",
+                intraFrames, blockMs / 100, convertMs / 100, movieKindCounts[0], movieKindCounts[1], movieKindCounts[2],
+                movieKindCounts[3], movieKindCounts[4], movieKindCounts[5], movieKindCounts[6], movieKindCounts[7]);
+            std::fill_n(movieKindCounts, 8, 0u);
+            platform::RecordSessionEvent("movie.decode_split", text);
+            blockMs = convertMs = 0; frames = intraFrames = 0;
+        }
     }
     SwapPrevBuffer();
 }
