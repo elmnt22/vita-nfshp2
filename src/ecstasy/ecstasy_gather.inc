@@ -17,7 +17,8 @@ std::array<float,2> nativeUiCanvasScale(float width,float height)
 // Diagnostic (sampled frames): solid-draw gather steps, milliseconds summed
 // since the last read: 0 preamble, 1 shading, 2 resident acquire, 3 rest of
 // the solid branch, 4 batch append, 5 non-solid draws; [6] = sampled frames.
-std::array<double,7> nativeGatherStepMilliseconds{};
+std::array<double,10> nativeGatherStepMilliseconds{};
+std::array<double,6> nativeBatchBreaks{};
 
 void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     std::vector<VkVertex>& output,std::vector<std::uint32_t>& elementIndices,
@@ -175,7 +176,22 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         if(!batches.empty() && batch.Continues(batches.back())) {
             batches.back().count+=batch.count;
             batches.back().nativeSpanCount+=batch.nativeSpanCount;
-        } else batches.push_back(batch);
+        } else {
+            if(!batches.empty()) {
+                // Why adjacent draws stay separate (diagnostic only).
+                const auto& previous=batches.back();
+                std::size_t reason=5;
+                if(previous.texture!=batch.texture)reason=0;
+                else if(!batch.SameDrawState(previous))reason=1;
+                else if(previous.first+previous.count!=batch.first ||
+                    (batch.residentGeometry && previous.nativeSpanFirst+previous.nativeSpanCount!=batch.nativeSpanFirst))reason=2;
+                else if(batch.nativeLocalToClip!=previous.nativeLocalToClip || batch.nativeClipMapping!=previous.nativeClipMapping ||
+                    batch.nativeTextureQScale!=previous.nativeTextureQScale)reason=3;
+                else if(batch.nativeShadingIndex!=previous.nativeShadingIndex)reason=4;
+                nativeBatchBreaks[reason]+=1.0;
+            }
+            batches.push_back(batch);
+        }
     };
     const auto applyDepthRange=[&](const EcstasyDrawCommand& draw,VkDrawBatch& batch) {
         const auto* projection=draw.ClipToScreen().data();
@@ -277,15 +293,20 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     NativeGatherCategoryTimer categoryTimer(sampleCategories ? &profile:nullptr);
     if(sampleCategories)nativeGatherStepMilliseconds[6]+=1.0;
     Clock::time_point stepMark{};
+    // Time one draw in eight (scaled at report) so clock reads do not
+    // dominate the sampled frame; [7] counts timed segments for calibration.
+    std::uint32_t stepDrawIndex=0;bool timeDraw=false;
     const auto step=[&](std::size_t index) {
-        if(!sampleCategories)return;
+        if(!timeDraw)return;
+        nativeGatherStepMilliseconds[7]+=1.0;
         const auto now=Clock::now();
         nativeGatherStepMilliseconds[index]+=std::chrono::duration<double,std::milli>(now-stepMark).count();
         stepMark=now;
     };
     for (const auto& draw:frame.Commands()) {
         categoryTimer.Enter(draw);
-        if(sampleCategories)stepMark=Clock::now();
+        timeDraw=sampleCategories && (stepDrawIndex++&7u)==0;
+        if(timeDraw)stepMark=Clock::now();
 #if defined(HP2_ENABLE_VITAGL) && !defined(HP2_VITA_ENVIRONMENT_MAP)
         // The vitaGL passes drop environment-map (target 14) draws and their
         // readers; do not gather what would be discarded.
@@ -437,6 +458,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         if(!targetSample) {
             textureIndex=resolveTexture(*draw.texture,NativeDrawClampsTexture(draw));wire=draw.texture->descriptor->authoredRecord;
         }
+        step(8);
         const bool particle=draw.kind==EcstasyDrawKind::ParticleGroup;
         const bool mirrorOverlay=draw.kind==EcstasyDrawKind::MirrorOverlayPolygon;
         const bool ui=draw.kind==EcstasyDrawKind::FlailerPolygon || rearSample || mirrorOverlay || filter || remap || screenPolygon;
@@ -520,6 +542,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             }
         }
         Require(batch.textureFunction>=0 && batch.textureFunction<=3,"Invalid authored GS texture function");
+        step(9);
         const auto& raster=rasterFor(*draw.target,destination);
         const auto displayWidth=raster.displayWidth,displayHeight=raster.displayHeight;
         const auto outputWidth=raster.outputWidth,outputHeight=raster.outputHeight;

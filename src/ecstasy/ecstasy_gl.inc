@@ -803,13 +803,18 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     if((++gatherJournalFrames%300u)==0) {
         auto& steps=nativeGatherStepMilliseconds;
         if(steps[6]>0.0) {
-            char detail[320];
+            char detail[400];
             const double n=steps[6];
             std::snprintf(detail,sizeof(detail),
-                "sampled=%.0f solid_preamble_ms=%.2f shading_ms=%.2f acquire_ms=%.2f solid_rest_ms=%.2f append_ms=%.2f other_draws_ms=%.2f prepare_ms=%.2f",
-                n,steps[0]/n,steps[1]/n,steps[2]/n,steps[3]/n,steps[4]/n,steps[5]/n,milliseconds(Clock::now()-renderBegin));
+                "sampled=%.0f x8 lead_ms=%.2f batch_setup_ms=%.2f solid_preamble_ms=%.2f shading_ms=%.2f acquire_ms=%.2f solid_rest_ms=%.2f append_ms=%.2f other_draws_ms=%.2f segments=%.0f prepare_ms=%.2f",
+                n,8*steps[8]/n,8*steps[9]/n,8*steps[0]/n,8*steps[1]/n,8*steps[2]/n,8*steps[3]/n,8*steps[4]/n,8*steps[5]/n,8*steps[7]/n,milliseconds(Clock::now()-renderBegin));
             platform::RecordSessionEvent("renderer.vitagl.gather_steps",detail);
             steps={};
+            auto& breaks=nativeBatchBreaks;
+            std::snprintf(detail,sizeof(detail),"frames=300 per_frame texture=%.0f state=%.0f index_gap=%.0f transform=%.0f shading=%.0f other=%.0f",
+                breaks[0]/300,breaks[1]/300,breaks[2]/300,breaks[3]/300,breaks[4]/300,breaks[5]/300);
+            platform::RecordSessionEvent("renderer.vitagl.batch_breaks",detail);
+            breaks={};
         }
     }
     {
