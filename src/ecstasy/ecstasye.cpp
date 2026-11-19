@@ -6255,7 +6255,10 @@ private:
         sources_.erase(token);
     }
     void Touch(VkResidentGeometryEntry& entry) {
-        if(entry.lastGather!=gather_) {active_.push_back(entry.slot);entry.lastGather=gather_;}
+        // Entries touched this Gather already follow every older entry and
+        // are never evicted during it; repeated touches need no list splice.
+        if(entry.lastGather==gather_)return;
+        active_.push_back(entry.slot);entry.lastGather=gather_;
         recency_.splice(recency_.end(),recency_,entry.recency);
     }
     void Evict(std::uint32_t slot) {
@@ -6371,7 +6374,8 @@ private:
         return std::find_if(free_.begin(),free_.end(),[&](const auto& range){return range.second>=count;});
     }
     void Touch(Entries::iterator entry) {
-        if(entry->lastGather!=gather_) {active_.push_back(&*entry);entry->lastGather=gather_;}
+        if(entry->lastGather==gather_)return; // already after every older entry
+        active_.push_back(&*entry);entry->lastGather=gather_;
         entries_.splice(entries_.end(),entries_,entry);
     }
     void EraseLookup(Entries::iterator entry) {
@@ -6484,6 +6488,8 @@ private:
 bool NativeTextureReferenced(const std::vector<VkNativeTextureKey>& referenced,VkNativeTextureKey key)
 {return std::binary_search(referenced.begin(),referenced.end(),key);}
 
+// Diagnostic: bytes compared by texture validation (vitaGL journal).
+inline std::uint64_t nativeTextureCompareBytes{},nativeTextureCompares{};
 struct VkDrawTexture {
     struct OpaqueSceneryState {
         std::uint32_t blend{};
@@ -6549,6 +6555,7 @@ struct VkDrawTexture {
                 return true;
             }
 
+            nativeTextureCompareBytes+=bytes.size();++nativeTextureCompares;
             return std::memcmp(view.Data(),bytes.data(),bytes.size())==0;
         };
         return sameBytes(texture.pixels,pixelOwner,sourcePixelOffset,sourcePixels) &&
