@@ -11,6 +11,8 @@ struct AudioStatistics {
     double decodeMilliseconds{},commandMilliseconds{},mixMilliseconds{},outputMilliseconds{};
     std::uint64_t buffers{},voiceBuffers{};
     std::uint32_t voicesPeak{};
+    double applyPeakMilliseconds{};
+    int applyPeakKind{-1};
 };
 class AudioDevice final {
 public:

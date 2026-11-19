@@ -78,7 +78,14 @@ inline bool configureNativeFrameLimitQuality(int limit) noexcept {
 #endif
 }
 
+#if defined(__vita__)
+// Vita is game-thread bound: frustum-crossing scenery goes through the cached
+// GPU-clipped batch (render/GL threads have headroom) instead of per-strip
+// CPU culling in RenderModel (~90 us per model on the game thread).
+inline constexpr std::uint32_t nativeGpuSceneryClipMaximumStrips=512;
+#else
 inline constexpr std::uint32_t nativeGpuSceneryClipMaximumStrips=32;
+#endif
 
 } // namespace hp2
 #endif

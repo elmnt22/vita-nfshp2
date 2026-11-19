@@ -478,6 +478,7 @@ void DCTImage::CopyMotionBlocks(std::uint8_t* planarOutput) const {
 // Huffman row stream, signed DC prediction, current/previous planar owners,
 // six-block transform order, conversion and allocation-role swap.
 static unsigned movieKindCounts[8] = {};
+static double movieHuffmanMs = 0;
 void DCTImage::ToImage(std::uint8_t* output, std::size_t outputBytes,
                        std::int8_t quality, std::int8_t qualityDelta, std::uint32_t flags) {
     auto& state = *storage_;
@@ -528,7 +529,9 @@ void DCTImage::ToImage(std::uint8_t* output, std::size_t outputBytes,
         const auto codedBlocks = intra ? static_cast<std::uint32_t>(state.width / 16) : huffman.GetBits(8);
         if (coefficientCount > state.coefficientCount || codedBlocks > static_cast<std::uint32_t>(state.width / 16))
             throw std::out_of_range("MV3 Huffman row exceeds owned coefficient workspace");
+        const auto huffmanStart = std::chrono::steady_clock::now();
         huffman.Decompress(state.coefficients.get(), coefficientCount);
+        movieHuffmanMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - huffmanStart).count();
         std::size_t coefficientAt = 0, predictionKind = kindIndex;
         std::array<std::int16_t, 3> predictor{};
         for (std::uint32_t block = 0; block < codedBlocks; ++block) for (unsigned planeBlock = 0; planeBlock < 6; ++planeBlock) {
@@ -595,10 +598,10 @@ void DCTImage::ToImage(std::uint8_t* output, std::size_t outputBytes,
         intraFrames += intra ? 1u : 0u;
         if (++frames == 100) {
             char text[224];
-            std::snprintf(text, sizeof(text), "frames=100 intra=%u block_ms=%.2f convert_ms=%.2f kinds=%u/%u/%u/%u residual=%u/%u/%u/%u",
-                intraFrames, blockMs / 100, convertMs / 100, movieKindCounts[0], movieKindCounts[1], movieKindCounts[2],
+            std::snprintf(text, sizeof(text), "frames=100 intra=%u block_ms=%.2f huffman_ms=%.2f convert_ms=%.2f kinds=%u/%u/%u/%u residual=%u/%u/%u/%u",
+                intraFrames, blockMs / 100, movieHuffmanMs / 100, convertMs / 100, movieKindCounts[0], movieKindCounts[1], movieKindCounts[2],
                 movieKindCounts[3], movieKindCounts[4], movieKindCounts[5], movieKindCounts[6], movieKindCounts[7]);
-            std::fill_n(movieKindCounts, 8, 0u);
+            std::fill_n(movieKindCounts, 8, 0u); movieHuffmanMs = 0;
             platform::RecordSessionEvent("movie.decode_split", text);
             blockMs = convertMs = 0; frames = intraFrames = 0;
         }
