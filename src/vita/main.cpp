@@ -279,11 +279,11 @@ public:
             char detail[384];
             std::snprintf(detail, sizeof(detail),
                 "pumps=300 decode_ms=%.3f commands_ms=%.3f pump_peak_ms=%.3f apply_peak_ms=%.3f apply_peak_kind=%d "
-                "inner_peak_ms=%.3f inner_peak_music_ms=%.3f inner_peak_install_ms=%.3f inner_peak_commands_ms=%.3f inner_peak_requests=%u "
+                "inner_peak_ms=%.3f inner_peak_music_ms=%.3f inner_peak_install_ms=%.3f inner_peak_commands_ms=%.3f inner_peak_requests=%u inner_peak_lock_ms=%.3f inner_peak_apply_ms=%.3f "
                 "mix_ms_total=%.1f buffers=%llu voices_peak=%u",
                 audio.decodeMilliseconds / 300.0, audio.commandMilliseconds / 300.0, pumpPeakUs_ / 1000.0,
                 audio.applyPeakMilliseconds, audio.applyPeakKind,
-                audio.pumpPeakMilliseconds, audio.pumpPeakMusicMs, audio.pumpPeakInstallMs, audio.pumpPeakCommandsMs, audio.pumpPeakRequests,
+                audio.pumpPeakMilliseconds, audio.pumpPeakMusicMs, audio.pumpPeakInstallMs, audio.pumpPeakCommandsMs, audio.pumpPeakRequests,audio.pumpPeakLockWaitMs,audio.pumpPeakApplyMs,
                 audio.mixMilliseconds, static_cast<unsigned long long>(audio.buffers), audio.voicesPeak);
             pumpPeakUs_ = 0;
             log_.Line("audio.backend_window", detail);
@@ -320,6 +320,12 @@ public:
     {
         // Core 1: the application thread owns core 0.
         sceKernelChangeThreadCpuAffinityMask(0, SCE_KERNEL_CPU_MASK_USER_1);
+        {
+            std::uint32_t fpscr = 0;
+            asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
+            char detail[48]; std::snprintf(detail, sizeof(detail), "fpscr=0x%08x", static_cast<unsigned>(fpscr));
+            if (g_log) g_log->Line("vita.render_thread", detail);
+        }
         for (;;) {
             hp2::EcstasyFrame* frame{};
             {

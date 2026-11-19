@@ -678,22 +678,27 @@ WorldAudioResult AudioDevice::Pump()
         state_->InstallWarmedCues();
         const auto commandsStarted=std::chrono::steady_clock::now();
         std::uint32_t requests=0;
-        // Only this thread runs commands; the voice lock covers each apply
-        // (what the mixer reads), not the stream decode that precedes it.
-        check(state_->commands.Pump(state_->queue,256,[this,&requests](const auto& request) {
+        double lockWaitMs=0,applySumMs=0;
+        // Only this thread runs commands. One voice-lock hold covers the whole
+        // batch: per-request locking paid a cross-core wakeup behind the
+        // mixer each time (3-4 ms per pump). The mixer has a 21 ms buffer of
+        // slack, and no apply does file I/O or decode (those are on the worker).
+        const auto lockStarted=std::chrono::steady_clock::now();
+        std::unique_lock<std::mutex> batchLock(state_->mutex);
+        lockWaitMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lockStarted).count();
+        check(state_->commands.Pump(state_->queue,256,[this,&requests,&applySumMs](const auto& request) {
             state_->PreDecode(request);
             ++requests;
-            std::lock_guard<std::mutex> lock(state_->mutex);
             const auto applyStarted=std::chrono::steady_clock::now();
             const auto applied=state_->Apply(request);
             const auto applyMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-applyStarted).count();
+            applySumMs+=applyMs;
             if(applyMs>state_->statistics.applyPeakMilliseconds) {
                 state_->statistics.applyPeakMilliseconds=applyMs;
                 state_->statistics.applyPeakKind=static_cast<int>(request.kind);
             }
             return applied;
         }),"Pump retained Vita audio commands");
-        std::lock_guard<std::mutex> statisticsLock(state_->mutex);
         state_->statistics.decodeMilliseconds+=std::chrono::duration<double,std::milli>(commandsStarted-decodeStarted).count();
         const auto finished=std::chrono::steady_clock::now();
         state_->statistics.commandMilliseconds+=std::chrono::duration<double,std::milli>(finished-commandsStarted).count();
@@ -707,6 +712,7 @@ WorldAudioResult AudioDevice::Pump()
                 stats.pumpPeakInstallMs=Ms(commandsStarted-installStarted).count();
                 stats.pumpPeakCommandsMs=Ms(finished-commandsStarted).count();
                 stats.pumpPeakRequests=requests;
+                stats.pumpPeakLockWaitMs=lockWaitMs;stats.pumpPeakApplyMs=applySumMs;
             }
         }
         if(!state_->initialized)

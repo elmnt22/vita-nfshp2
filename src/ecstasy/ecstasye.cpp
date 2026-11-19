@@ -3951,6 +3951,8 @@ void graphicsNotifyPresentationComplete() noexcept {
 #if !defined(HP2_ENABLE_VULKAN)
 #include "src/ecstasy/vk_pod.hpp"
 #include <vitaGL.h>
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
 #include <pthread.h>
 #include <exception>
 #else
