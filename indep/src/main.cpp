@@ -59,7 +59,7 @@
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
-namespace hp2 { extern std::array<double,4> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; }
+namespace hp2 { extern std::array<double,4> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
 extern uint64_t collisionWitnessWarmMismatches;
@@ -81,7 +81,12 @@ float applicationPreviousCpuFrameRate=0.0f;
 float applicationPreviousGpuFrameRate=0.0f;
 bool applicationGpuTimingAvailable=false;
 
-namespace hp2 {int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};}
+namespace hp2 {int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};int debugBenchMirror=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_BENCH_MIRROR"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 0;
+}();}
 // PAL12EE30..12EE94; same process vector RNG. vectorRandomSeed performs
 // its actual initial bound1 draw; assigning a seed directly would differ.
 void applicationSeedRandomNumber(ReplayIntegerLog& log)
@@ -1500,6 +1505,13 @@ bool ApplicationRuntime::Tick()
                     std::snprintf(detail,sizeof(detail),"cars=%llu setup_us=%.1f flares_us=%.1f driver_us=%.1f shadows_us=%.1f body_us=%.1f wheels_us=%.1f wipers_us=%.1f",
                         static_cast<unsigned long long>(e[7]),e[0]/n,e[1]/n,e[2]/n,e[3]/n,e[4]/n,e[5]/n,e[6]/n);
                     s.host.RecordSessionEvent("render.car_split",detail);
+                    e={};
+                }
+                if(auto& e=hp2::ecstasySkinSplitMicros;e[3]) {
+                    const double n=static_cast<double>(e[3]);
+                    std::snprintf(detail,sizeof(detail),"strips=%llu verts_per=%.1f copy_us=%.2f skin_us=%.2f capture_us=%.2f",
+                        static_cast<unsigned long long>(e[3]),e[4]/n,e[0]/n,e[1]/n,e[2]/n);
+                    s.host.RecordSessionEvent("render.skin_split",detail);
                     e={};
                 }
             }

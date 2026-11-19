@@ -10,6 +10,7 @@
 #include <array>
 #include <deque>
 #include <memory>
+#include <unordered_map>
 #include <string>
 struct WeatherQuery;
 namespace hp2 { class ResourceRegistry; class EcstasyFrame; struct TextureInfo; }
@@ -669,6 +670,8 @@ struct EditorMarkerSolidGeometry {
         std::vector<std::uint8_t> nativeTriangleOrder;
         std::size_t nativeTopologyCount{};
         std::uint64_t nativeTopologyMask{};
+        // A frame-owned posed copy records its authored source (pool key).
+        const Strip* nativePoseSource{};
         std::uint64_t nativeVertexRevision{}; // Zero retains exact byte validation.
         void PrepareNativeTopology();
         void StampNativeVertexRevision() noexcept;
@@ -1137,6 +1140,14 @@ private:
     // Released posed strips of this frame object, reused (vector capacity
     // kept) by the next capture's owner-thread skinning path.
     std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>> animatedStripPool_;
+    // Released posed strips keyed by their authored source: a reused copy
+    // has matching vector capacities, so reposing never reallocates.
+    std::unordered_map<const EditorMarkerSolidGeometry::Strip*,
+        std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>>> posedStripPool_;
+    std::size_t posedStripPooled_{};
+    std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>> preposedScratch_;
+    std::unique_ptr<EditorMarkerSolidGeometry::Strip> TakePosedStrip(const EditorMarkerSolidGeometry::Strip& source);
+    void ReturnPosedStrip(std::unique_ptr<EditorMarkerSolidGeometry::Strip>& strip) noexcept;
     std::array<EcstasyDepthPalettePass,2> fogPasses_{},focusPasses_{};
     EcstasyFocusSettings focusSettings_{};
     Phase phase_{Phase::Building};
