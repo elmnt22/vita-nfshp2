@@ -18,7 +18,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__vita__)
 #include <mutex>
 #endif
 #endif
@@ -26,7 +26,7 @@
 namespace {
 constexpr std::size_t MaximumSaveBytes=4u*1024u*1024u;
 std::atomic<std::uint64_t> nextTemporaryFile{0};
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__vita__)
 // SD filesystems have no hard links. Serialize this process's profile
 // publications so exclusive writes can still check and rename as one operation.
 std::mutex switchSaveWriteMutex;
@@ -43,8 +43,8 @@ cMC::cMC(const char* directory)
     :root_(directory && *directory ? std::filesystem::u8path(directory) : DefaultDirectory())
 {
     std::error_code ec;
-#ifdef __SWITCH__
-    if(root_.native().compare(0,6,"sdmc:/")==0)
+#if defined(__SWITCH__) || defined(__vita__)
+    if(root_.native().compare(0,6,"sdmc:/")==0 || root_.native().find(':')!=std::string::npos)
         root_=root_.lexically_normal();
     else
 #endif
@@ -98,6 +98,10 @@ cMC::Result cMC::MCGetInfo(std::uint64_t& freeBytes)
     std::filesystem::create_directories(root_,ec);
     if(ec)return Fail("Prepare native save directory",ec);
     const auto space=std::filesystem::space(root_,ec);
+#ifdef __vita__
+    // newlib on Vita has no statvfs; profiles are a few KB on a large card.
+    if(ec){freeBytes=std::uint64_t(1)<<30;return Ok;}
+#endif
     if(ec)return Fail("Read available save space",ec);
     freeBytes=space.available;return Ok;
 }
@@ -148,7 +152,7 @@ cMC::Result cMC::MCReadFile(const char* name,std::vector<std::uint8_t>& destinat
         if(!CloseHandle(file) && !failure)failure=static_cast<int>(GetLastError());
         close.file=INVALID_HANDLE_VALUE;
 #else
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__vita__)
         const int file=open(path.c_str(),O_RDONLY);
 #else
         const int file=open(path.c_str(),O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
@@ -194,7 +198,7 @@ cMC::Result cMC::MCWrite(const char* name,const void* source,std::size_t bytes,b
     if(!source || !bytes || bytes>MaximumSaveBytes){error_="Invalid native save buffer size";return InvalidSize;}
     std::filesystem::path temporary;
     try {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__vita__)
         std::lock_guard<std::mutex> lock(switchSaveWriteMutex);
 #endif
         const auto target=FilePath(name);std::uint64_t available=0;
@@ -224,7 +228,7 @@ cMC::Result cMC::MCWrite(const char* name,const void* source,std::size_t bytes,b
         if(!CloseHandle(file) && !failure)failure=static_cast<int>(GetLastError());
         if(!failure && !MoveFileExW(temporary.c_str(),target.c_str(),(replaceExisting?MOVEFILE_REPLACE_EXISTING:0)|MOVEFILE_WRITE_THROUGH))failure=static_cast<int>(GetLastError());
 #else
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__vita__)
         const int file=open(temporary.c_str(),O_CREAT|O_EXCL|O_WRONLY,0600);
 #else
         const int file=open(temporary.c_str(),O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW,0600);
@@ -239,7 +243,7 @@ cMC::Result cMC::MCWrite(const char* name,const void* source,std::size_t bytes,b
         }
         if(!failure && fsync(file))failure=errno;
         if(close(file) && !failure)failure=errno;
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__vita__)
         if(!failure && exists) {
             // Horizon can reject a rename over an existing file. Retain the
             // old profile until the new one has been published successfully.

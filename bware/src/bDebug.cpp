@@ -54,7 +54,7 @@ std::uint32_t fixedTickerDifference(std::uint32_t from, std::uint32_t to) noexce
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#elif !defined(__SWITCH__)
+#elif !defined(__SWITCH__) && !defined(__vita__)
 #include <unistd.h>
 #endif
 
@@ -73,7 +73,7 @@ extern "C" int32_t bGetComputerName(char* output,int32_t capacity)
 #if defined(_WIN32)
     DWORD available=static_cast<DWORD>(capacity);
     if(GetComputerNameA(output,&available)) return 1;
-#elif !defined(__SWITCH__)
+#elif !defined(__SWITCH__) && !defined(__vita__)
     if(gethostname(output,static_cast<size_t>(capacity))==0) return 1;
 #endif
     output[0]='\0';

@@ -343,6 +343,8 @@ endif()
 # Standalone resource utility: no renderer, audio runtime or Python dependency.
 if(NINTENDO_SWITCH)
     include(cmake/Switch.cmake)
+elseif(CMAKE_CXX_COMPILER MATCHES "arm-vita-eabi")
+    include(cmake/Vita.cmake)
 else()
     add_subdirectory(tools/archive)
 endif()
