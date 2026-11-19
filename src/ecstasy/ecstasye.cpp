@@ -2542,7 +2542,20 @@ void EcstasyFrame::AttachSolidPolys()
         // random 152-byte moves (~2 ms/frame on Vita). Same final order.
         std::size_t first=0;
         while(first<order.size() && order[first]==first)++first;
-        if(first<order.size()) {
+        if(first<order.size() && rangeBegin+first<order.size()-first) {
+            // Small prefix: write prefix + permuted range into the spare
+            // buffer and swap (one copy of the range instead of two).
+            const auto keep=rangeBegin+first;
+            attachSwap_.resize(rangeBegin+order.size());
+            std::memcpy(static_cast<void*>(attachSwap_.data()),commands_.data(),keep*sizeof(EcstasyDrawCommand));
+            const auto* source=&commands_[rangeBegin];
+            auto* destination=&attachSwap_[rangeBegin];
+            for(std::size_t index=first;index<order.size();++index)
+                std::memcpy(static_cast<void*>(destination+index),static_cast<const void*>(source+order[index]),
+                    sizeof(EcstasyDrawCommand));
+            if(attachSwap_.capacity()<commands_.capacity())attachSwap_.reserve(commands_.capacity());
+            commands_.swap(attachSwap_);
+        } else if(first<order.size()) {
             const auto count=order.size()-first;
             const auto words=(count*sizeof(EcstasyDrawCommand)+sizeof(std::uint64_t)-1)/sizeof(std::uint64_t);
             if(attachPermuteScratch_.size()<words)attachPermuteScratch_.resize(words);
@@ -7117,6 +7130,9 @@ struct VkDrawBatch {
     bool postProcess{};
     bool showcaseEnvironmentBlend{};
     bool wireframe{},untextured{},clampTopLeft{};
+    // Every CPU-written vertex of this batch has q==1 exactly, so uv/q==uv
+    // (vitaGL samples without the per-fragment divide; same result).
+    bool affineUV{};
     VkRect2D scissor{};
     VkViewport viewport{};
     std::int32_t textureFunction{},alphaTest{};
@@ -7143,7 +7159,7 @@ struct VkDrawBatch {
             sampledPreviousFrame==previous.sampledPreviousFrame && blend==previous.blend &&
             blendConstant==previous.blendConstant && depth==previous.depth && depthWrite==previous.depthWrite &&
             postProcess==previous.postProcess && showcaseEnvironmentBlend==previous.showcaseEnvironmentBlend &&
-            wireframe==previous.wireframe &&
+            wireframe==previous.wireframe && affineUV==previous.affineUV &&
             untextured==previous.untextured && clampTopLeft==previous.clampTopLeft &&
             textureFunction==previous.textureFunction && alphaTest==previous.alphaTest &&
             focusFirst==previous.focusFirst && focusPassCount==previous.focusPassCount && focusBlend==previous.focusBlend &&

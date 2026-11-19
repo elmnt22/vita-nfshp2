@@ -49,7 +49,7 @@ namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; }
 extern int collisionWitnessWarmProbe;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; }
+namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyAffineUV; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -492,6 +492,16 @@ int main(int, char**)
         if (sceIoGetstat("ur0:data/libshacccg.suprx", &shacccg) < 0)
             log.Line("vita.gl", "WARNING ur0:data/libshacccg.suprx missing (run ShaRKF00D)");
         vglUseExtraMem(GL_FALSE);
+        {
+            // A heavy scene (large smoke/dust quads over many tiles plus ~2k
+            // draws) can overflow the default 16 MB parameter buffer, which
+            // makes GXM split the scene into partial renders. pbuf16.txt
+            // restores the default for comparison.
+            SceIoStat pbuf{};
+            const bool small = sceIoGetstat((std::string(kDataDirectory) + "/pbuf16.txt").c_str(), &pbuf) >= 0;
+            vglSetParamBufferSize((small ? 16u : 32u) * 1024u * 1024u);
+            log.Line("vita.gl", small ? "parameter buffer 16 MB" : "parameter buffer 32 MB");
+        }
         vglInitExtended(4 * 1024 * 1024, kWidth, kHeight, 12 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
         vglWaitVblankStart(GL_FALSE);
         log.Line("vita.gl", "vitaGL initialized");
@@ -540,6 +550,10 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_stripcull_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryStripCull = 0;
             log.Line("vita.diag", "scenery strip cull off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/affine_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyAffineUV = 0;
+            log.Line("vita.diag", "affine uv off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/frag_mediump.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyFragmentMediump = 1;
