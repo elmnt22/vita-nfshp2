@@ -928,6 +928,15 @@ struct OpaqueSceneryBatch {
     bool eligible{};
     std::vector<const EditorMarkerTexture*> bindings;
     std::vector<Strip> strips;
+    // Strip runs derived from strips for one (lit, in-game, fallback) state:
+    // consecutive strips with equal texture, drawFlags and light material.
+    struct Run {std::uint32_t first{},count{};};
+    std::vector<Run> runs;
+    std::vector<const EditorMarkerSolidGeometry::Strip*> runStrips;
+    std::vector<const EditorMarkerLightMaterial*> materials;
+    std::vector<std::uint32_t> drawFlags;
+    const EditorMarkerLightMaterial* runFallback{};
+    bool runLit{},runInGame{},runsValid{};
 };
 
 class EcstasyFrame final {
@@ -1029,7 +1038,8 @@ public:
         const std::vector<std::array<float,16>>* boneMatrices=nullptr);
     // Static opaque scenery uses ordered bindings and GPU frustum clipping.
     bool RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
-        const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext);
+        const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
+        bool cullStrips=false);
     std::uint64_t ReusedOpaqueSceneryStrips() const noexcept {return reusedOpaqueSceneryStrips_;}
     void RenderStrip(const EditorMarkerModel& model,const EditorMarkerSolidGeometry::Strip& strip,
         const TextureInfo& texture,const EditorMarkerLightMaterial* material,
