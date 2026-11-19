@@ -924,14 +924,21 @@ TextureInfo* TexturePackRegistry::LookupDescriptor(const EditorMarkerTexture* de
             }
             descriptorIndex_.swap(rebuilt);
             descriptorIndexValid_=true;
+            descriptorOwner_=std::this_thread::get_id();
         } catch (...) {
             // The caller's interface is noexcept. A failed PC optimization
             // must preserve the original resource resolution behavior.
         }
     }
     if (descriptorIndexValid_) {
+        const bool owner=std::this_thread::get_id()==descriptorOwner_;
+        const auto identity=reinterpret_cast<std::uintptr_t>(descriptor);
+        auto& cached=descriptorHits_[((identity>>4)^(identity>>14))&(descriptorHits_.size()-1)];
+        if(owner && cached.descriptor==descriptor && cached.revision==bindingRevision_)return cached.texture;
         const auto hit=descriptorIndex_.find(descriptor);
-        return hit==descriptorIndex_.end() ? nullptr:hit->second;
+        auto* texture=hit==descriptorIndex_.end() ? nullptr:hit->second;
+        if(owner)cached={descriptor,texture,bindingRevision_};
+        return texture;
     }
     for(auto* pack:packs)for(std::size_t index=0;index<pack->TextureCount();++index) {
         auto* texture=pack->GetNthTexture(static_cast<std::int32_t>(index));
