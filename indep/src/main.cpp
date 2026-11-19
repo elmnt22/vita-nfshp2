@@ -58,6 +58,7 @@
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 namespace hp2 { void InitDisplaySystem(const GameResources& files,GameTime& clock); }
+extern std::array<double,4> worldCollisionSubPhaseMs; // indep/src/world.cpp diagnostic
 
 ApplicationBootState applicationBootState={-1};
 ApplicationFrameTiming applicationFrameTiming{};
@@ -1342,6 +1343,13 @@ bool ApplicationRuntime::Tick()
                 s.longestPresentIntervalMs,static_cast<unsigned long long>(s.presentsOver33ms),
                 static_cast<unsigned long long>(s.presentsOver50ms));
             s.host.RecordSessionEvent("render.phase_window",detail);
+            {
+                auto& sub=worldCollisionSubPhaseMs;
+                std::snprintf(detail,sizeof(detail),"pre_step_ms=%.3f participants_ms=%.3f solve_ms=%.3f post_step_ms=%.3f",
+                    sub[0]/count,sub[1]/count,sub[2]/count,sub[3]/count);
+                s.host.RecordSessionEvent("render.collision_window",detail);
+                sub={};
+            }
             const auto effectSteps=static_cast<double>(std::max<std::uint64_t>(1,s.worldProfile.sampledSteps));
             std::snprintf(detail,sizeof(detail),
                 "scenario=%d fps=%.2f interactions_ms=%.3f feedback_ms=%.3f particles_ms=%.3f surface_effects_ms=%.3f "
