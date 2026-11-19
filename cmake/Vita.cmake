@@ -35,6 +35,16 @@ target_link_libraries(NFSHP2 PRIVATE -Wl,--wrap=_ZNSt6chrono3_V212steady_clock3n
     SceKernelThreadMgr_stub SceRtc_stub SceAudio_stub
     -Wl,--whole-archive pthread -Wl,--no-whole-archive m)
 
+# Whole-program optimization: the engine is C-style with many tiny cross-TU
+# helpers (bScalar*, vector ops, accessors) that only LTO can inline.
+option(HP2_VITA_LTO "Link-time optimization for the Vita build" ON)
+set(HP2_VITA_LTO_JOBS "4" CACHE STRING "Parallel LTO jobs for the Vita link")
+if(HP2_VITA_LTO)
+    set_property(TARGET NFSHP2Core NFSHP2Engine NFSHP2 PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    target_link_options(NFSHP2 PRIVATE "-flto=${HP2_VITA_LTO_JOBS}" -flto-partition=balanced
+        -ffp-contract=off -fno-fast-math -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard)
+endif()
+
 vita_create_self(eboot.bin NFSHP2 UNSAFE)
 vita_create_vpk(NFSHP2.vpk ${VITA_TITLEID} eboot.bin
     VERSION ${VITA_VERSION}

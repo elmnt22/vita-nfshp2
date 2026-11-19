@@ -58,6 +58,8 @@
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
+extern std::array<double,8> carMoverModeMs;
+extern std::array<std::uint32_t,8> carMoverModeCalls;
 namespace hp2 { void InitDisplaySystem(const GameResources& files,GameTime& clock); }
 extern std::array<double,4> worldCollisionSubPhaseMs; // indep/src/world.cpp diagnostic
 extern std::array<double,4> worldCollisionSolveMs;
@@ -1356,6 +1358,15 @@ bool ApplicationRuntime::Tick()
                     sub[0]/count,sub[1]/count,sub[2]/count,sub[3]/count);
                 s.host.RecordSessionEvent("render.collision_window",detail);
                 sub={};
+                {
+                    auto& ms=::carMoverModeMs;auto& calls=::carMoverModeCalls;
+                    std::snprintf(detail,sizeof(detail),
+                        "per_frame_ms null=%.3f physics=%.3f traffic=%.3f delivery=%.3f mellow=%.3f cop=%.3f belt=%.3f calls=%u/%u/%u/%u/%u/%u/%u",
+                        ms[0]/count,ms[1]/count,ms[2]/count,ms[3]/count,ms[4]/count,ms[5]/count,ms[6]/count,
+                        calls[0],calls[1],calls[2],calls[3],calls[4],calls[5],calls[6]);
+                    s.host.RecordSessionEvent("render.mover_window",detail);
+                    ms={};calls={};
+                }
                 auto& solve=worldCollisionSolveMs;
                 std::snprintf(detail,sizeof(detail),"find_ms=%.3f queue_ms=%.3f resolve_ms=%.3f tail_ms=%.3f",
                     solve[0]/count,solve[1]/count,solve[2]/count,solve[3]/count);
