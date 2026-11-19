@@ -3844,6 +3844,16 @@ std::vector<std::uint8_t> DecodeTextureMipRgba(const TextureInfo& texture,
     // pixel/width and page%pages divisions dominated (~16 ms per 256x256).
     // Every address below is the same value the per-pixel form computed.
     const auto convertedPages=static_cast<std::uint32_t>(bufferWidth)/2u;
+    if (psm==0 || psm==1) {
+        // 32-bit texels are already RGBA in authored row order: copy rows
+        // (same bytes as the per-texel loop; PSMCT24 alpha is the constant).
+        for (std::uint32_t y=0;y<authoredHeight;++y) {
+            auto* destination=rgba.data()+static_cast<std::size_t>(y)*width*4;
+            std::memcpy(destination,source+static_cast<std::size_t>(y)*authoredWidth*4,
+                static_cast<std::size_t>(authoredWidth)*4);
+            if (psm==1)for (std::uint32_t x=0;x<authoredWidth;++x)destination[x*4+3]=128u;
+        }
+    } else
     for (std::uint32_t y=0;y<authoredHeight;++y)for (std::uint32_t x=0;x<authoredWidth;++x) {
         const std::size_t pixel=static_cast<std::size_t>(y)*authoredWidth+x;
         const std::uint8_t* color{};

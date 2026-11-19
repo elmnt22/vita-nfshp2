@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -340,7 +341,23 @@ int MoviePlayer::Update(float elapsed,void* output,std::size_t outputBytes) {
         s.input.bmiHeader.biSizeImage=frame->videoBytes;
         s.request.lpSrc=frame->videoData;s.request.lpDst=static_cast<std::uint8_t*>(output);
         s.codec.ConvertImageToRGBA=s.fivePass==0;
+        const auto decodeStarted=std::chrono::steady_clock::now();
         s.codec.DecompressFrameEx(&s.request,s.ring.ReadableBytes(frame->videoData),outputBytes);
+        {
+            // Diagnostic: decode cost and catch-up depth (logged every 100 frames).
+            static double decodeMs=0;static unsigned decodes=0,updates=0,maxBurst=0;
+            decodeMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-decodeStarted).count();
+            ++decodes;maxBurst=std::max(maxBurst,decoded+1);
+            if(decoded==0)++updates;
+            if(decodes>=100) {
+                char text[160];
+                std::snprintf(text,sizeof(text),"decodes=%u updates=%u decode_ms=%.2f max_burst=%u size=%dx%d five_pass=%d",
+                    decodes,updates,decodeMs/decodes,maxBurst,static_cast<int>(s.input.bmiHeader.biWidth),
+                    static_cast<int>(s.input.bmiHeader.biHeight),static_cast<int>(s.fivePass));
+                platform::RecordSessionEvent("movie.decode_window",text);
+                decodeMs=0;decodes=updates=maxBurst=0;
+            }
+        }
         ++s.currentFrame;s.lastReadFrame=s.clock.realTimeFrames;
         s.validFrame=true;s.ring.ReleaseFrame();
         if (s.currentFrame>=targetFrame)break;
