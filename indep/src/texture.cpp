@@ -154,7 +154,7 @@ TexturePixelStorage::TexturePixelStorage(std::size_t bytes,std::size_t alignment
         "Texture read allocation has invalid size/alignment");
 #ifdef _WIN32
     data_=static_cast<std::uint8_t*>(_aligned_malloc(bytes,alignment));
-#elif defined(__SWITCH__)
+#elif defined(__SWITCH__) || defined(__vita__)
     data_=static_cast<std::uint8_t*>(memalign(alignment,bytes));
 #else
     void* allocation=nullptr;

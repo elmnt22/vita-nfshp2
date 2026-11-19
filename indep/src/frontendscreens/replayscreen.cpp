@@ -27,7 +27,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#elif !defined(__SWITCH__)
+#elif !defined(__SWITCH__) && !defined(__vita__)
 #include <cerrno>
 #include <sys/vfs.h>
 #include <linux/magic.h>
@@ -60,7 +60,7 @@ FlailerBitmapChunk* Bitmap(FlailerUiState& ui,std::uint32_t key)
 // or BIN stored as an ordinary file is not a physical optical volume.
 bool ResourceVolumeIsOptical(const GameResources& resources)
 {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__vita__)
     // Game resources on this host are backed by the SD card.
     (void)resources;
     return false;
