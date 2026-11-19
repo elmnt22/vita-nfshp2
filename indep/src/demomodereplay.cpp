@@ -50,7 +50,7 @@ void DemoModeReplay::RecordSessionEvent(const char* event,const ReplaySnapshot* 
     const auto* clock=snapshot?snapshot->clock:nullptr;
     char context[1024]{};
     std::snprintf(context,sizeof(context),
-        "recording=%d source=%s source_id=%08x bytes=%zu clip=%d format=%u snapshot=%s loops=%d..%d cursor=%d/%d "
+        "recording=%d source=%s source_id=%08x bytes=%" HP2_ZU " clip=%d format=%u snapshot=%s loops=%d..%d cursor=%d/%d "
         "input_bits=%u/%u input_values=%u/%u loop=%d timer=%d real_q=%d %s",
         selectedRecording,file?file->name.c_str():"unloaded",file?file->nameHash:0,file?file->bytes.size():0,
         currentSnapshotIndex_,metadata_?ReadU32(metadata_):0u,snapshot?snapshot->name:"none",

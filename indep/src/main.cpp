@@ -194,6 +194,10 @@ ResourceFileBindings ApplicationResourceRuntime::GlobalFileBindings() const
 } // namespace hp2
 
 namespace hp2 {
+#if defined(__vita__)
+// Logical steps per presentation before excess debt is dropped (see Tick).
+constexpr std::uint32_t kVitaCatchUpSteps=2u;
+#endif
 namespace {
 // The released process owns one input service. This C-ABI trampoline keeps
 // a lifetime borrow only; no second controller packet or game state exists.
@@ -1128,7 +1132,14 @@ bool ApplicationRuntime::Tick()
             s.simulationClock.CompleteStep(s.scheduledStepQuanta);
             ++updates;
         }
-#ifdef __SWITCH__
+#if defined(__vita__)
+        // Vita: catch-up steps skip race geometry like the Switch; the final
+        // step of a bounded batch always captures so a frame is presented.
+        if(s.flow.inGameFlag && ((advancedPresentation && updates<kVitaCatchUpSteps &&
+            s.simulationClock.UpdateDue(observed)) || !s.host.PresentationDue(s.host.FrameTime())))
+            scene.emitRaceGeometry=false;
+        sceneGeometryEmitted=scene.emitRaceGeometry;
+#elif defined(__SWITCH__)
         if(s.flow.inGameFlag && ((advancedPresentation && s.simulationClock.UpdateDue(observed)) ||
             !s.host.PresentationDue(s.host.FrameTime())))scene.emitRaceGeometry=false;
         sceneGeometryEmitted=scene.emitRaceGeometry;
@@ -1154,7 +1165,11 @@ bool ApplicationRuntime::Tick()
             s.pendingClockAdvance=true;
             // Catch up complete logical updates before one presentation. Bound
             // work per host call, but retain all outstanding time for later calls.
+#if defined(__vita__)
+            if(updates<kVitaCatchUpSteps && s.simulationClock.UpdateDue(observed)) {
+#else
             if(updates<8u && s.simulationClock.UpdateDue(observed)) {
+#endif
                 s.InvalidatePreparedScene();
                 s.frame->CancelBeforeSubmit();
                 s.ServiceFrameResources();
@@ -1165,6 +1180,13 @@ bool ApplicationRuntime::Tick()
     }
     sourceMeasure.Finish();
     const auto capturedUpdateMs=static_cast<double>(s.sourceUpdateTiming.totalNanoseconds-sourceBefore)*1.0e-6;
+#if defined(__vita__)
+    // A Cortex-A9 cannot always repay logical-step debt; retaining it forever
+    // means never presenting. Drop the excess after a bounded batch (the game
+    // slows down instead of freezing). Logical steps themselves are unchanged.
+    if(updates>=kVitaCatchUpSteps && s.simulationClock.UpdateDue(observed))
+        s.simulationClock.Reset(observed+std::chrono::nanoseconds(1));
+#endif
     const bool simulationBehind=s.simulationClock.UpdateDue(observed);
     if(!reusedPreparation && (simulationBehind || !sceneGeometryEmitted || !s.host.PresentationDue(s.host.FrameTime()))) {
         // A logical frame still executes the source capture/post-draw contract,

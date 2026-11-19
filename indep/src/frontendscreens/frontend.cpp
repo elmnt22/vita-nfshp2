@@ -362,7 +362,7 @@ void LaunchFrontendMenus(FrontendStartupServices& services)
     auto& menu=*services.menus;auto& screens=*menu.screens;
     const auto logLaunch=[&](const char* destination) {
         char detail[224]{};
-        std::snprintf(detail,sizeof(detail),"launch_type=%d game_type=%d stack=%zu destination=\"%s\"",
+        std::snprintf(detail,sizeof(detail),"launch_type=%d game_type=%d stack=%" HP2_ZU " destination=\"%s\"",
             frontendLaunchType,menu.frontend->gameType,static_cast<std::size_t>(screens.stack.count),destination?destination:"");
         platform::RecordSessionEvent("frontend.launch",detail);
     };
@@ -397,7 +397,7 @@ void UnlaunchFrontendMenus(FrontendStartupServices& services)
     // of selecting the source per-mode menu destination.
     const auto gameType=menu.frontend->gameType;
     char detail[224]{};
-    std::snprintf(detail,sizeof(detail),"game_type=%d stack=%zu active=\"%s\" return=\"%s\"",
+    std::snprintf(detail,sizeof(detail),"game_type=%d stack=%" HP2_ZU " active=\"%s\" return=\"%s\"",
         gameType,static_cast<std::size_t>(screens.stack.count),screens.active?screens.active->configuration->name:"",
         screens.GetCurrentScreenNameFromStack());
     platform::RecordSessionEvent("frontend.retire",detail);
