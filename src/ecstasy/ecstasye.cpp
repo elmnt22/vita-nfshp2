@@ -3840,22 +3840,28 @@ std::vector<std::uint8_t> DecodeTextureMipRgba(const TextureInfo& texture,
     // rectangle is smaller. Preserve the retained texels before extending
     // only repeated axes below; clamp-only padding remains transparent.
     std::vector<std::uint8_t> rgba(static_cast<std::size_t>(width)*height*4);
-    for (std::size_t pixel=0;pixel<count;++pixel) {
+    // Row/column loops: the Vita CPU has no integer divider, so per-pixel
+    // pixel/width and page%pages divisions dominated (~16 ms per 256x256).
+    // Every address below is the same value the per-pixel form computed.
+    const auto convertedPages=static_cast<std::uint32_t>(bufferWidth)/2u;
+    for (std::uint32_t y=0;y<authoredHeight;++y)for (std::uint32_t x=0;x<authoredWidth;++x) {
+        const std::size_t pixel=static_cast<std::size_t>(y)*authoredWidth+x;
         const std::uint8_t* color{};
         if (psm==0 || psm==1) color=source+pixel*4;
         else {
             std::size_t byteOffset=psm==0x13 ? pixel:pixel/2;
             unsigned shift=psm==0x13 ? 0u:static_cast<unsigned>(pixel&1u)*4u;
             if(converted) {
-                const auto x=static_cast<std::uint32_t>(pixel%authoredWidth);
-                const auto y=static_cast<std::uint32_t>(pixel/authoredWidth);
-                const auto pages=static_cast<std::uint32_t>(bufferWidth)/2u;
-                const auto pageHeight=psm==0x14 ? 128u:64u;
+                const auto pages=convertedPages;
                 const auto blockWidth=psm==0x14 ? 32u:16u;
-                const auto page=x/128u+(y/pageHeight)*pages;
+                // page=x/128+(y/pageHeight)*pages, so page%pages==(x/128)%pages
+                // and page/pages==y/pageHeight+(x/128)/pages.
+                const auto pageColumn=x>>7u;
+                const auto pageX=pageColumn<pages ? pageColumn:pageColumn%pages;
+                const auto pageY=(psm==0x14 ? y>>7u:y>>6u)+(pageColumn<pages ? 0u:pageColumn/pages);
                 const auto block=psm==0x14 ? blocks4[(y%128u)/16u][(x%128u)/32u]:
                     blocks8[(y%64u)/16u][(x%128u)/16u];
-                const auto column=(y%16u)/4u,cx=x%blockWidth,cy=y%4u;
+                const auto column=(y%16u)/4u,cx=x&(blockWidth-1u),cy=y%4u;
                 const auto word=(cx&1u)+((cy&1u)<<1u)+((cx&2u)<<1u)+
                     ((((cx>>2u)&1u)^(cy>>1u)^(column&1u))<<3u);
                 const auto lane=(cx/8u)*2u+cy/2u;
@@ -3863,8 +3869,8 @@ std::vector<std::uint8_t> DecodeTextureMipRgba(const TextureInfo& texture,
                 // stream directly. This is a format conversion, not VRAM.
                 const auto blockX=(block&1u)|((block>>1u)&2u)|((block>>2u)&4u);
                 const auto blockY=((block>>1u)&1u)|((block>>2u)&2u);
-                const auto sourceX=(page%pages)*64u+blockX*8u+(word&1u)+((word>>1u)&6u);
-                const auto sourceY=(page/pages)*32u+blockY*8u+column*2u+((word>>1u)&1u);
+                const auto sourceX=pageX*64u+blockX*8u+(word&1u)+((word>>1u)&6u);
+                const auto sourceY=pageY*32u+blockY*8u+column*2u+((word>>1u)&1u);
                 byteOffset=(static_cast<std::size_t>(sourceY)*(authoredWidth/2u)+sourceX)*4u+
                     (psm==0x14 ? lane/2u:lane);
                 shift=psm==0x14 ? (lane&1u)*4u:0u;
@@ -3878,7 +3884,7 @@ std::vector<std::uint8_t> DecodeTextureMipRgba(const TextureInfo& texture,
             Require(index<paletteColors,"Vulkan indexed pixel exceeds its authored palette");
             color=palette+index*4;
         }
-        const auto destination=(pixel/authoredWidth*width+pixel%authoredWidth)*4;
+        const auto destination=(static_cast<std::size_t>(y)*width+x)*4;
         std::copy_n(color,3,rgba.data()+destination);
         // Retain the original alpha byte. Expanding it to UNORM unity here
         // rounds authored48 upward and loses all values above128. The shader
