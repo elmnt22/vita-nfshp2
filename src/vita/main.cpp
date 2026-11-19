@@ -32,6 +32,7 @@
 #include <pthread.h>
 #include "crash.hpp"
 #include "audio.hpp"
+namespace vita_selftest { void Run(void (*log)(const char*, const char*)); }
 #include <atomic>
 #include <fstream>
 #include <stdexcept>
@@ -374,6 +375,7 @@ int main(int, char**)
             *reinterpret_cast<volatile std::uint32_t*>(bad) = 0xdeadbeefu;
         }
     }
+    vita_selftest::Run([](const char* event, const char* detail) { if (g_log) g_log->Line(event, detail); });
     hp2::platform::BindSessionSink([](const char* event, const char* detail) noexcept {
         if (g_log && std::strcmp(event, "file.open") != 0) g_log->Line(event, detail);
     });

@@ -5,6 +5,8 @@
 #include "indep/inc/NativePipelineCache.hpp"
 #if defined(_M_X64) || defined(__SSE2__)
 #include <xmmintrin.h>
+#elif defined(__ARM_NEON)
+#include <arm_neon.h>
 #endif
 
 #include "CameraMover.hpp"
@@ -1283,6 +1285,30 @@ int32_t ecstasyClassifyBounds(const float minimum[3],const float maximum[3],cons
         if(any && !common)return 1;
     }
     return any==0 ? 2:common==0 ? 1:0;
+#elif defined(__ARM_NEON)
+    // Same lanes and rounding as the x64 path: separate multiply/add (no
+    // fused ops), base + X/Y/Z edge order, |W| limits per corner.
+    const auto mx=vld1q_f32(matrix),my=vld1q_f32(matrix+4),mz=vld1q_f32(matrix+8);
+    const auto first=vaddq_f32(vmulq_n_f32(mx,minimum[0]),vmulq_n_f32(my,minimum[1]));
+    const auto base=vaddq_f32(vaddq_f32(first,vmulq_n_f32(mz,minimum[2])),vld1q_f32(matrix+12));
+    const auto xStep=vmulq_n_f32(mx,maximum[0]-minimum[0]);
+    const auto yStep=vmulq_n_f32(my,maximum[1]-minimum[1]);
+    const auto zStep=vmulq_n_f32(mz,maximum[2]-minimum[2]);
+    const float32x4_t corners[4]={base,vaddq_f32(base,xStep),
+        vaddq_f32(vaddq_f32(base,xStep),yStep),vaddq_f32(base,yStep)};
+    static const uint32x4_t positiveBits={1u,4u,16u,0u},negativeBits={2u,8u,32u,0u};
+    std::uint32_t any=0,common=63;
+    for(int layer=0;layer<2;++layer)for(int corner=0;corner<4;++corner) {
+        const auto point=layer ? vaddq_f32(corners[corner],zStep):corners[corner];
+        const auto limit=vdupq_n_f32(std::fabs(vgetq_lane_f32(point,3)));
+        const auto bits=vorrq_u32(vandq_u32(vcgtq_f32(point,limit),positiveBits),
+            vandq_u32(vcltq_f32(point,vnegq_f32(limit)),negativeBits));
+        const auto pair=vorr_u32(vget_low_u32(bits),vget_high_u32(bits));
+        const auto flags=vget_lane_u32(pair,0)|vget_lane_u32(pair,1);
+        any|=flags;common&=flags;
+        if(any && !common)return 1;
+    }
+    return any==0 ? 2:common==0 ? 1:0;
 #else
     float base[4],xStep[4],yStep[4],zStep[4];
     const float x=maximum[0]-minimum[0],y=maximum[1]-minimum[1],z=maximum[2]-minimum[2];
@@ -2140,6 +2166,8 @@ void EcstasyFrame::AttachSolidPolys()
     std::pmr::vector<std::size_t> next(output-pendingAlphaBegin_,noCommand,&scratch);
     std::pmr::vector<TextureChain> chains{&scratch};
     std::pmr::map<std::pair<const TextureInfo*,const EcstasyRenderTarget*>,std::size_t> active{&scratch};
+    struct ChainSlot {const TextureInfo* texture{};const EcstasyRenderTarget* sampled{};std::size_t chain{};bool used{};};
+    std::array<ChainSlot,1024> chainTable{};std::size_t chainTableUsed=0;
     // Source strips and their material passes frequently keep the same
     // ordering texture. This lookup is local to this exact solid flush;
     // only an already-created chain index is reused, never its draw order.
@@ -2154,13 +2182,33 @@ void EcstasyFrame::AttachSolidPolys()
             "Solid texture chain lost its original image or target");
         std::size_t chainIndex=previousChain;
         if(previousChain==noCommand || texture!=previousTexture || sampled!=previousSampled) {
-            const auto key=std::make_pair(texture,sampled);
-            auto found=active.find(key);
-            if(found==active.end()) {
-                found=active.emplace(key,chains.size()).first;
-                chains.emplace_back(texture,sampled);
+            // Open-addressed front (chain creation order is unchanged); the
+            // ordered map only takes over if this flush exceeds the table.
+            const auto identity=reinterpret_cast<std::uintptr_t>(texture)^(reinterpret_cast<std::uintptr_t>(sampled)<<1);
+            std::size_t slot=((identity>>4)^(identity>>13))&(chainTable.size()-1);
+            bool resolved=false;
+            if(chainTableUsed<chainTable.size()/2) {
+                while(chainTable[slot].used) {
+                    if(chainTable[slot].texture==texture && chainTable[slot].sampled==sampled) {
+                        chainIndex=chainTable[slot].chain;resolved=true;break;
+                    }
+                    slot=(slot+1)&(chainTable.size()-1);
+                }
+                if(!resolved) {
+                    chainTable[slot]={texture,sampled,chains.size(),true};++chainTableUsed;
+                    chainIndex=chains.size();chains.emplace_back(texture,sampled);resolved=true;
+                    active.emplace(std::make_pair(texture,sampled),chainIndex);
+                }
             }
-            chainIndex=found->second;
+            if(!resolved) {
+                const auto key=std::make_pair(texture,sampled);
+                auto found=active.find(key);
+                if(found==active.end()) {
+                    found=active.emplace(key,chains.size()).first;
+                    chains.emplace_back(texture,sampled);
+                }
+                chainIndex=found->second;
+            }
             previousTexture=texture;previousSampled=sampled;previousChain=chainIndex;
         }
         auto& chain=chains[chainIndex];

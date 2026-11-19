@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <thread>
+#include <array>
 
 namespace hp2 {
 class GameResources;
@@ -127,6 +129,11 @@ struct TexturePackRegistry {
     std::int32_t animationRateOverride{};
 private:
     std::unordered_map<const EditorMarkerTexture*,TextureInfo*> descriptorIndex_;
+    // Direct-mapped front for the index, used only by the thread that built
+    // it (scene capture). Entries carry the binding revision they were read in.
+    struct DescriptorHit {const EditorMarkerTexture* descriptor{};TextureInfo* texture{};std::uint64_t revision{};};
+    std::array<DescriptorHit,1024> descriptorHits_{};
+    std::thread::id descriptorOwner_{};
     bool descriptorIndexValid_{};
     std::uint64_t bindingRevision_{1};
 };
