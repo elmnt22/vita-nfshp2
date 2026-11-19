@@ -7,6 +7,10 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
 #include <psp2/kernel/sysmem.h>
+#include <psp2/io/stat.h>
+#ifdef HP2_ENABLE_VITAGL
+#include <vitaGL.h>
+#endif
 
 #include "bware/inc/bFile.hpp"
 #include "bware/inc/bWare.hpp"
@@ -21,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -69,6 +74,18 @@ public:
     explicit VitaApplicationHost(VitaLog& log) : log_(log)
     {
         sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
+        // Optional unattended navigation: "period hold until" in logical
+        // 60 Hz input steps, e.g. "90 10 6000" taps Cross every 1.5 s.
+        if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/autopad.txt").c_str(), "r")) {
+            unsigned period = 0, hold = 0, until = 0;
+            if (std::fscanf(file, "%u %u %u", &period, &hold, &until) == 3 && period && hold < period) {
+                autoPeriod_ = period; autoHold_ = hold; autoUntil_ = until;
+                char detail[96];
+                std::snprintf(detail, sizeof(detail), "cross period=%u hold=%u until=%u", period, hold, until);
+                log_.Line("vita.autopad", detail);
+            }
+            std::fclose(file);
+        }
     }
     void BindClock(const GameTime& clock) noexcept { clock_ = &clock; }
 
@@ -107,6 +124,9 @@ public:
         for (const auto& [physical, logical] : kButtons)
             hp2::platform::SetButton(state_, logical, (pad.buttons & physical) != 0);
         state_.sticks = {pad.rx, pad.ry, pad.lx, pad.ly};
+        ++inputSteps_;
+        if (autoPeriod_ && inputSteps_ < autoUntil_ && (inputSteps_ % autoPeriod_) < autoHold_)
+            hp2::platform::SetButton(state_, Ps2Button::Cross, true);
     }
     int32_t ReadInput(int32_t port, JoystickControls& destination) override
     {
@@ -115,8 +135,20 @@ public:
         return state.connected ? 1 : 0;
     }
     void SetRumble(int32_t, uint8_t, uint8_t) override {}
+#ifdef HP2_ENABLE_VITAGL
+    void AttachGraphics(hp2::EcstasyVulkanDevice& graphics) noexcept { graphics_ = &graphics; }
+    bool ReadRenderStatistics(hp2::EcstasyVulkanFrameStatistics& result) const noexcept override
+    {
+        if (!graphics_) return false;
+        result = graphics_->LastFrameStatistics();
+        return true;
+    }
+#endif
     void SubmitFrame(hp2::EcstasyFrame& frame) override
     {
+#ifdef HP2_ENABLE_VITAGL
+        if (graphics_) { graphics_->Render(frame); return; }
+#endif
         // Null renderer (stage 1). Count the work the GPU backend will see.
         ++frames_;
         commands_ += frame.Commands().size();
@@ -142,7 +174,18 @@ public:
         if (sceKernelGetFreeMemorySize(&info) < 0) return 0;
         return static_cast<std::size_t>(info.size_user);
     }
-    void ApplyDisplaySettings(int32_t, int32_t, bool, bool) override {}
+    void ApplyDisplaySettings(int32_t, int32_t, bool, bool vsync) override
+    {
+#ifdef HP2_ENABLE_VITAGL
+        // Like the Switch host: camera targets use the fixed console extent.
+        if (graphics_) {
+            graphics_->SetLogicalSize(kWidth, kHeight);
+            graphics_->ConfigurePresentation(vsync);
+        }
+#else
+        (void)vsync;
+#endif
+    }
 
 private:
     VitaLog& log_;
@@ -151,6 +194,11 @@ private:
     hp2::platform::ControllerState state_{};
     std::uint64_t frames_{}, commands_{};
     std::uint32_t polls_{};
+    std::uint64_t inputSteps_{};
+    unsigned autoPeriod_{}, autoHold_{}, autoUntil_{};
+#ifdef HP2_ENABLE_VITAGL
+    hp2::EcstasyVulkanDevice* graphics_{};
+#endif
 };
 }
 
@@ -172,16 +220,39 @@ int main(int, char**)
         if (g_log && std::strcmp(event, "file.open") != 0) g_log->Line(event, detail);
     });
     try {
+        #ifdef HP2_ENABLE_VITAGL
+        log.Line("vita.start", "native PAL engine, vitaGL renderer");
+#else
         log.Line("vita.start", "native PAL engine, stage1 null renderer");
+#endif
         hp2::GameResources files(base / "ZZDATA.BIN");
         log.Line("vita.resources", "opened");
         hp2::configureNativeRenderSettings({});
         VitaApplicationHost host(log);
+#ifdef HP2_ENABLE_VITAGL
+        SceIoStat shacccg{};
+        if (sceIoGetstat("ur0:data/libshacccg.suprx", &shacccg) < 0)
+            log.Line("vita.gl", "WARNING ur0:data/libshacccg.suprx missing (run ShaRKF00D)");
+        vglUseExtraMem(GL_FALSE);
+        vglInitExtended(4 * 1024 * 1024, kWidth, kHeight, 12 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
+        vglWaitVblankStart(GL_FALSE);
+        log.Line("vita.gl", "vitaGL initialized");
+        hp2::EcstasyVulkanOptions graphicsOptions;
+        graphicsOptions.width = kWidth; graphicsOptions.height = kHeight;
+        graphicsOptions.logicalWidth = kWidth; graphicsOptions.logicalHeight = kHeight;
+        graphicsOptions.fixedRenderExtent = true;
+        graphicsOptions.vsync = false;
+        auto graphics = std::make_unique<hp2::EcstasyVulkanDevice>(graphicsOptions);
+        host.AttachGraphics(*graphics);
+#endif
+        applicationLaunchOptions.musicEnabled = 0; // no audio backend yet: no jukebox owner
         hp2::ApplicationRuntime application(files, host, saves);
         host.BindClock(application.Clock());
         log.Line("vita.init", "begin");
         application.Initialize();
         log.Line("vita.init", "done");
+        applicationLaunchOptions.skipMovies = 1; // stage 1: no video path yet
+        application.SetDisplayOptions(kWidth, kHeight, true, true);
         while (application.Tick()) {}
         application.Shutdown();
     } catch (const std::exception& error) {

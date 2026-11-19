@@ -148,7 +148,7 @@ GameFileSystem::GameFileSystem(const std::filesystem::path& index,
             "Archive index is not a regular file: " + index.u8string());
     Require(std::filesystem::is_regular_file(data),
             "Archive data is not a regular file: " + data.u8string());
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__vita__)
     // libnx stat does not expose distinct inode numbers on the SD card.
     const bool sameFile=UpperAscii(index.lexically_normal().u8string())==
                         UpperAscii(data.lexically_normal().u8string());
