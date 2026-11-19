@@ -653,6 +653,7 @@ uint16_t worldCalculateDebugChecksum(World* world, uint32_t seed,
     return (uint16_t)(checksum + (checksum >> 16));
 }
 
+void collisionSpeculationArm(int on);
 CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed)
 {
     (void)elapsed;
@@ -664,6 +665,11 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         if (collisionPairObsolete(system,pair)) collisionPairDestroy(system,pair);
         pair=next;
     }
+    // Speculative witness helpers poll only for the duration of the solve.
+    struct SpeculationScope {
+        SpeculationScope() {collisionSpeculationArm(1);}
+        ~SpeculationScope() {collisionSpeculationArm(0);}
+    } speculationScope;
     using SolveClock=std::chrono::steady_clock;
     auto solveMark=SolveClock::now();
     const auto solvePhase=[&](int index) {
