@@ -390,6 +390,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             categoryTimer.Enter(run);
             while(runResume<run.sceneryRunCount) {
                 const auto* strip=runStrips[run.sceneryRunFirst+runResume++];
+                if(runResume<run.sceneryRunCount)residentGeometry.Prefetch(runStrips[run.sceneryRunFirst+runResume]);
 #if defined(HP2_ENABLE_VITAGL) && !defined(HP2_VITA_ENVIRONMENT_MAP)
                 if(run.target && run.target->id==14)continue;
 #endif

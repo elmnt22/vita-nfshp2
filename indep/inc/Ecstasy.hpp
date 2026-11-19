@@ -937,6 +937,7 @@ struct OpaqueSceneryBatch {
     std::vector<std::uint32_t> drawFlags;
     const EditorMarkerLightMaterial* runFallback{};
     bool runLit{},runInGame{},runsValid{};
+        std::vector<const TextureInfo*> uniqueTextures; // distinct strips[].texture (pixel residency check)
 };
 
 class EcstasyFrame final {
