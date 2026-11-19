@@ -1114,6 +1114,9 @@ private:
     std::size_t liveParticleGroups_{};
     std::vector<std::unique_ptr<std::vector<frontend::FlailerPolyVertex>>> worldStrips_;
     std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>> animatedStrips_;
+    // Released posed strips of this frame object, reused (vector capacity
+    // kept) by the next capture's owner-thread skinning path.
+    std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>> animatedStripPool_;
     std::array<EcstasyDepthPalettePass,2> fogPasses_{},focusPasses_{};
     EcstasyFocusSettings focusSettings_{};
     Phase phase_{Phase::Building};
