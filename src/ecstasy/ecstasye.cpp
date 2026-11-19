@@ -3451,7 +3451,13 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         if(view.id>=4 && view.id<10)mask|=0x102u;
         // Only view 1 updates scenery LOD hysteresis. A discarded frame
         // needs that state update, but no mirror or cubemap scenery walk.
+#if defined(__vita__)
+        // Vita: the native near-detail hysteresis updates on presented frames
+        // only (~30 Hz); a discarded catch-up step skips the whole tree walk.
+        if(scenery && scene.emitRaceGeometry) {
+#else
         if(scenery && (scene.emitRaceGeometry || view.id==1)) {
+#endif
             Require(scene.parameters,"Scenery source filter has no live RaceParameters");
             if(scene.parameters->reverse==0)mask|=8u;
             if(scene.parameters->reverse==1)mask|=4u;

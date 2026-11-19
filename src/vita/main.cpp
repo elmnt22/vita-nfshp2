@@ -31,6 +31,7 @@
 #include <thread>
 #include <pthread.h>
 #include "crash.hpp"
+#include "audio.hpp"
 #include <atomic>
 #include <fstream>
 #include <stdexcept>
@@ -124,7 +125,12 @@ public:
     }
     void RecordSessionEvent(const char* event, const char* detail) noexcept override
     {
-        if (std::strncmp(event, "render.slow_", 12) == 0) return;
+        if (std::strncmp(event, "render.slow_", 12) == 0) {
+            // Sample: at most one slow-frame breakdown per second.
+            const auto now = sceKernelGetProcessTimeWide();
+            if (now - lastSlowFrame_ < 1000000u) return;
+            lastSlowFrame_ = now;
+        }
         if (std::strncmp(event, "file.", 5) == 0 && std::strncmp(event, "file.read.", 10) != 0) return;
         log_.Line(event, detail);
     }
@@ -241,10 +247,32 @@ public:
             commands_ = 0;
         }
     }
-    bool SupportsAudio() const noexcept override { return false; }
-    WorldAudioResult OpenAudio(bSound&) override { return WORLD_AUDIO_OK; }
-    WorldAudioResult PumpAudio(bSound&) override { return WORLD_AUDIO_OK; }
-    WorldAudioResult CloseAudio(bSound&) override { return WORLD_AUDIO_OK; }
+    bool SupportsAudio() const noexcept override { return audioEnabled_; }
+    WorldAudioResult OpenAudio(bSound& sound) override
+    {
+        if (!audioEnabled_) return WORLD_AUDIO_OK;
+        const auto result = audio_.Open(sound);
+        log_.Line("audio.open", result == WORLD_AUDIO_OK ? "sceAudioOut BGM 48 kHz stereo" : audio_.Error().c_str());
+        return result;
+    }
+    WorldAudioResult PumpAudio(bSound&) override
+    {
+        if (!audioEnabled_) return WORLD_AUDIO_OK;
+        const auto result = audio_.Pump();
+        if (result != WORLD_AUDIO_OK) log_.Line("audio.failure", audio_.Error().c_str());
+        if (++audioPumps_ % 300u == 0) {
+            const auto audio = audio_.TakeStatistics();
+            char detail[200];
+            std::snprintf(detail, sizeof(detail),
+                "pumps=300 decode_ms=%.3f commands_ms=%.3f mix_ms_total=%.1f buffers=%llu voices_peak=%u",
+                audio.decodeMilliseconds / 300.0, audio.commandMilliseconds / 300.0, audio.mixMilliseconds,
+                static_cast<unsigned long long>(audio.buffers), audio.voicesPeak);
+            log_.Line("audio.backend_window", detail);
+        }
+        return result;
+    }
+    WorldAudioResult CloseAudio(bSound&) override { return audioEnabled_ ? audio_.Close() : WORLD_AUDIO_OK; }
+    void DisableAudio() noexcept { audioEnabled_ = false; }
     int Width() const override { return kWidth; }
     int Height() const override { return kHeight; }
     std::size_t AvailableMemory() const override
@@ -302,6 +330,10 @@ public:
     hp2::EcstasyVulkanFrameStatistics lastStatistics_{};
     bool stopping_{}, pipelining_{}, pipelineAllowed_{};
 #endif
+    SceUInt64 lastSlowFrame_{};
+    hp2::vita::AudioDevice audio_;
+    unsigned audioPumps_{};
+    bool audioEnabled_{true};
     VitaLog& log_;
     const GameTime* clock_{};
     hp2::NativeRefreshClock refreshClock_;
@@ -377,7 +409,14 @@ int main(int, char**)
         hp2::nativeRenderDrainHook = [] { if (g_host) g_host->FinishFrames(); };
         g_host = &host;
 #endif
-        applicationLaunchOptions.musicEnabled = 0; // no audio backend yet: no jukebox owner
+        // Audio is on unless ux0:data/NFSHP2N/noaudio.txt exists (then music
+        // must be off too: the jukebox needs the audio device as its owner).
+        SceIoStat noAudio{};
+        if (sceIoGetstat((std::string(kDataDirectory) + "/noaudio.txt").c_str(), &noAudio) >= 0) {
+            host.DisableAudio();
+            applicationLaunchOptions.musicEnabled = 0;
+            log.Line("vita.audio", "disabled by noaudio.txt");
+        }
         hp2::ApplicationRuntime application(files, host, saves);
         host.BindClock(application.Clock());
         // Watchdog: when no frame completes for 3 s, log both threads' stages.
