@@ -49,7 +49,7 @@ namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; extern in
 extern int collisionWitnessWarmProbe;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyAffineUV; }
+namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -570,6 +570,10 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_stripcull_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryStripCull = 0;
             log.Line("vita.diag", "scenery strip cull off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/fastmerge_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasySceneryFastMerge = 0;
+            log.Line("vita.diag", "scenery fast merge off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/affine_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyAffineUV = 0;

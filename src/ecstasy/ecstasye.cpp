@@ -3425,6 +3425,8 @@ int ecstasySceneryRuns=[] {
     return 1;
 }();
 int ecstasySceneryStripCull=1;
+std::array<double,8> ecstasyWorldSplitMs{},ecstasyDiscardWorldSplitMs{};
+int ecstasySceneryFastMerge=1; // run union-box cull + template merge (Vita fastmerge_off.txt)
 int ecstasySceneryRunFastPath=[] {
 #if !defined(__vita__)
     if(const char* value=std::getenv("HP2_SCENERY_RUN_FAST"))return std::atoi(value)!=0 ? 1:0;
@@ -3508,6 +3510,19 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
                 batch.runs.push_back({at,1});batch.runStrips.push_back(strip.geometry);
                 batch.materials.push_back(resolved);batch.drawFlags.push_back(flags);
             }
+            batch.runBounds.clear();
+            for(const auto& run:batch.runs) {
+                std::array<float,6> box{};
+                for(std::uint32_t at=run.first;at<run.first+run.count;++at) {
+                    const auto* geometryStrip=batch.runStrips[at];
+                    for(std::size_t axis=0;axis<3;++axis) {
+                        const auto low=geometryStrip->minimum[axis],high=geometryStrip->maximum[axis];
+                        if(at==run.first) {box[axis]=low;box[axis+3]=high;}
+                        else {box[axis]=std::min(box[axis],low);box[axis+3]=std::max(box[axis+3],high);}
+                    }
+                }
+                batch.runBounds.push_back(box);
+            }
             batch.runLit=lit;batch.runInGame=inGameMaterials_;batch.runFallback=fallback;batch.runsValid=true;
         }
         // An intersecting model drops the strips that ecstasyDetermineVisibleStrips
@@ -3522,11 +3537,20 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
                 if(ecstasyClassifyBounds(solid->minimum,solid->maximum,clip)==2)cullStrips=false;
             } else cullStrips=false;
         }
-        for(const auto& run:batch.runs) {
+        for(std::size_t runIndex=0;runIndex<batch.runs.size();++runIndex) {
+            const auto& run=batch.runs[runIndex];
             const auto* texture=batch.strips[run.first].texture;
             if(cullStrips) {
                 const auto start=sceneryRunStrips_.size();
-                for(std::uint32_t at=run.first;at<run.first+run.count;++at) {
+                // The run's union box first: wholly outside one clip plane
+                // (a convex region) drops every strip; wholly inside keeps
+                // every strip (the GPU clips any strip that is not).
+                const auto& box=batch.runBounds[runIndex];
+                const auto whole=run.count>1 && ecstasySceneryFastMerge ? ecstasyClassifyBounds(box.data(),box.data()+3,screenClip):1;
+                if(whole==0)continue;
+                if(whole==2)sceneryRunStrips_.insert(sceneryRunStrips_.end(),
+                    batch.runStrips.begin()+run.first,batch.runStrips.begin()+run.first+run.count);
+                else for(std::uint32_t at=run.first;at<run.first+run.count;++at) {
                     const auto* geometryStrip=batch.runStrips[at];
                     if(ecstasyClassifyBounds(geometryStrip->minimum.data(),geometryStrip->maximum.data(),screenClip))
                         sceneryRunStrips_.push_back(geometryStrip);
@@ -3914,8 +3938,19 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         scene.track->trackFile && scene.track->trackFile->Loaded() ?
         scene.track->trackFile->Resources().scenery:nullptr;
     captureCheckpoint(1);
+    // Diagnostic: world-phase split (matrices, scenery, NIS, sun, skids,
+    // movers, players, objects) for both emitted and discarded captures.
+    auto worldSplitMark=CaptureClock::now();
+    auto& worldSplit=scene.emitRaceGeometry ? ecstasyWorldSplitMs:ecstasyDiscardWorldSplitMs;
+    const auto worldSplitAt=[&](std::size_t part) {
+        if(!scene.captureProfile)return;
+        const auto now=CaptureClock::now();
+        worldSplit[part]+=std::chrono::duration<double,std::milli>(now-worldSplitMark).count();
+        worldSplitMark=now;
+    };
     for(std::size_t i=1;i<10;++i) {
         auto& view=views.screens[i];if(!active(view))continue;
+        worldSplitMark=CaptureClock::now();
         // PAL113030..11304C supplies32 only to the cubemap culling far
         // override. Raster/depth projection retains the actual camera range.
         const float clipFar=view.id>=4 && view.id<10 ? 32.0f:0.0f;
@@ -3926,6 +3961,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         // Its0/1 gates are independent of the auxiliary-view bits.
         std::uint32_t mask=(views.presentationLayout==3 || views.presentationLayout==4) ? 0x10u:0x11u;
         if(view.id>=4 && view.id<10)mask|=0x102u;
+        worldSplitAt(0);
         // Only view 1 updates scenery LOD hysteresis. A discarded frame
         // needs that state update, but no mirror or cubemap scenery walk.
 #if defined(__vita__)
@@ -3947,14 +3983,17 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
                 if(scene.sceneryFrameTiming)scene.sceneryFrameTiming->Observe(elapsed);
             }
         }
+        worldSplitAt(1);
         // PAL113250 follows StuffScenery11321C and precedes the sun and
         // active camera mover. NIS actors retain their actual replay poses.
         if(i<4 && scene.track && scene.track->NisManagers())
             (void)DrawNisObjects(*scene.track->NisManagers(),view,frame);
+        worldSplitAt(2);
         // PAL113284 follows NIS and precedes RenderClans. Only the source
         // transfer operation is gated by InGameFlag; glare owns its timer.
         if(i<4)resources->Sun().StuffSun(view,frame,*scene.clock,
             scene.flow && scene.flow->inGameFlag!=0);
+        worldSplitAt(3);
         // PAL1132C4 -> RenderClans1AB810 consumes the original world's
         // live SkidSets on primary views1..3. The source1AACC0 polygons
         // already contain world positions and the authored material texture.
@@ -3972,13 +4011,16 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
                 frame.RenderPolygon3D(polygon,textureInfoForDescriptor(quad.texture),eMathIdentityMatrix,view);
             }
         }
+        worldSplitAt(4);
         // PAL11333C consumes the active (native last) mover virtual Render.
         // ZonePreview emits into FrameEffects; ordinary camera Render is empty.
         if(i<4)Require(carCinematicRenderMovers(&view,&frame)==CAR_CINEMATIC_OK,
             "Camera mover rendering lost its canonical active owner");
+        worldSplitAt(5);
         if(i<4 && scene.track && scene.track->Players())
             Require(carFramePlayerRenderPlayers(scene.track->Players(),&view,&frame)!=0,
                 "Player visible driving line lost its original owner");
+        worldSplitAt(6);
         // PAL11334C: the original WorldObject list follows scenery on the
         // primary views1..3 and precedes RenderFlailerModels. Fern shakers
         // hide their authored static placement while this very model lives.
@@ -3989,6 +4031,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         if(scene.emitRaceGeometry && i<4 && scene.track && scene.flow)
             (void)RenderWorldLightFlares(scene.track->files.Registry().Lights(),
                 scene.track->files.Registry(),view,frame,scene.flow->inGameFlag!=0);
+        worldSplitAt(7);
     }
     // The source RenderFlailerModels stage follows background/scenery and
     // precedes RenderCars. Each queued model retains its actual view; the
