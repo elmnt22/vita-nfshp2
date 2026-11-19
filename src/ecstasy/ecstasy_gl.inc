@@ -435,6 +435,8 @@ struct EcstasyVulkanDevice::Storage {
     void Destroy(VkDrawTexture& texture)
     {
         if(auto* handle=glTextureOf(texture))building->deletes.push_back(handle);
+        for(auto& variant:texture.variants)
+            if(auto* handle=glTextureOf(variant))building->deletes.push_back(handle);
         texture={};
     }
     bool CanRenderPrepared() const noexcept {return false;}
@@ -593,6 +595,34 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
         "TextureInfo contains unsupported original mip/filter fields");
     const auto baseBytes=static_cast<std::size_t>(ReadU32(wire+0x44));
     Require(baseBytes,"Original texture downloader has an empty base level");
+    {
+        auto& current=textures[index];
+        for(std::size_t at=0;at<current.variants.size();++at) {
+            if(!current.variants[at].Matches(texture))continue;
+            // Exact earlier image of this animation frame: swap it in.
+            auto variants=std::move(current.variants);current.variants.clear();
+            auto previous=std::move(current);
+            current=std::move(variants[at]);
+            variants[at]=std::move(previous);
+            current.variants=std::move(variants);
+            current.source=&texture;current.lastReferencedFrame=completedFrameSerial;
+            Require(nextTextureGeneration!=UINT64_MAX,"Native texture generation exhausted");
+            current.generation=++nextTextureGeneration;
+            ++statistics.textureVariantHits;
+            return;
+        }
+        // Stash the outgoing image only when the new pixels come from a
+        // different immutable owner/offset (a swapped frame, not an in-place
+        // rewrite or a borrowed movie plane, which can never match again).
+        const bool swappedFrame=current.generation && current.uploadCompleted && current.OwnersAlive() &&
+            !texture.pixels.borrowed && texture.pixels.owner &&
+            (current.pixelOwner.lock()!=texture.pixels.owner || current.sourcePixelOffset!=texture.pixels.offset);
+        if(swappedFrame && current.variants.size()<16) {
+            auto variants=std::move(current.variants);current.variants.clear();
+            variants.push_back(std::move(current));
+            current=VkDrawTexture{};current.variants=std::move(variants);
+        }
+    }
     std::uint32_t width{},height{};std::size_t sourceBytes{};
     std::vector<std::uint8_t> base;
     // Only level 0 is uploaded and decoded. The retained source range (and
@@ -816,7 +846,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
                 breaks[6]/300,breaks[7]/300,breaks[8]/300,breaks[9]/300,breaks[10]/300,breaks[11]/300);
             platform::RecordSessionEvent("renderer.vitagl.batch_breaks",detail);
             breaks={};
-            std::snprintf(detail,sizeof(detail),"per_frame compares=%.1f bytes=%.0f solids plain=%.0f reflection=%.0f specular=%.0f shadow=%.0f miss=%.0f reprepare=%.0f",
+            std::snprintf(detail,sizeof(detail),"per_frame variant_hits_total=%llu compares=%.1f bytes=%.0f solids plain=%.0f reflection=%.0f specular=%.0f shadow=%.0f miss=%.0f reprepare=%.0f",
+                static_cast<unsigned long long>(statistics.textureVariantHits),
                 nativeTextureCompares/300.0,nativeTextureCompareBytes/300.0,
                 nativeSolidKinds[0]/300.0,nativeSolidKinds[1]/300.0,nativeSolidKinds[2]/300.0,
                 nativeSolidKinds[3]/300.0,nativeSolidKinds[4]/300.0,nativeSolidKinds[5]/300.0);
