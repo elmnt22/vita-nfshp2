@@ -38,6 +38,44 @@ struct GlMappedBuffer {
     }
 };
 
+// A GL texture object owned through a stable heap handle: the preparing
+// thread refers to it while only the GL thread creates, fills or deletes it.
+struct GlTexture {
+    GLuint name{};
+};
+struct GlPendingTexture {
+    GlTexture* texture{};
+    std::vector<std::uint8_t> rgba;
+    std::uint32_t width{},height{};
+    GLint filter{},wrapS{},wrapT{};
+};
+// Everything one frame's GL submission consumes. Gather fills it on the
+// render thread; the GL thread draws it while the next frame is gathered.
+// It holds no pointer into the source EcstasyFrame.
+struct GlFramePacket {
+    std::vector<VkVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    std::vector<VkDrawBatch> batches;
+    std::vector<std::array<float,4>> glyphBounds;
+    std::vector<GlPendingTexture> uploads;
+    std::vector<GlTexture*> deletes;
+    struct TextureRef {GlTexture* texture{};std::uint32_t width{},height{};};
+    std::vector<TextureRef> textures;
+    std::array<std::array<std::uint32_t,2>,16> targets{};
+    std::array<bool,16> targetUsed{};
+    std::vector<std::uint8_t> residentVertexBytes,residentIndexBytes;
+    std::vector<std::array<std::size_t,2>> residentVertexRanges,residentIndexRanges;
+    std::size_t residentVertexCapacity{},residentIndexCapacity{};
+    std::uint32_t width{},height{};
+    double gatherMilliseconds{};
+    void Clear() {
+        uploads.clear();deletes.clear();textures.clear();targetUsed={};
+        residentVertexBytes.clear();residentIndexBytes.clear();
+        residentVertexRanges.clear();residentIndexRanges.clear();
+        residentVertexCapacity=residentIndexCapacity=0;
+    }
+};
+
 constexpr const char* kGlVertexShader=R"glsl(
 attribute vec4 a_pos;
 attribute vec3 a_uvq;
@@ -298,7 +336,25 @@ struct EcstasyVulkanDevice::Storage {
     std::array<GlMappedBuffer,StreamRing> streamVertices,streamIndices;
     std::size_t streamSlot{};
     std::unordered_map<std::uint32_t,GlProgram> programs;
-    std::uint64_t journalFrames{};
+    // GL thread: colour texture + framebuffer for each offscreen target.
+    struct GlTarget {GLuint texture{},framebuffer{};std::uint32_t width{},height{};};
+    std::array<GlTarget,16> glTargets{};
+    // Two packets: one being gathered, one being drawn.
+    std::array<GlFramePacket,2> packets;
+    GlFramePacket* building{&packets[0]};
+    std::size_t nextPacket{};
+    SceUID freeSema_{-1},readySema_{-1};
+    pthread_t glThread_{};
+    bool glThreadStarted_{};
+    std::atomic<bool> glStopping_{};
+    std::exception_ptr glError_;
+    std::atomic<int> vsyncRequest{-1};
+    // Last completed GL frame, published for the statistics of later frames.
+    std::mutex glStatsMutex;
+    double lastSubmitMs{},lastPresentMs{},lastUploadMs{};
+    std::uint64_t lastDrawn{};
+    std::uint64_t journalFrames{},gatherJournalFrames{};
+    bool residentVerticesAllocated{},residentIndicesAllocated{};
     std::uint64_t skippedBatches{},drawnBatches{};
 
     explicit Storage(const EcstasyVulkanOptions& value):options(value)
@@ -313,11 +369,58 @@ struct EcstasyVulkanDevice::Storage {
         glClearColor(0.0f,0.0f,0.0f,1.0f);
         glClearDepthf(1.0f);
         platform::RecordSessionEvent("renderer.vitagl","initialized");
+        freeSema_=sceKernelCreateSema("hp2_gl_free",0,static_cast<int>(packets.size()),static_cast<int>(packets.size()),nullptr);
+        readySema_=sceKernelCreateSema("hp2_gl_ready",0,0,static_cast<int>(packets.size())+1,nullptr);
+        pthread_attr_t attributes;
+        pthread_attr_init(&attributes);
+        pthread_attr_setstacksize(&attributes,512u*1024u);
+        glThreadStarted_=freeSema_>=0 && readySema_>=0 && pthread_create(&glThread_,&attributes,
+            [](void* self) -> void* {static_cast<Storage*>(self)->GlThread();return nullptr;},this)==0;
+        pthread_attr_destroy(&attributes);
+        platform::RecordSessionEvent("renderer.vitagl.gl_thread",glThreadStarted_ ? "started":"unavailable: inline submission");
     }
     ~Storage() {Close();}
+    void GlThread();
+    void Submit(GlFramePacket& packet);
+    void RethrowGlError()
+    {
+        if(glError_) {auto error=glError_;glError_=nullptr;std::rethrow_exception(error);}
+    }
+    // Waits until every queued packet has been drawn (GL thread idle).
+    void WaitIdle()
+    {
+        if(!glThreadStarted_)return;
+        for(std::size_t i=0;i<packets.size();++i)sceKernelWaitSema(freeSema_,1,nullptr);
+        sceKernelSignalSema(freeSema_,static_cast<int>(packets.size()));
+        RethrowGlError();
+    }
+    void StopGlThread() noexcept
+    {
+        if(glThreadStarted_) {
+            for(std::size_t i=0;i<packets.size();++i)sceKernelWaitSema(freeSema_,1,nullptr);
+            glStopping_=true;sceKernelSignalSema(readySema_,1);
+            pthread_join(glThread_,nullptr);glThreadStarted_=false;
+        }
+        if(freeSema_>=0)sceKernelDeleteSema(freeSema_);
+        if(readySema_>=0)sceKernelDeleteSema(readySema_);
+        freeSema_=readySema_=-1;
+    }
     void Close() noexcept
     {
-        for(auto& texture:textures)Destroy(texture);
+        StopGlThread();
+        for(auto& packet:packets) {
+            for(auto* texture:packet.deletes) {if(texture->name)glDeleteTextures(1,&texture->name);delete texture;}
+            packet.Clear();
+        }
+        for(auto& target:glTargets) {
+            if(target.framebuffer)glDeleteFramebuffers(1,&target.framebuffer);
+            if(target.texture)glDeleteTextures(1,&target.texture);
+            target={};
+        }
+        for(auto& texture:textures) {
+            if(auto* handle=glTextureOf(texture)) {if(handle->name)glDeleteTextures(1,&handle->name);delete handle;}
+            texture={};
+        }
         textures.clear();textureIndices.clear();
         residentVertices.Destroy();residentIndices.Destroy();
         for(auto& buffer:streamVertices)buffer.Destroy();
@@ -325,10 +428,12 @@ struct EcstasyVulkanDevice::Storage {
         for(auto& entry:programs)if(entry.second.program)glDeleteProgram(entry.second.program);
         programs.clear();
     }
-    void Destroy(VkDrawTexture& texture) noexcept
+    static GlTexture* glTextureOf(const VkDrawTexture& texture) noexcept
+    {return reinterpret_cast<GlTexture*>(texture.image.image);}
+    // Preparing thread: the GL object is deleted after the in-flight frame.
+    void Destroy(VkDrawTexture& texture)
     {
-        GLuint name=glName(texture.image.image);
-        if(name)glDeleteTextures(1,&name);
+        if(auto* handle=glTextureOf(texture))building->deletes.push_back(handle);
         texture={};
     }
     bool CanRenderPrepared() const noexcept {return false;}
@@ -397,11 +502,22 @@ struct EcstasyVulkanDevice::Storage {
         target.previousDescriptor=target.descriptor;
         if(!id) {target.width=width;target.height=height;return;}
         width=std::max(1u,width);height=std::max(1u,height);
-        GLuint texture=glName(target.color.image);
-        if(texture && target.width==width && target.height==height)return;
-        target.width=width;target.height=height;target.initialized=false;
+        building->targets[static_cast<std::size_t>(id)]={{width,height}};
+        building->targetUsed[static_cast<std::size_t>(id)]=true;
+        if(target.width==width && target.height==height)return;
+        target.width=width;target.height=height;
+        char detail[96];std::snprintf(detail,sizeof(detail),"id=%d extent=%ux%u",id,width,height);
+        platform::RecordSessionEvent("renderer.vitagl.target",detail);
+    }
+    // GL thread: (re)create a target's texture and framebuffer.
+    void EnsureGlTarget(std::size_t id,std::uint32_t width,std::uint32_t height)
+    {
+        auto& target=glTargets[id];
+        if(target.texture && target.width==width && target.height==height)return;
+        target.width=width;target.height=height;
+        GLuint texture=target.texture;
         if(!texture)glGenTextures(1,&texture);
-        target.color.image=glToken<VkImage>(texture);
+        target.texture=texture;
         glBindTexture(GL_TEXTURE_2D,texture);
         glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,static_cast<GLsizei>(width),static_cast<GLsizei>(height),0,
             GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
@@ -409,15 +525,13 @@ struct EcstasyVulkanDevice::Storage {
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
-        GLuint fbo=glName(target.framebuffer);
+        GLuint fbo=target.framebuffer;
         if(!fbo)glGenFramebuffers(1,&fbo);
-        target.framebuffer=glToken<VkFramebuffer>(fbo);
+        target.framebuffer=fbo;
         // vitaGL attaches a hidden depth buffer to a colour-only FBO on demand.
         glBindFramebuffer(GL_FRAMEBUFFER,fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture,0);
         glBindFramebuffer(GL_FRAMEBUFFER,0);
-        char detail[96];std::snprintf(detail,sizeof(detail),"id=%d extent=%ux%u",id,width,height);
-        platform::RecordSessionEvent("renderer.vitagl.target",detail);
     }
     EcstasyNativeMirrorPresentation MirrorPresentation(const EcstasyFrame& frame) const
     {
@@ -463,21 +577,15 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
         sourceBytes+=bytes;
     }
     auto& target=textures[index];
-    GLuint name=glName(target.image.image);
-    if(!name)glGenTextures(1,&name);
-    target.image.image=glToken<VkImage>(name);
+    auto* handle=glTextureOf(target);
+    if(!handle) {handle=new GlTexture;target.image.image=reinterpret_cast<VkImage>(handle);}
     target.width=width;target.height=height;target.levels=levels;
-    glBindTexture(GL_TEXTURE_2D,name);
-    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,static_cast<GLsizei>(width),static_cast<GLsizei>(height),0,
-        GL_RGBA,GL_UNSIGNED_BYTE,base.data());
     const auto minification=wire[0x70];
     const bool linear=options.textureFilter!=EcstasyTextureFilter::Authored ||
         minification==1 || minification>=4 || wire[0x6f];
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,linear ? GL_LINEAR:GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,linear ? GL_LINEAR:GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,(wire[0x4c]&1u) ? GL_REPEAT:GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,(wire[0x4c]&2u) ? GL_REPEAT:GL_CLAMP_TO_EDGE);
     ++statistics.textureUploads;statistics.textureUploadBytes+=base.size();
+    building->uploads.push_back({handle,std::move(base),width,height,linear ? GL_LINEAR:GL_NEAREST,
+        (wire[0x4c]&1u) ? GL_REPEAT:GL_CLAMP_TO_EDGE,(wire[0x4c]&2u) ? GL_REPEAT:GL_CLAMP_TO_EDGE});
     target.source=&texture;target.repeatedPadding=repeatedPadding;target.uploadCompleted=false;
     const auto psm=wire[0x4a];
     target.sourcePixels.assign(texture.pixels.Data(),texture.pixels.Data()+sourceBytes);
@@ -562,6 +670,18 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     Require(frame->State()==EcstasyFrame::Phase::Ready,"vitaGL accepts only a sealed original frame");
     using Clock=std::chrono::steady_clock;
     const auto milliseconds=[](Clock::duration duration) {return std::chrono::duration<double,std::milli>(duration).count();};
+    // Claim a free packet: at most one frame is gathered while one is drawn.
+    if(glThreadStarted_)sceKernelWaitSema(freeSema_,1,nullptr);
+    struct ReleaseOnThrow {
+        Storage& storage;bool armed{true};
+        ~ReleaseOnThrow() {if(armed && storage.glThreadStarted_)sceKernelSignalSema(storage.freeSema_,1);}
+    } release{*this};
+    {
+        std::lock_guard<std::mutex> lock(glStatsMutex);
+        if(glError_) {auto error=glError_;glError_=nullptr;std::rethrow_exception(error);}
+    }
+    building=&packets[nextPacket];nextPacket=(nextPacket+1)%packets.size();
+    building->Clear();
     const auto renderBegin=Clock::now();
     statistics={};
     statistics.presentationTarget=true;
@@ -597,37 +717,137 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     glRenderStage=3;
     statistics.gatherMilliseconds=milliseconds(Clock::now()-gatherBegin);
 
-    // Resident geometry/index slots: write dirty entries in place.
+    // Resident geometry/index slots: copy dirty entries into the packet; the
+    // GL thread writes them in place before drawing it.
     residentPendingUploads.clear();residentIndexPendingUploads.clear();
-    std::size_t residentUploadBytes=0;
+    auto& packet=*building;
     if(!residentGeometry.Active().empty()) {
-        const auto capacity=residentGeometry.Capacity()*VkResidentGeometryCache::SlotBytes;
-        if(residentVertices.size<capacity) {
-            residentVertices.Ensure(GL_ARRAY_BUFFER,capacity);residentGeometry.InvalidateUploads();
-        }
+        packet.residentVertexCapacity=residentGeometry.Capacity()*VkResidentGeometryCache::SlotBytes;
+        if(!residentVerticesAllocated) {residentVerticesAllocated=true;residentGeometry.InvalidateUploads();}
         for(const auto slot:residentGeometry.Active()) {
             const auto& entry=residentGeometry.Entry(slot);
             Require(entry.prepared,"Resident geometry upload has unfinished vertex preparation");
             if(entry.uploaded)continue;
             const auto offset=static_cast<std::size_t>(slot)*VkResidentGeometryCache::SlotBytes;
             const auto bytes=static_cast<std::size_t>(entry.count)*sizeof(VkVertex);
-            std::memcpy(residentVertices.mapped+offset,entry.shadow.data(),bytes);
-            residentPendingUploads.push_back(slot);residentUploadBytes+=bytes;
+            const auto* source=reinterpret_cast<const std::uint8_t*>(entry.shadow.data());
+            packet.residentVertexBytes.insert(packet.residentVertexBytes.end(),source,source+bytes);
+            packet.residentVertexRanges.push_back({{offset,bytes}});
+            residentPendingUploads.push_back(slot);
         }
     }
     if(!residentIndexCache.Active().empty()) {
-        const auto capacity=static_cast<std::size_t>(residentIndexCache.Capacity())*sizeof(std::uint32_t);
-        if(residentIndices.size<capacity) {
-            residentIndices.Ensure(GL_ELEMENT_ARRAY_BUFFER,capacity);residentIndexCache.InvalidateUploads();
-        }
+        packet.residentIndexCapacity=static_cast<std::size_t>(residentIndexCache.Capacity())*sizeof(std::uint32_t);
+        if(!residentIndicesAllocated) {residentIndicesAllocated=true;residentIndexCache.InvalidateUploads();}
         for(auto* entry:residentIndexCache.Active()) {
             if(entry->uploaded)continue;
             const auto offset=static_cast<std::size_t>(entry->first)*sizeof(std::uint32_t);
             const auto bytes=entry->shadow.size()*sizeof(std::uint32_t);
-            std::memcpy(residentIndices.mapped+offset,entry->shadow.data(),bytes);
-            residentIndexPendingUploads.push_back(entry);residentUploadBytes+=bytes;
+            const auto* source=reinterpret_cast<const std::uint8_t*>(entry->shadow.data());
+            packet.residentIndexBytes.insert(packet.residentIndexBytes.end(),source,source+bytes);
+            packet.residentIndexRanges.push_back({{offset,bytes}});
+            residentIndexPendingUploads.push_back(entry);
         }
     }
+    // Packets are drawn in order, so these contents are in place for every
+    // later frame that resolves to the same slots.
+    residentGeometry.PublishUploads(residentPendingUploads);
+    residentIndexCache.PublishUploads(residentIndexPendingUploads);
+    packet.textures.resize(textures.size());
+    for(std::size_t index=0;index<textures.size();++index)
+        packet.textures[index]={glTextureOf(textures[index]),textures[index].width,textures[index].height};
+    packet.width=options.width;packet.height=options.height;
+    std::swap(packet.vertices,data);std::swap(packet.indices,elementIndices);
+    std::swap(packet.batches,batches);std::swap(packet.glyphBounds,gatheredGlyphBounds);
+    packet.gatherMilliseconds=statistics.gatherMilliseconds;
+    // The packet holds no reference to the frame: release it now.
+    frame->MarkSubmitted();
+    if(!deferRetire)frame->Complete();
+    for(auto& texture:textures)texture.uploadCompleted=true;
+    for(auto& entry:renderedTargets)entry.second.initialized=true;
+    {
+        std::lock_guard<std::mutex> lock(glStatsMutex);
+        statistics.drawBatches=lastDrawn;
+        statistics.recordSubmitMilliseconds=lastSubmitMs;
+        statistics.presentMilliseconds=lastPresentMs;
+    }
+    statistics.presentAccepted=true;
+    if((++gatherJournalFrames%300u)==0) {
+        auto& steps=nativeGatherStepMilliseconds;
+        if(steps[6]>0.0) {
+            char detail[320];
+            const double n=steps[6];
+            std::snprintf(detail,sizeof(detail),
+                "sampled=%.0f solid_preamble_ms=%.2f shading_ms=%.2f acquire_ms=%.2f solid_rest_ms=%.2f append_ms=%.2f other_draws_ms=%.2f prepare_ms=%.2f",
+                n,steps[0]/n,steps[1]/n,steps[2]/n,steps[3]/n,steps[4]/n,steps[5]/n,milliseconds(Clock::now()-renderBegin));
+            platform::RecordSessionEvent("renderer.vitagl.gather_steps",detail);
+            steps={};
+        }
+    }
+    glRenderStage=0;
+    release.armed=false;
+    if(!glThreadStarted_) {Submit(packet);return true;}
+    sceKernelSignalSema(readySema_,1);
+    // Unpipelined callers expect the frame on screen when Render returns.
+    if(!deferRetire)WaitIdle();
+    return true;
+}
+
+void EcstasyVulkanDevice::Storage::GlThread()
+{
+    // Core 2: the application thread owns core 0, the gathering render thread core 1.
+    sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_2);
+    std::size_t index=0;
+    for(;;) {
+        sceKernelWaitSema(readySema_,1,nullptr);
+        if(glStopping_)return;
+        auto& packet=packets[index];index=(index+1)%packets.size();
+        try {Submit(packet);}
+        catch(...) {
+            std::lock_guard<std::mutex> lock(glStatsMutex);
+            if(!glError_)glError_=std::current_exception();
+        }
+        sceKernelSignalSema(freeSema_,1);
+    }
+}
+
+void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
+{
+    using Clock=std::chrono::steady_clock;
+    const auto milliseconds=[](Clock::duration duration) {return std::chrono::duration<double,std::milli>(duration).count();};
+    const auto renderBegin=Clock::now();
+    glRenderStage=5;
+    for(auto& upload:packet.uploads) {
+        auto* texture=upload.texture;
+        if(!texture->name)glGenTextures(1,&texture->name);
+        glBindTexture(GL_TEXTURE_2D,texture->name);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,static_cast<GLsizei>(upload.width),static_cast<GLsizei>(upload.height),0,
+            GL_RGBA,GL_UNSIGNED_BYTE,upload.rgba.data());
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,upload.filter);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,upload.filter);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,upload.wrapS);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,upload.wrapT);
+    }
+    packet.uploads.clear();
+    for(std::size_t id=1;id<packet.targets.size();++id)
+        if(packet.targetUsed[id])EnsureGlTarget(id,packet.targets[id][0],packet.targets[id][1]);
+    if(packet.residentVertexCapacity) {
+        residentVertices.Ensure(GL_ARRAY_BUFFER,packet.residentVertexCapacity);
+        std::size_t at=0;
+        for(const auto& range:packet.residentVertexRanges) {
+            std::memcpy(residentVertices.mapped+range[0],packet.residentVertexBytes.data()+at,range[1]);at+=range[1];
+        }
+    }
+    if(packet.residentIndexCapacity) {
+        residentIndices.Ensure(GL_ELEMENT_ARRAY_BUFFER,packet.residentIndexCapacity);
+        std::size_t at=0;
+        for(const auto& range:packet.residentIndexRanges) {
+            std::memcpy(residentIndices.mapped+range[0],packet.residentIndexBytes.data()+at,range[1]);at+=range[1];
+        }
+    }
+    const auto residentUploadBytes=packet.residentVertexBytes.size()+packet.residentIndexBytes.size();
+    const auto& data=packet.vertices;const auto& elementIndices=packet.indices;const auto& batches=packet.batches;
+    const auto& gatheredGlyphBounds=packet.glyphBounds;
     // Per-frame streams rotate over a small ring so the GPU's previous frames
     // are never overwritten while still queued.
     streamSlot=(streamSlot+1)%StreamRing;
@@ -655,8 +875,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         if(batch.target==14 || batch.sampledTarget==14 || batch.sampledTarget==0)return false;
         if(batch.target<0 || batch.target>=static_cast<std::int32_t>(kTargets))return false;
         if(batch.sampledTarget>0 && (batch.sampledTarget>=static_cast<std::int32_t>(kTargets) ||
-            !renderedTargets.count(batch.sampledTarget) ||
-            !glName(renderedTargets.at(batch.sampledTarget).color.image)))return false;
+            !glTargets[static_cast<std::size_t>(batch.sampledTarget)].texture))return false;
         return true;
     };
     std::uint64_t drawn=0,skipped=0;
@@ -678,16 +897,16 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     const auto drawPass=[&](std::int32_t id) {
         glRenderStage=100+id;
         const bool offscreen=id!=0;
-        GLint height=static_cast<GLint>(options.height);
+        GLint height=static_cast<GLint>(packet.height);
         glDisable(GL_SCISSOR_TEST);
         if(offscreen) {
-            const auto& target=renderedTargets.at(id);
+            const auto& target=glTargets[static_cast<std::size_t>(id)];
             height=static_cast<GLint>(target.height);
-            glBindFramebuffer(GL_FRAMEBUFFER,glName(target.framebuffer));
+            glBindFramebuffer(GL_FRAMEBUFFER,target.framebuffer);
             glViewport(0,0,static_cast<GLsizei>(target.width),static_cast<GLsizei>(target.height));
         } else {
             glBindFramebuffer(GL_FRAMEBUFFER,0);
-            glViewport(0,0,static_cast<GLsizei>(options.width),static_cast<GLsizei>(options.height));
+            glViewport(0,0,static_cast<GLsizei>(packet.width),static_cast<GLsizei>(packet.height));
         }
         glClearColor(0.0f,0.0f,0.0f,1.0f);glClearDepthf(1.0f);
         glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);glDepthMask(GL_TRUE);
@@ -767,12 +986,12 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             if(texturing) {
                 GLuint name{};
                 if(sampled) {
-                    const auto& source=renderedTargets.at(batch.sampledTarget);
-                    name=glName(source.color.image);texWidth=source.width;texHeight=source.height;
+                    const auto& source=glTargets[static_cast<std::size_t>(batch.sampledTarget)];
+                    name=source.texture;texWidth=source.width;texHeight=source.height;
                 } else {
-                    Require(batch.texture<textures.size(),"vitaGL draw lost its cached texture");
-                    const auto& texture=textures[batch.texture];
-                    name=glName(texture.image.image);texWidth=texture.width;texHeight=texture.height;
+                    Require(batch.texture<packet.textures.size(),"vitaGL draw lost its cached texture");
+                    const auto& texture=packet.textures[batch.texture];
+                    name=texture.texture ? texture.texture->name:0;texWidth=texture.width;texHeight=texture.height;
                 }
                 if(name!=activeTexture) {glBindTexture(GL_TEXTURE_2D,name);activeTexture=name;}
             }
@@ -841,28 +1060,28 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         state=1;
         for(const auto dependency:targetDependencies[static_cast<std::size_t>(id)])self(self,dependency);
         if(id==0 || !targetBatches[static_cast<std::size_t>(id)].empty())drawPass(id);
-        if(id)renderedTargets.at(id).initialized=true;
         state=2;
     };
     visit(visit,0);
     // Offscreen targets nobody samples this frame (env-map faces) are not drawn.
     for(std::size_t id=1;id<kTargets;++id)if(!visited[id])skipped+=targetBatches[id].size();
     glDisable(GL_SCISSOR_TEST);
-    statistics.drawBatches=drawn;
     drawnBatches+=drawn;skippedBatches+=skipped;
-    residentGeometry.PublishUploads(residentPendingUploads);
-    residentIndexCache.PublishUploads(residentIndexPendingUploads);
-    frame->MarkSubmitted();
-    if(!deferRetire)frame->Complete();
-    for(auto& texture:textures)texture.uploadCompleted=true;
-    for(auto& entry:renderedTargets)entry.second.initialized=true;
+    // Textures retired by this frame's gather: no later packet refers to them.
+    for(auto* texture:packet.deletes) {if(texture->name)glDeleteTextures(1,&texture->name);delete texture;}
+    packet.deletes.clear();
     const auto submitDone=Clock::now();
-    statistics.recordSubmitMilliseconds=milliseconds(submitDone-uploadDone);
+    const auto vsync=vsyncRequest.exchange(-1);
+    if(vsync>=0)vglWaitVblankStart(vsync ? GL_TRUE:GL_FALSE);
     glRenderStage=4;
     vglSwapBuffers(GL_FALSE);
     glRenderStage=0;
-    statistics.presentMilliseconds=milliseconds(Clock::now()-submitDone);
-    statistics.presentAccepted=true;
+    const auto presentMs=milliseconds(Clock::now()-submitDone);
+    {
+        std::lock_guard<std::mutex> lock(glStatsMutex);
+        lastDrawn=drawn;lastSubmitMs=milliseconds(submitDone-uploadDone);lastPresentMs=presentMs;
+        lastUploadMs=milliseconds(uploadDone-renderBegin);
+    }
     if((++journalFrames%300u)==0) {
         char detail[320];
         std::snprintf(detail,sizeof(detail),
@@ -870,21 +1089,11 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             "textures=%" HP2_ZU " programs=%" HP2_ZU " gather_ms=%.2f upload_ms=%.2f draw_ms=%.2f swap_ms=%.2f",
             static_cast<unsigned long long>(journalFrames),batches.size(),static_cast<unsigned long long>(drawn),
             static_cast<unsigned long long>(skipped),data.size(),elementIndices.size(),residentUploadBytes,
-            textures.size(),programs.size(),statistics.gatherMilliseconds,
-            milliseconds(uploadDone-renderBegin)-statistics.gatherMilliseconds,
-            statistics.recordSubmitMilliseconds,statistics.presentMilliseconds);
+            packet.textures.size(),programs.size(),packet.gatherMilliseconds,
+            milliseconds(uploadDone-renderBegin),
+            milliseconds(submitDone-uploadDone),presentMs);
         platform::RecordSessionEvent("renderer.vitagl.frame",detail);
-        auto& steps=nativeGatherStepMilliseconds;
-        if(steps[6]>0.0) {
-            const double n=steps[6];
-            std::snprintf(detail,sizeof(detail),
-                "sampled=%.0f solid_preamble_ms=%.2f shading_ms=%.2f acquire_ms=%.2f solid_rest_ms=%.2f append_ms=%.2f other_draws_ms=%.2f",
-                n,steps[0]/n,steps[1]/n,steps[2]/n,steps[3]/n,steps[4]/n,steps[5]/n);
-            platform::RecordSessionEvent("renderer.vitagl.gather_steps",detail);
-            steps={};
-        }
     }
-    return true;
 }
 
 EcstasyVulkanDevice::EcstasyVulkanDevice(const EcstasyVulkanOptions& options):storage_(std::make_unique<Storage>(options)){}
@@ -909,7 +1118,9 @@ void EcstasyVulkanDevice::Resize(std::uint32_t width,std::uint32_t height)
 void EcstasyVulkanDevice::ConfigurePresentation(bool vsync)
 {
     storage_->options.vsync=vsync;
-    vglWaitVblankStart(vsync ? GL_TRUE:GL_FALSE);
+    // Applied by the GL thread before its next swap.
+    if(storage_->glThreadStarted_)storage_->vsyncRequest=vsync ? 1:0;
+    else vglWaitVblankStart(vsync ? GL_TRUE:GL_FALSE);
 }
 void EcstasyVulkanDevice::SetLogicalSize(std::uint32_t width,std::uint32_t height)
 {
