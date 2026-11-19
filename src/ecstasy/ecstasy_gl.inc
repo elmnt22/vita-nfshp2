@@ -658,6 +658,60 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
 
 #include "src/ecstasy/ecstasy_gather.inc"
 
+namespace {
+// Compiled program cache (vitaGL caches only its own FFP shaders). Keyed by
+// variant and a hash of both shader sources; any load failure recompiles.
+constexpr std::uint32_t kGlProgramCacheVersion=1;
+std::uint64_t GlShaderSourceHash()
+{
+    std::uint64_t hash=1469598103934665603ull^kGlProgramCacheVersion;
+    for(const char* text:{kGlVertexShader,kGlFragmentShader})
+        for(const char* c=text;*c;++c) {hash^=static_cast<unsigned char>(*c);hash*=1099511628211ull;}
+    return hash;
+}
+std::string GlProgramCachePath(std::uint32_t key)
+{
+    static const std::uint64_t hash=GlShaderSourceHash();
+    char path[160];
+    std::snprintf(path,sizeof(path),"ux0:data/NFSHP2N/shader_cache/%03x-%016llx.bin",key,
+        static_cast<unsigned long long>(hash));
+    return path;
+}
+std::vector<std::uint8_t> GlReadProgramCache(std::uint32_t key)
+{
+    std::vector<std::uint8_t> data;
+    if(auto* file=std::fopen(GlProgramCachePath(key).c_str(),"rb")) {
+        std::fseek(file,0,SEEK_END);
+        const long size=std::ftell(file);
+        std::fseek(file,0,SEEK_SET);
+        if(size>0 && size<(1<<20)) {
+            data.resize(static_cast<std::size_t>(size));
+            if(std::fread(data.data(),1,data.size(),file)!=data.size())data.clear();
+        }
+        std::fclose(file);
+    }
+    return data;
+}
+void GlWriteProgramCache(std::uint32_t key,GLuint program)
+{
+    // vitaGL's glGetProgramBinary takes no size query; its output is the
+    // attribute table plus two serialized GXP shaders (a few KB).
+    std::vector<std::uint8_t> buffer(512*1024);
+    GLsizei length=0;GLenum format=0;
+    glGetProgramBinary(program,static_cast<GLsizei>(buffer.size()),&length,&format,buffer.data());
+    if(length<=0 || static_cast<std::size_t>(length)>buffer.size())return;
+    sceIoMkdir("ux0:data/NFSHP2N/shader_cache",0777);
+    const auto path=GlProgramCachePath(key);
+    const auto temporary=path+".tmp";
+    if(auto* file=std::fopen(temporary.c_str(),"wb")) {
+        const bool written=std::fwrite(buffer.data(),1,static_cast<std::size_t>(length),file)==static_cast<std::size_t>(length);
+        std::fclose(file);
+        if(written) {sceIoRemove(path.c_str());sceIoRename(temporary.c_str(),path.c_str());}
+        else sceIoRemove(temporary.c_str());
+    }
+}
+}
+
 GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
 {
     auto& program=programs[key];
@@ -685,6 +739,16 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
         }
         return shader;
     };
+    const auto compileStarted=std::chrono::steady_clock::now();
+    bool cached=false;
+    if(const auto binary=GlReadProgramCache(key);!binary.empty()) {
+        program.program=glCreateProgram();
+        glProgramBinary(program.program,0,binary.data(),static_cast<GLsizei>(binary.size()));
+        GLint linked=0;glGetProgramiv(program.program,GL_LINK_STATUS,&linked);
+        if(linked)cached=true;
+        else {glDeleteProgram(program.program);program.program=0;}
+    }
+    if(!cached) {
     const auto vertex=compile(GL_VERTEX_SHADER,kGlVertexShader);
     const auto fragment=compile(GL_FRAGMENT_SHADER,kGlFragmentShader);
     if(!vertex || !fragment) {
@@ -705,6 +769,8 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
         platform::RecordSessionEvent("renderer.vitagl.link_failed",detail);
         glDeleteProgram(program.program);program.program=0;program.failed=true;return program;
     }
+    GlWriteProgramCache(key,program.program);
+    }
     const auto location=[&](const char* name) {return glGetUniformLocation(program.program,name);};
     program.m0=location("u_m0");program.m1=location("u_m1");program.m2=location("u_m2");program.m3=location("u_m3");
     program.clipmap=location("u_clipmap");program.shade=location("u_shade");program.material=location("u_mat");
@@ -712,8 +778,17 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     program.fparam=location("u_fparam");program.yflip=location("u_yflip");program.texture=location("u_tex");
     glUseProgram(program.program);
     if(program.texture>=0)glUniform1i(program.texture,0);
-    char detail[64];std::snprintf(detail,sizeof(detail),"key=%03x programs=%" HP2_ZU "",key,programs.size());
+    char detail[96];std::snprintf(detail,sizeof(detail),"key=%03x programs=%" HP2_ZU " cached=%d ms=%.1f",key,programs.size(),
+        cached ? 1:0,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-compileStarted).count());
     platform::RecordSessionEvent("renderer.vitagl.program",detail);
+    // Build every variant the game uses once, at boot (cached after the first
+    // run), so the first race does not stall seconds on shader compiles.
+    static bool warmed=false;
+    if(!warmed) {
+        warmed=true;
+        for(const std::uint32_t known:{0x004u,0x314u,0x304u,0x00cu,0x014u})if(known!=key)Program(known);
+        if(program.program)glUseProgram(program.program);
+    }
     return program;
 }
 
