@@ -49,7 +49,7 @@ namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; extern in
 extern int collisionWitnessWarmProbe;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; }
+namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -570,6 +570,14 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_stripcull_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryStripCull = 0;
             log.Line("vita.diag", "scenery strip cull off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/particles_serial.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyParallelParticles = 0;
+            log.Line("vita.diag", "particle parallel build off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/emit_serial.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyParallelSceneryEmit = 0;
+            log.Line("vita.diag", "scenery parallel emit off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/fastmerge_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryFastMerge = 0;

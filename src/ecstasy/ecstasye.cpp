@@ -3426,10 +3426,14 @@ int ecstasySceneryRuns=[] {
     return 1;
 }();
 int ecstasySceneryStripCull=1;
+// Parallel cached-scenery emit (exact; PC HP2_PARALLEL_EMIT=0 / Vita emit_serial.txt off).
+int ecstasyParallelSceneryEmit=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_PARALLEL_EMIT"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 1;
+}();
 std::array<double,8> ecstasyWorldSplitMs{},ecstasyDiscardWorldSplitMs{};
-// Diagnostic (Vita micro clock, every 16th call): RenderOpaqueSceneryBatch
-// split = eligibility, instance+projection, run rebuild, cull setup, runs; [5] samples.
-std::array<std::uint64_t,8> ecstasySceneryEmitSplitMicros{}; // [6] command init, [7] CaptureInstance
 int ecstasySceneryFastMerge=1; // run union-box cull + template merge (Vita fastmerge_off.txt)
 int ecstasySceneryRunFastPath=[] {
 #if !defined(__vita__)
@@ -3437,19 +3441,8 @@ int ecstasySceneryRunFastPath=[] {
 #endif
     return 1;
 }();
-bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
-    const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
-    bool cullStrips)
+bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,bool lit)
 {
-    static std::uint32_t emitSampleCounter=0;
-    const bool emitSample=collisionWitnessClockMicros && ((++emitSampleCounter)&15u)==0;
-    std::uint32_t emitMark=emitSample ? collisionWitnessClockMicros():0u;
-    const auto emitAt=[&](std::size_t part) {
-        if(!emitSample)return;
-        const auto now=collisionWitnessClockMicros();
-        ecstasySceneryEmitSplitMicros[part]+=now-emitMark;emitMark=now;
-    };
-    if(emitSample)++ecstasySceneryEmitSplitMicros[5];
     const auto* solid=model.solid;
     if(!solid || !solid->geometry || model.replacement || solid->rigidAnimation ||
         solid->vertexAnimation || (solid->renderFlags&0x1000u) ||
@@ -3487,26 +3480,12 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
     // Same predicate as over every strip: each strip texture is one of these.
     if(!batch.eligible || std::any_of(batch.uniqueTextures.begin(),batch.uniqueTextures.end(),
         [](const TextureInfo* texture) {return !texture->pixels.Data();}))return false;
-
-    emitAt(0);
-    Require(phase_==Phase::Building && view.target && view.target->enabled && view.matricesCalculated,
-        "Opaque scenery batch lost its live view");
-    EcstasyDrawCommand command;
-    command.kind=EcstasyDrawKind::SolidStrip;command.model=&model;command.cachedOpaqueScenery=true;
-    command.view=&view;command.target=view.target;command.clipClass=2;
-    command.textureQScale=view.pixelScale;
-    emitAt(6);
-    command.instance=&CaptureInstance(localToWorld,view,lightContext);
-    emitAt(7);
-    const auto& projection=CaptureProjection(view);
-    const auto* root=model.resources && model.resources->catalogueRoot ?
-        model.resources->catalogueRoot:model.resources;
-    const auto* fallback=root?root->defaultLightMaterial:nullptr;
-    emitAt(1);
     if(ecstasySceneryRuns) {
-        const bool lit=lightContext!=nullptr;
+        const auto* root=model.resources && model.resources->catalogueRoot ?
+            model.resources->catalogueRoot:model.resources;
+        const auto* fallback=root?root->defaultLightMaterial:nullptr;
         if(!batch.runsValid || batch.runLit!=lit || batch.runInGame!=inGameMaterials_ || batch.runFallback!=fallback) {
-            // Same per-strip values and grouping rule as the per-strip loop below.
+            // Same per-strip values and grouping rule as the per-strip loop.
             batch.runs.clear();batch.runStrips.clear();batch.materials.clear();batch.drawFlags.clear();
             for(const auto& strip:batch.strips) {
                 const auto flags=lit?strip.flags:strip.flags&~0x1c0u;
@@ -3542,73 +3521,138 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
             }
             batch.runLit=lit;batch.runInGame=inGameMaterials_;batch.runFallback=fallback;batch.runsValid=true;
         }
-        // An intersecting model drops the strips that ecstasyDetermineVisibleStrips
-        // (mode 1, non-angular) drops: screen-clip bounds outside. A model inside
-        // the clip volume keeps every strip, as there. GPU clipping does the rest.
-        emitAt(2);
-        float screenClip[16];
+    }
+    if(reused)reusedOpaqueSceneryStrips_+=batch.strips.size();
+    return true;
+}
+
+EcstasyDrawInstance& EcstasyFrame::AllocateInstance()
+{
+    Require(phase_==Phase::Building,"Draw instance lost its active capture");
+    if(liveInstances_==capturedInstances_.size())capturedInstances_.emplace_back();
+    return capturedInstances_[liveInstances_++];
+}
+
+void EcstasyFrame::FillInstance(EcstasyDrawInstance& instance,const float localToWorld[16],
+    const CarCinematicScreen& view,const SceneLightContext* lightContext)
+{
+    eMulMatrix(instance.localToClip.data(),localToWorld,view.matrices.worldToClip);
+    if(lightContext)instance.lightContext=*lightContext;
+    else instance.lightContext.reset();
+}
+
+std::uint32_t EcstasyFrame::AppendSceneryRunStrips(const std::vector<const EditorMarkerSolidGeometry::Strip*>& strips)
+{
+    const auto base=static_cast<std::uint32_t>(sceneryRunStrips_.size());
+    sceneryRunStrips_.insert(sceneryRunStrips_.end(),strips.begin(),strips.end());
+    return base;
+}
+
+void EcstasyFrame::AppendOpaqueSceneryCommands(const EcstasyDrawCommand* first,std::size_t count,std::uint32_t runBase)
+{
+    Require(phase_==Phase::Building,"Opaque scenery commands need a building frame");
+    for(std::size_t at=0;at<count;++at) {
+        commands_.push_back(first[at]);
+        if(commands_.back().sceneryRunCount)commands_.back().sceneryRunFirst+=runBase;
+    }
+}
+
+void EcstasyFrame::EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
+    const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
+    const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,
+    std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips) const
+{
+    const auto* solid=model.solid;
+    EcstasyDrawCommand command;
+    command.kind=EcstasyDrawKind::SolidStrip;command.model=&model;command.cachedOpaqueScenery=true;
+    command.view=&view;command.target=view.target;command.clipClass=2;
+    command.textureQScale=view.pixelScale;
+    command.instance=&instance;
+    // An intersecting model drops the strips that ecstasyDetermineVisibleStrips
+    // (mode 1, non-angular) drops: screen-clip bounds outside. A model inside
+    // the clip volume keeps every strip, as there. GPU clipping does the rest.
+    float screenClip[16];
+    if(cullStrips) {
+        ecstasyViewLocalToScreenClip(&view,screenClip,localToWorld);
+        const auto whole=ecstasyClassifyBounds(solid->minimum,solid->maximum,screenClip);
+        if(whole==1) {
+            float clip[16];ecstasyViewLocalToClip(&view,clip,localToWorld);
+            if(ecstasyClassifyBounds(solid->minimum,solid->maximum,clip)==2)cullStrips=false;
+        } else cullStrips=false;
+    }
+    for(std::size_t runIndex=0;runIndex<batch.runs.size();++runIndex) {
+        const auto& run=batch.runs[runIndex];
+        const auto* texture=batch.strips[run.first].texture;
         if(cullStrips) {
-            ecstasyViewLocalToScreenClip(&view,screenClip,localToWorld);
-            const auto whole=ecstasyClassifyBounds(solid->minimum,solid->maximum,screenClip);
-            if(whole==1) {
-                float clip[16];ecstasyViewLocalToClip(&view,clip,localToWorld);
-                if(ecstasyClassifyBounds(solid->minimum,solid->maximum,clip)==2)cullStrips=false;
-            } else cullStrips=false;
-        }
-        emitAt(3);
-        for(std::size_t runIndex=0;runIndex<batch.runs.size();++runIndex) {
-            const auto& run=batch.runs[runIndex];
-            const auto* texture=batch.strips[run.first].texture;
-            if(cullStrips) {
-                const auto start=sceneryRunStrips_.size();
-                // The run's union box first: wholly outside one clip plane
-                // (a convex region) drops every strip; wholly inside keeps
-                // every strip (the GPU clips any strip that is not).
-                const auto& box=batch.runBounds[runIndex];
-                const auto whole=run.count>1 && ecstasySceneryFastMerge ? ecstasyClassifyBounds(box.data(),box.data()+3,screenClip):1;
-                if(whole==0)continue;
-                if(whole==2)sceneryRunStrips_.insert(sceneryRunStrips_.end(),
-                    batch.runStrips.begin()+run.first,batch.runStrips.begin()+run.first+run.count);
-                else for(std::uint32_t at=run.first;at<run.first+run.count;++at) {
-                    const auto* geometryStrip=batch.runStrips[at];
-                    if(ecstasyClassifyBounds(geometryStrip->minimum.data(),geometryStrip->maximum.data(),screenClip))
-                        sceneryRunStrips_.push_back(geometryStrip);
-                }
-                const auto visible=sceneryRunStrips_.size()-start;
-                if(!visible)continue;
-                if(command.texture!=texture) {
-                    command.texture=texture;
-                    command.clipToScreen=&CaptureMaterialProjection(*texture,projection);
-                }
-                command.drawFlags=batch.drawFlags[run.first];command.lightMaterial=batch.materials[run.first];
-                command.strip=sceneryRunStrips_[start];
-                if(visible>1) {
-                    command.sceneryRunFirst=static_cast<std::uint32_t>(start);
-                    command.sceneryRunCount=static_cast<std::uint16_t>(visible);
-                } else {
-                    sceneryRunStrips_.pop_back();command.sceneryRunFirst=0;command.sceneryRunCount=0;
-                }
-                commands_.push_back(command);
-                continue;
+            const auto start=runStrips.size();
+            // The run's union box first: wholly outside one clip plane
+            // (a convex region) drops every strip; wholly inside keeps
+            // every strip (the GPU clips any strip that is not).
+            const auto& box=batch.runBounds[runIndex];
+            const auto whole=run.count>1 && ecstasySceneryFastMerge ? ecstasyClassifyBounds(box.data(),box.data()+3,screenClip):1;
+            if(whole==0)continue;
+            if(whole==2)runStrips.insert(runStrips.end(),
+                batch.runStrips.begin()+run.first,batch.runStrips.begin()+run.first+run.count);
+            else for(std::uint32_t at=run.first;at<run.first+run.count;++at) {
+                const auto* geometryStrip=batch.runStrips[at];
+                if(ecstasyClassifyBounds(geometryStrip->minimum.data(),geometryStrip->maximum.data(),screenClip))
+                    runStrips.push_back(geometryStrip);
             }
+            const auto visible=runStrips.size()-start;
+            if(!visible)continue;
             if(command.texture!=texture) {
                 command.texture=texture;
                 command.clipToScreen=&CaptureMaterialProjection(*texture,projection);
             }
-            command.strip=batch.runStrips[run.first];command.drawFlags=batch.drawFlags[run.first];
-            command.lightMaterial=batch.materials[run.first];
-            if(run.count>1) {
-                command.sceneryRunFirst=static_cast<std::uint32_t>(sceneryRunStrips_.size());
-                command.sceneryRunCount=static_cast<std::uint16_t>(run.count);
-                sceneryRunStrips_.insert(sceneryRunStrips_.end(),batch.runStrips.begin()+run.first,
-                    batch.runStrips.begin()+run.first+run.count);
-            } else {command.sceneryRunFirst=0;command.sceneryRunCount=0;}
-            commands_.push_back(command);
+            command.drawFlags=batch.drawFlags[run.first];command.lightMaterial=batch.materials[run.first];
+            command.strip=runStrips[start];
+            if(visible>1) {
+                command.sceneryRunFirst=static_cast<std::uint32_t>(start);
+                command.sceneryRunCount=static_cast<std::uint16_t>(visible);
+            } else {
+                runStrips.pop_back();command.sceneryRunFirst=0;command.sceneryRunCount=0;
+            }
+            output.push_back(command);
+            continue;
         }
-        if(reused)reusedOpaqueSceneryStrips_+=batch.strips.size();
-        emitAt(4);
+        if(command.texture!=texture) {
+            command.texture=texture;
+            command.clipToScreen=&CaptureMaterialProjection(*texture,projection);
+        }
+        command.strip=batch.runStrips[run.first];command.drawFlags=batch.drawFlags[run.first];
+        command.lightMaterial=batch.materials[run.first];
+        if(run.count>1) {
+            command.sceneryRunFirst=static_cast<std::uint32_t>(runStrips.size());
+            command.sceneryRunCount=static_cast<std::uint16_t>(run.count);
+            runStrips.insert(runStrips.end(),batch.runStrips.begin()+run.first,
+                batch.runStrips.begin()+run.first+run.count);
+        } else {command.sceneryRunFirst=0;command.sceneryRunCount=0;}
+        output.push_back(command);
+    }
+}
+
+bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
+    const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
+    bool cullStrips)
+{
+    if(!PrepareOpaqueSceneryBatch(batch,model,lightContext!=nullptr))return false;
+    Require(phase_==Phase::Building && view.target && view.target->enabled && view.matricesCalculated,
+        "Opaque scenery batch lost its live view");
+    const auto& instance=CaptureInstance(localToWorld,view,lightContext);
+    const auto& projection=CaptureProjection(view);
+    if(ecstasySceneryRuns) {
+        EmitOpaqueSceneryRuns(batch,model,localToWorld,view,instance,projection,cullStrips,commands_,sceneryRunStrips_);
         return true;
     }
+    const auto& geometry=*model.solid->geometry;
+    const auto* root=model.resources && model.resources->catalogueRoot ?
+        model.resources->catalogueRoot:model.resources;
+    const auto* fallback=root?root->defaultLightMaterial:nullptr;
+    EcstasyDrawCommand command;
+    command.kind=EcstasyDrawKind::SolidStrip;command.model=&model;command.cachedOpaqueScenery=true;
+    command.view=&view;command.target=view.target;command.clipClass=2;
+    command.textureQScale=view.pixelScale;
+    command.instance=&instance;
     constexpr auto noRun=std::numeric_limits<std::size_t>::max();
     std::size_t runCommand=noRun;
     for(const auto& strip:batch.strips) {
@@ -3640,7 +3684,6 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
         runCommand=commands_.size();
         commands_.push_back(command);
     }
-    if(reused)reusedOpaqueSceneryStrips_+=batch.strips.size();
     return true;
 }
 

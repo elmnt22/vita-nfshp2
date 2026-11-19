@@ -221,6 +221,8 @@ void appendCarMarker(CarAppearance& appearance,uint32_t key,const std::array<flo
 }
 }
 
+extern uint32_t (*collisionWitnessClockMicros)();
+namespace hp2 { std::array<std::uint64_t,8> carRenderSplitMicros{}; }
 namespace hp2 {
 struct CarEffectsResources::Storage {
     std::array<CarEffectPosition,Capacity> positions{};
@@ -1212,12 +1214,21 @@ std::size_t renderCarRoadShadow(CarAppearance& render,Car* car,const CarCinemati
 }
 
 
+// Diagnostic (Vita micro clock): setup, flares, driver, shadows, body,
+// wheels, wipers; [7] rendered cars.
 std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     const CarCinematicScreen& view,hp2::EcstasyFrame& frame,
     const float position[3],const float orientation[16],const float wheels[4][16],
     const float brakes[4][16],std::int32_t worldFrames,std::int32_t presentationLayout,
     std::int32_t forcedLod,std::uint32_t sourceFlags,std::uint32_t lightFlags)
 {
+    const bool timed=collisionWitnessClockMicros!=nullptr;
+    std::uint32_t carMark=timed ? collisionWitnessClockMicros():0u;
+    const auto carAt=[&](std::size_t part) {
+        if(!timed)return;
+        const auto now=collisionWitnessClockMicros();
+        hp2::carRenderSplitMicros[part]+=now-carMark;carMark=now;
+    };
     // PAL120EF8..12356C geometry/driver branches. Car projected shadows and
     // light-volume modifiers remain separate source dependencies.
     hp2::Require(view.view && view.matricesCalculated,
@@ -1242,6 +1253,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     transform[15]=1.0f;
     float toClip[16];eMulMatrix(toClip,transform,view.matrices.worldToClip);
     if (!ecstasyClassifyBounds(render.minimum,render.maximum,toClip))return 0;
+    if(timed)++hp2::carRenderSplitMicros[7];
     auto* nativeFrame=car ? car->Frame():nullptr;
     hp2::Require(!car || (nativeFrame && nativeFrame->movement &&
         nativeFrame->movement->bindings.owner==car && nativeFrame->movement->bindings.state &&
@@ -1321,7 +1333,9 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
         }
         return frame.RenderModel(render.models[slot],matrix,view,flags|sourceFlags,alpha,worldFrames,context);
     };
+    carAt(0);
     std::size_t submitted=renderCarLightFlares(render,car,view,frame,transform,worldFrames,lightFlags);
+    carAt(1);
     // PAL121A84..121D10: use the same appearance/character owner, original
     // pixel thresholds, passenger-seat offset and front-facing detail rule.
     if(!reducedDetail && car && car->driverVisible && car->visual && car->driverInfo && view.id!=3 && !car->visual->replaySuppressed) {
@@ -1354,6 +1368,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
             submitted+=hp2::RenderDriverVisual(driver,driverTransform,&lighting,view,frame,0,detail);
         }
     }
+    carAt(2);
     const auto shadowLod=distanceScale>1.0f ?
         std::min(lod,carRenderNativeDetailLod(render.models.data(),visibilityPixels)):lod;
     {
@@ -1370,6 +1385,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
         frame.RecordCarShadowCapture(std::chrono::duration<double,std::milli>(roadStarted-sunStarted).count(),
             std::chrono::duration<double,std::milli>(Clock::now()-roadStarted).count());
     }
+    carAt(3);
     submitted+=draw(lod,drawTransform,environmentFlags);
     const auto* damage=carRenderDamage(car);
     const auto intact=[&](std::uint32_t item) {return !damage || carDamageItemLevel(damage->levels,item)<2;};
@@ -1380,6 +1396,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     if(lod<2 && damage && bodyDamageVisibleTotal(&damage->body)>0.019999999552965164f)
         submitted+=draw(20,drawTransform);
 
+    carAt(4);
     // Body D has no wheel pass. Front/rear A/B/C meshes and the actual
     // suspension rotation/translation are selected by the original loops.
     if(lod<3) {
@@ -1424,6 +1441,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
             }
         }
     }
+    carAt(5);
     // Source wiper animation uses the same frame timer window and encoded
     // rigid animation start; RenderModel evaluates its real animation tree.
     if(!reducedDetail && pixels>40 && car)if(auto* carFrame=car->Frame()) {
@@ -1441,6 +1459,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
             submitted+=draw(slot,wiperTransform);
         }
     }
+    carAt(6);
     return submitted;
 }
 }
