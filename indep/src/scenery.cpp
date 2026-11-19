@@ -17,7 +17,7 @@
 #include <set>
 
 namespace { int32_t currentZoneNumber=-1; } // PAL3302B0.
-namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; }
+namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; }
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
 
 SceneryInstance* sceneryFindInstanceByIndex(const Scenery* scenery,int32_t section,int32_t instance)
@@ -952,38 +952,130 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     const auto splitLit=std::chrono::steady_clock::now();
     std::size_t splitBatched=0,splitInlineLights=0;double splitInlineLightMs=0,splitModelMs=0;
     std::size_t splitRejected=0,splitRejectedStrips=0,splitOverLimit=0,splitOverLimitStrips=0,splitModelCommands=0;
+#if !defined(__SWITCH__) && !defined(__vita__)
+    // PC diagnostics only: HP2_CACHED_SCENERY=1 exercises the console path.
+    static const bool cachedScenery=[] {const char* value=std::getenv("HP2_CACHED_SCENERY");return value && *value=='1';}();
+    // PC HP2_VERIFY_SCENERY_EMIT=1: build the parallel emit unmerged, take
+    // the serial path and compare every cached draw's commands with it.
+    static const bool verifyParallelEmit=[] {const char* value=std::getenv("HP2_VERIFY_SCENERY_EMIT");return value && *value=='1';}();
+#else
+    constexpr bool cachedScenery=true,verifyParallelEmit=false;
+#endif
+    const auto lightContextFor=[&](std::size_t drawIndex,std::optional<SceneLightContext>& localContext)->const SceneLightContext* {
+        auto& draw=draws[drawIndex];
+        if(!(draw.identity || (draw.model->solid && (draw.model->solid->renderFlags&0x1c0u))))return nullptr;
+        Require(resources,"Scenery light context lost its canonical resource registry");
+        if(draw.identity) {
+            if(!worldContext)worldContext=frame.SetupWorldLightContext(*resources,view);
+            return &*worldContext;
+        }
+        // PAL150F9C calls elSetupLightContext for IsLit models;
+        // the instance matrix and actual environment orientation are
+        // consumed together before the frame copies this context.
+        if(drawIndex<preparedLights.size() && preparedLights[drawIndex])
+            return &*preparedLights[drawIndex];
+        // A preceding draw can select a new vertex-animation
+        // solid on this same live model. Re-evaluate the original
+        // predicate above and retain its owner-side fallback.
+        const auto lightStart=std::chrono::steady_clock::now();
+        localContext=SetupLightContext(resources->Lights(),draw.matrix.data(),
+            frame.EnvironmentMatrix(),camera.eye,view,frame.ApplicationState());
+        ++splitInlineLights;
+        splitInlineLightMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lightStart).count();
+        return &*localContext;
+    };
+    const auto renderRejected=[&](std::size_t drawIndex,const SceneLightContext* context) {
+        auto& draw=draws[drawIndex];
+        const auto commandsBefore=frame.Commands().size();
+        const auto modelStart=std::chrono::steady_clock::now();
+        frame.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context);
+        splitModelMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-modelStart).count();
+        splitModelCommands+=frame.Commands().size()-commandsBefore;
+    };
+    // Parallel cached-scenery emit, exact: the owner prepares every batch
+    // cache, light context and instance slot in draw order; workers build
+    // each cached draw's commands (pure reads); the owner then appends them
+    // and renders the rejected models in the original draw order. Returns
+    // false (nothing emitted) when one batch would need two lit states, or a
+    // rejected model could change a solid/texture table read by later draws.
+    constexpr std::size_t emitChunkDraws=48;
+    const auto parallelEmit=[&](bool merge)->bool {
+        const auto pass=++emitPass_;
+        auto& plan=emitPlanScratch_;
+        plan.assign(draws.size(),EmitPlan{});
+        if(preparedLights.size()<draws.size())preparedLights.resize(draws.size());
+        for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
+            auto& draw=draws[drawIndex];
+            std::optional<SceneLightContext> localContext;
+            auto* context=lightContextFor(drawIndex,localContext);
+            if(localContext) {preparedLights[drawIndex]=std::move(localContext);context=&*preparedLights[drawIndex];}
+            plan[drawIndex].context=context;
+            const auto* solid=draw.model->solid;
+            const bool stripCull=draw.clip==1 && hp2::ecstasySceneryStripCull && hp2::ecstasySceneryRuns;
+            const bool gpuClip=draw.clip==1 && solid && solid->geometry &&
+                (stripCull || solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips);
+            if(solid && (draw.clip==2 || gpuClip)) {
+                auto& batch=opaqueBatches_[draw.model->solid];
+                const bool lit=context!=nullptr;
+                if(batch.emitPass==pass && batch.emitPassLit!=lit)return false;
+                if(frame.PrepareOpaqueSceneryBatch(batch,*draw.model,lit)) {
+                    batch.emitPass=pass;batch.emitPassLit=lit;
+                    plan[drawIndex].batch=&batch;plan[drawIndex].stripCull=stripCull;
+                    continue;
+                }
+                if(merge) {++splitRejected;splitRejectedStrips+=solid->geometry->strips.size();}
+            } else if(merge && solid && solid->geometry) {++splitOverLimit;splitOverLimitStrips+=solid->geometry->strips.size();}
+            if(draw.model->replacement || !solid || solid->rigidAnimation || solid->vertexAnimation)return false;
+        }
+        Require(view.target && view.target->enabled && view.matricesCalculated,"Opaque scenery batch lost its live view");
+        const auto& projection=frame.SceneryProjection(view);
+        for(auto& entry:plan)if(entry.batch)entry.instance=&frame.AllocateInstance();
+        const auto chunkCount=(draws.size()+emitChunkDraws-1)/emitChunkDraws;
+        auto& chunks=emitChunkScratch_;
+        if(chunks.size()<chunkCount)chunks.resize(chunkCount);
+        RunNativeSceneJobs(chunkCount,[&](std::size_t chunkIndex) {
+            auto& chunk=chunks[chunkIndex];
+            chunk.commands.clear();chunk.runStrips.clear();
+            const auto first=chunkIndex*emitChunkDraws,last=std::min(first+emitChunkDraws,draws.size());
+            for(auto drawIndex=first;drawIndex<last;++drawIndex) {
+                auto& entry=plan[drawIndex];
+                if(!entry.batch)continue;
+                const auto& draw=draws[drawIndex];
+                EcstasyFrame::FillInstance(*entry.instance,draw.matrix.data(),view,entry.context);
+                entry.begin=static_cast<std::uint32_t>(chunk.commands.size());
+                frame.EmitOpaqueSceneryRuns(*entry.batch,*draw.model,draw.matrix.data(),view,*entry.instance,
+                    projection,entry.stripCull,chunk.commands,chunk.runStrips);
+                entry.end=static_cast<std::uint32_t>(chunk.commands.size());
+            }
+        },2);
+        if(!merge)return true;
+        for(std::size_t chunkIndex=0;chunkIndex<chunkCount;++chunkIndex) {
+            auto& chunk=chunks[chunkIndex];
+            const auto runBase=frame.AppendSceneryRunStrips(chunk.runStrips);
+            const auto first=chunkIndex*emitChunkDraws,last=std::min(first+emitChunkDraws,draws.size());
+            for(auto drawIndex=first;drawIndex<last;++drawIndex) {
+                const auto& entry=plan[drawIndex];
+                if(entry.batch) {
+                    frame.AppendOpaqueSceneryCommands(chunk.commands.data()+entry.begin,entry.end-entry.begin,runBase);
+                    ++splitBatched;
+                } else renderRejected(drawIndex,entry.context);
+            }
+        }
+        return true;
+    };
+    const bool parallelCandidate=cachedScenery && hp2::ecstasyParallelSceneryEmit && hp2::ecstasySceneryRuns &&
+        draws.size()>=2*emitChunkDraws && NativeSceneEffectiveHardwareConcurrency()>1;
+    if(parallelCandidate && !verifyParallelEmit && parallelEmit(true)) {
+        ++parallelEmitViews_;
+    } else {
+    const bool verifying=parallelCandidate && verifyParallelEmit && parallelEmit(false);
+    std::vector<std::pair<std::size_t,std::size_t>> serialRanges;
+    if(verifying)serialRanges.assign(draws.size(),{0,0});
     for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
         auto& draw=draws[drawIndex];
         std::optional<SceneLightContext> localContext;
-        const SceneLightContext* context=nullptr;
-        if(draw.identity || (draw.model->solid && (draw.model->solid->renderFlags&0x1c0u))) {
-            Require(resources,"Scenery light context lost its canonical resource registry");
-            if(draw.identity) {
-                if(!worldContext)worldContext=frame.SetupWorldLightContext(*resources,view);
-                context=&*worldContext;
-            } else {
-                // PAL150F9C calls elSetupLightContext for IsLit models;
-                // the instance matrix and actual environment orientation are
-                // consumed together before the frame copies this context.
-                if(drawIndex<preparedLights.size() && preparedLights[drawIndex])
-                    context=&*preparedLights[drawIndex];
-                else {
-                    // A preceding draw can select a new vertex-animation
-                    // solid on this same live model. Re-evaluate the original
-                    // predicate above and retain its owner-side fallback.
-                    const auto lightStart=std::chrono::steady_clock::now();
-                    localContext=SetupLightContext(resources->Lights(),draw.matrix.data(),
-                        frame.EnvironmentMatrix(),camera.eye,view,frame.ApplicationState());context=&*localContext;
-                    ++splitInlineLights;
-                    splitInlineLightMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lightStart).count();
-                }
-            }
-        }
-#if !defined(__SWITCH__) && !defined(__vita__)
-        // PC diagnostics only: HP2_CACHED_SCENERY=1 exercises the console path.
-        static const bool cachedScenery=[] {const char* value=std::getenv("HP2_CACHED_SCENERY");return value && *value=='1';}();
+        const SceneLightContext* context=lightContextFor(drawIndex,localContext);
         if(cachedScenery)
-#endif
         {
         // Small opaque models can use the GPU clipper at the frustum edge.
         // Bound the extra submitted geometry before using the cached path.
@@ -993,15 +1085,53 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             (stripCull || solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips);
         if(solid && (draw.clip==2 || gpuClip)) {
             auto& batch=opaqueBatches_[draw.model->solid];
-            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context,stripCull)) {++splitBatched;continue;}
+            const auto commandsBefore=frame.Commands().size();
+            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context,stripCull)) {
+                if(verifying)serialRanges[drawIndex]={commandsBefore,frame.Commands().size()};
+                ++splitBatched;continue;
+            }
             ++splitRejected;splitRejectedStrips+=solid->geometry->strips.size();
         } else if(solid && solid->geometry) {++splitOverLimit;splitOverLimitStrips+=solid->geometry->strips.size();}
         }
-        const auto commandsBefore=frame.Commands().size();
-        const auto modelStart=std::chrono::steady_clock::now();
-        frame.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context);
-        splitModelMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-modelStart).count();
-        splitModelCommands+=frame.Commands().size()-commandsBefore;
+        renderRejected(drawIndex,context);
+    }
+#if !defined(__SWITCH__) && !defined(__vita__)
+    if(verifying) {
+        // Compare each cached draw's unmerged parallel commands with the
+        // serial ones: every field the gather reads, run strips by value and
+        // the instance by value (instance slots differ by design).
+        static std::uint64_t checks=0,mismatches=0;
+        const auto& commands=frame.Commands();const auto& runStrips=frame.SceneryRunStrips();
+        for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
+            const auto& entry=emitPlanScratch_[drawIndex];
+            if(!entry.batch)continue;
+            ++checks;
+            const auto& chunk=emitChunkScratch_[drawIndex/emitChunkDraws];
+            const auto [serialFirst,serialLast]=serialRanges[drawIndex];
+            bool same=serialLast-serialFirst==entry.end-entry.begin;
+            for(std::size_t at=0;same && at<entry.end-entry.begin;++at) {
+                const auto& a=chunk.commands[entry.begin+at];const auto& b=commands[serialFirst+at];
+                same=a.kind==b.kind && a.strip==b.strip && a.model==b.model && a.texture==b.texture &&
+                    a.clipToScreen==b.clipToScreen && a.view==b.view && a.target==b.target &&
+                    a.drawFlags==b.drawFlags && a.lightMaterial==b.lightMaterial && a.clipClass==b.clipClass &&
+                    a.textureQScale==b.textureQScale && a.cachedOpaqueScenery==b.cachedOpaqueScenery &&
+                    a.nativeRenderEggState==b.nativeRenderEggState && a.sceneryRunCount==b.sceneryRunCount &&
+                    a.instance && b.instance && a.instance->localToClip==b.instance->localToClip &&
+                    a.instance->lightContext.has_value()==b.instance->lightContext.has_value() &&
+                    (!a.instance->lightContext || std::memcmp(&*a.instance->lightContext,&*b.instance->lightContext,
+                        sizeof(SceneLightContext))==0);
+                for(std::uint32_t strip=0;same && strip<a.sceneryRunCount;++strip)
+                    same=chunk.runStrips[a.sceneryRunFirst+strip]==runStrips[b.sceneryRunFirst+strip];
+            }
+            if(!same)++mismatches;
+        }
+        if((++verifyParallelEmitViews_&255u)==0) {
+            char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
+                (unsigned long long)checks,(unsigned long long)mismatches);
+            platform::RecordSessionEvent("render.scenery_emit_verify",text);
+        }
+    }
+#endif
     }
     {
         // Diagnostic: prepare / light / emit split per view (logged every 300 renders).

@@ -937,6 +937,9 @@ struct OpaqueSceneryBatch {
     std::vector<std::uint32_t> drawFlags;
     const EditorMarkerLightMaterial* runFallback{};
     bool runLit{},runInGame{},runsValid{};
+    // Parallel scenery emit: the render pass that last prepared this batch
+    // and its lit state (one batch state must serve every draw of a pass).
+    std::uint64_t emitPass{};bool emitPassLit{};
         std::vector<std::array<float,6>> runBounds; // union of each run's strip boxes (min xyz, max xyz)
         std::vector<const TextureInfo*> uniqueTextures; // distinct strips[].texture (pixel residency check)
 };
@@ -1042,6 +1045,23 @@ public:
     bool RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
         const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
         bool cullStrips=false);
+    // RenderOpaqueSceneryBatch in parts (strip runs on). Prepare (owner
+    // thread) refreshes the batch cache and tests eligibility; Emit reads
+    // only the prepared batch, the view and its inputs (any thread) and
+    // writes commands whose sceneryRunFirst indexes the given runStrips.
+    bool PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,bool lit);
+    void EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
+        const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
+        const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,
+        std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips) const;
+    EcstasyDrawInstance& AllocateInstance();
+    static void FillInstance(EcstasyDrawInstance& instance,const float localToWorld[16],
+        const CarCinematicScreen& view,const SceneLightContext* lightContext);
+    const EcstasyDrawProjection& SceneryProjection(const CarCinematicScreen& view) {return CaptureProjection(view);}
+    // Appends a chunk's run strips (returns their base) / its commands with
+    // sceneryRunFirst rebased by runBase.
+    std::uint32_t AppendSceneryRunStrips(const std::vector<const EditorMarkerSolidGeometry::Strip*>& strips);
+    void AppendOpaqueSceneryCommands(const EcstasyDrawCommand* first,std::size_t count,std::uint32_t runBase);
     std::uint64_t ReusedOpaqueSceneryStrips() const noexcept {return reusedOpaqueSceneryStrips_;}
     void RenderStrip(const EditorMarkerModel& model,const EditorMarkerSolidGeometry::Strip& strip,
         const TextureInfo& texture,const EditorMarkerLightMaterial* material,

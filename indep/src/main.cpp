@@ -59,7 +59,7 @@
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
-namespace hp2 { extern std::array<double,4> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,8> ecstasySceneryEmitSplitMicros; extern std::array<std::uint64_t,6> nisRenderSplitMicros; }
+namespace hp2 { extern std::array<double,4> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
 extern uint64_t collisionWitnessWarmMismatches;
@@ -1489,17 +1489,17 @@ bool ApplicationRuntime::Tick()
                     s.host.RecordSessionEvent(pass ? "render.discarded_world_split":"render.world_split",detail);
                     w={};
                 }
-                if(auto& e=hp2::ecstasySceneryEmitSplitMicros;e[5]) {
-                    const double n=static_cast<double>(e[5]);
-                    std::snprintf(detail,sizeof(detail),"samples=%llu eligible_us=%.2f command_us=%.2f capture_instance_us=%.2f projection_us=%.2f runs_us=%.2f cull_us=%.2f emit_us=%.2f",
-                        static_cast<unsigned long long>(e[5]),e[0]/n,e[6]/n,e[7]/n,e[1]/n,e[2]/n,e[3]/n,e[4]/n);
-                    s.host.RecordSessionEvent("render.scenery_emit_split",detail);
-                    e={};
-                }
                 if(auto& e=hp2::nisRenderSplitMicros;e[5]) {
                     std::snprintf(detail,sizeof(detail),"playbacks=%llu setup_us=%.1f ground_us=%.1f rotations_us=%.1f pose_us=%.1f props_us=%.1f",
                         static_cast<unsigned long long>(e[5]),e[0]/(double)e[5],e[1]/(double)e[5],e[2]/(double)e[5],e[3]/(double)e[5],e[4]/(double)e[5]);
                     s.host.RecordSessionEvent("render.nis_split",detail);
+                    e={};
+                }
+                if(auto& e=hp2::carRenderSplitMicros;e[7]) {
+                    const double n=static_cast<double>(e[7]);
+                    std::snprintf(detail,sizeof(detail),"cars=%llu setup_us=%.1f flares_us=%.1f driver_us=%.1f shadows_us=%.1f body_us=%.1f wheels_us=%.1f wipers_us=%.1f",
+                        static_cast<unsigned long long>(e[7]),e[0]/n,e[1]/n,e[2]/n,e[3]/n,e[4]/n,e[5]/n,e[6]/n);
+                    s.host.RecordSessionEvent("render.car_split",detail);
                     e={};
                 }
             }
