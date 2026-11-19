@@ -18,7 +18,10 @@ std::array<float,2> nativeUiCanvasScale(float width,float height)
 // since the last read: 0 preamble, 1 shading, 2 resident acquire, 3 rest of
 // the solid branch, 4 batch append, 5 non-solid draws; [6] = sampled frames.
 std::array<double,10> nativeGatherStepMilliseconds{};
-std::array<double,6> nativeBatchBreaks{};
+// Diagnostic: generic solid draws by kind (plain, reflection, specular,
+// shadow), resident misses, resident re-prepares.
+std::array<double,6> nativeSolidKinds{};
+std::array<double,12> nativeBatchBreaks{};
 
 void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     std::vector<VkVertex>& output,std::vector<std::uint32_t>& elementIndices,
@@ -188,7 +191,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
                 else if(batch.nativeLocalToClip!=previous.nativeLocalToClip || batch.nativeClipMapping!=previous.nativeClipMapping ||
                     batch.nativeTextureQScale!=previous.nativeTextureQScale)reason=3;
                 else if(batch.nativeShadingIndex!=previous.nativeShadingIndex)reason=4;
-                nativeBatchBreaks[reason]+=1.0;
+                nativeBatchBreaks[reason+(batch.cachedOpaqueScenery ? 6:0)]+=1.0;
             }
             batches.push_back(batch);
         }
@@ -699,6 +702,8 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             step(1);
             bool prepare=false;auto* resident=residentGeometry.Acquire(job,prepare);
             step(2);
+            nativeSolidKinds[reflection ? 1:specular ? 2:draw.carShadow!=EcstasyCarShadow::None ? 3:0]+=1;
+            if(!resident)nativeSolidKinds[4]+=1; else if(prepare)nativeSolidKinds[5]+=1;
             VkSolidTopology topology;
             if(!resident) {
                 topology=DecodeNativeSolidTopology(strip,job.lineTopology);

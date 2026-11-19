@@ -811,10 +811,18 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             platform::RecordSessionEvent("renderer.vitagl.gather_steps",detail);
             steps={};
             auto& breaks=nativeBatchBreaks;
-            std::snprintf(detail,sizeof(detail),"frames=300 per_frame texture=%.0f state=%.0f index_gap=%.0f transform=%.0f shading=%.0f other=%.0f",
-                breaks[0]/300,breaks[1]/300,breaks[2]/300,breaks[3]/300,breaks[4]/300,breaks[5]/300);
+            std::snprintf(detail,sizeof(detail),"per_frame solids texture=%.0f state=%.0f index_gap=%.0f transform=%.0f shading=%.0f other=%.0f scenery texture=%.0f state=%.0f index_gap=%.0f transform=%.0f shading=%.0f other=%.0f",
+                breaks[0]/300,breaks[1]/300,breaks[2]/300,breaks[3]/300,breaks[4]/300,breaks[5]/300,
+                breaks[6]/300,breaks[7]/300,breaks[8]/300,breaks[9]/300,breaks[10]/300,breaks[11]/300);
             platform::RecordSessionEvent("renderer.vitagl.batch_breaks",detail);
             breaks={};
+            std::snprintf(detail,sizeof(detail),"per_frame compares=%.1f bytes=%.0f solids plain=%.0f reflection=%.0f specular=%.0f shadow=%.0f miss=%.0f reprepare=%.0f",
+                nativeTextureCompares/300.0,nativeTextureCompareBytes/300.0,
+                nativeSolidKinds[0]/300.0,nativeSolidKinds[1]/300.0,nativeSolidKinds[2]/300.0,
+                nativeSolidKinds[3]/300.0,nativeSolidKinds[4]/300.0,nativeSolidKinds[5]/300.0);
+            nativeSolidKinds={};
+            platform::RecordSessionEvent("renderer.vitagl.texture_compare",detail);
+            nativeTextureCompares=0;nativeTextureCompareBytes=0;
         }
     }
     {
