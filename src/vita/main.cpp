@@ -47,6 +47,8 @@ unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 
 namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; }
 extern int collisionWitnessWarmProbe;
+extern uint32_t (*collisionWitnessProbeClock)();
+extern uint32_t (*collisionWitnessClockMicros)();
 
 namespace {
 class VitaLog;
@@ -60,21 +62,90 @@ constexpr const char* kDataDirectory = "ux0:data/NFSHP2N";
 constexpr int kWidth = 960;
 constexpr int kHeight = 544;
 
+// Lines are formatted on the caller and written by a low-priority thread:
+// a memory-card fflush costs ~3-4 ms, so the 5 s diagnostics report used to
+// stall the game thread ~75 ms. Flush() writes synchronously (crash paths).
 class VitaLog final {
 public:
-    explicit VitaLog(const std::string& path) { file_ = std::fopen(path.c_str(), "w"); }
-    ~VitaLog() { if (file_) std::fclose(file_); }
+    explicit VitaLog(const std::string& path)
+    {
+        file_ = std::fopen(path.c_str(), "w");
+        if (!file_) return;
+        sema_ = sceKernelCreateSema("hp2_log", 0, 0, 1 << 20, nullptr);
+        if (sema_ < 0) return;
+        pthread_attr_t attributes;
+        pthread_attr_init(&attributes);
+        pthread_attr_setstacksize(&attributes, 64 * 1024);
+        writing_ = pthread_create(&writer_, &attributes, [](void* self) -> void* {
+            static_cast<VitaLog*>(self)->Run();
+            return nullptr;
+        }, this) == 0;
+        pthread_attr_destroy(&attributes);
+    }
+    ~VitaLog()
+    {
+        if (writing_) {
+            stopping_.store(true, std::memory_order_release);
+            sceKernelSignalSema(sema_, 1);
+            pthread_join(writer_, nullptr);
+        }
+        if (sema_ >= 0) sceKernelDeleteSema(sema_);
+        Flush();
+        if (file_) std::fclose(file_);
+    }
     void Line(const char* event, const char* detail) noexcept
     {
         if (!file_) return;
-        std::lock_guard<std::mutex> lock(mutex_); // render + application threads
+        char text[1600];
         const auto ms = static_cast<unsigned long long>(sceKernelGetProcessTimeWide() / 1000u);
-        std::fprintf(file_, "[%llu] %s%s%s\n", ms, event, detail ? " " : "", detail ? detail : "");
+        int length = std::snprintf(text, sizeof(text), "[%llu] %s%s%s\n", ms, event, detail ? " " : "", detail ? detail : "");
+        if (length < 0) return;
+        if (static_cast<std::size_t>(length) >= sizeof(text)) {length = sizeof(text) - 1; text[length - 1] = '\n';}
+        {
+            std::lock_guard<std::mutex> lock(mutex_); // render + application threads
+            try {pending_.append(text, static_cast<std::size_t>(length));} catch (...) {return;}
+        }
+        if (writing_) sceKernelSignalSema(sema_, 1);
+        else Flush();
+    }
+    // Synchronous drain on the caller (crash/watchdog paths, shutdown).
+    void Flush() noexcept
+    {
+        if (!file_) return;
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) return;
+        std::lock_guard<std::mutex> fileLock(fileMutex_);
+        if (!pending_.empty()) {std::fwrite(pending_.data(), 1, pending_.size(), file_); pending_.clear();}
         std::fflush(file_);
     }
 private:
+    void Run()
+    {
+        sceKernelChangeThreadCpuAffinityMask(0, SCE_KERNEL_CPU_MASK_USER_2);
+        sceKernelChangeThreadPriority(0, 190);
+        std::string batch;
+        for (;;) {
+            sceKernelWaitSema(sema_, 1, nullptr);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                batch.swap(pending_);
+            }
+            if (!batch.empty()) {
+                std::lock_guard<std::mutex> fileLock(fileMutex_);
+                std::fwrite(batch.data(), 1, batch.size(), file_);
+                std::fflush(file_);
+                batch.clear();
+            }
+            if (stopping_.load(std::memory_order_acquire)) return;
+        }
+    }
     std::FILE* file_{};
-    std::mutex mutex_;
+    std::mutex mutex_, fileMutex_;
+    std::string pending_;
+    SceUID sema_{-1};
+    pthread_t writer_{};
+    bool writing_{};
+    std::atomic<bool> stopping_{false};
 };
 
 using hp2::platform::Ps2Button;
@@ -390,7 +461,7 @@ int main(int, char**)
     VitaLog log((base / "NFSHP2_log.txt").string());
     g_log = &log;
     // Faults and uncaught exceptions write crash.txt and exit (no popup).
-    vita_crash::Init(kDataDirectory, [](const char* event, const char* detail) { if (g_log) g_log->Line(event, detail); });
+    vita_crash::Init(kDataDirectory, [](const char* event, const char* detail) { if (g_log) {g_log->Line(event, detail); g_log->Flush();} });
     {   // Test switch: crash_test.txt makes the boot fault on purpose (handler check).
         SceIoStat test{};
         if (sceIoGetstat((std::string(kDataDirectory) + "/crash_test.txt").c_str(), &test) >= 0) {
@@ -444,8 +515,10 @@ int main(int, char**)
             log.Line("vita.audio", "disabled by noaudio.txt");
         }
         SceIoStat probe{};
+        collisionWitnessClockMicros = []{ return (uint32_t)sceKernelGetProcessTimeLow(); };
         if (sceIoGetstat((std::string(kDataDirectory) + "/witness_probe.txt").c_str(), &probe) >= 0) {
             collisionWitnessWarmProbe = 1;
+            collisionWitnessProbeClock = [] { return static_cast<uint32_t>(sceKernelGetProcessTimeLow()); };
             log.Line("vita.diag", "witness warm probe on");
         }
         hp2::ApplicationRuntime application(files, host, saves);
@@ -472,6 +545,7 @@ int main(int, char**)
                     // (watchdog_dump.txt: a full system core dump instead).
                     if (now > 100 && quiet >= 15) {
                         log.Line("vita.watchdog", "stalled frame pipeline: exiting");
+                        log.Flush();
                         vita_crash::Stalled(detail);
                     }
                 }
@@ -494,6 +568,7 @@ int main(int, char**)
         log.Line("vita.fatal", error.what());
         sceKernelDelayThread(1000000);
     }
+    log.Flush();
     sceKernelExitProcess(0);
     return 0;
 }

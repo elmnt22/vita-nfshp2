@@ -151,6 +151,11 @@ public:
     // left empty (Acquire reports them as usual). Install runs on the owner.
     std::vector<std::shared_ptr<const PcmWave>> DecodeResidentRange(size_t first,size_t count) const;
     void InstallDecoded(size_t first,std::vector<std::shared_ptr<const PcmWave>>&& decoded);
+    // Non-decoding probe (Vita async misses): the cached PCM or null, and the
+    // cue index DecodeResidentRange takes. Adopt publishes a worker result
+    // exactly as Acquire would have after its own decode.
+    std::shared_ptr<const PcmWave> TryAcquire(size_t metadataOffset,size_t& index);
+    std::shared_ptr<const PcmWave> Adopt(size_t index,std::shared_ptr<const PcmWave> pcm);
 private:
     std::shared_ptr<const PcmWave> DecodeEntry(size_t index) const;
     void Retain(size_t index,const std::shared_ptr<const PcmWave>& pcm);

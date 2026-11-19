@@ -9,6 +9,9 @@
 #include <cstring>
 
 extern "C" std::int32_t ecstasyClassifyBounds(const float minimum[3], const float maximum[3], const float matrix[16]);
+extern "C" void vectorMatrixTransform(float output[4], const float matrix[16], const float input[4]);
+void vectorMatrixTransformScalar(float output[4], const float matrix[16], const float input[4]);
+extern int bMatrixNeonEnabled;
 
 namespace vita_selftest {
 namespace {
@@ -89,5 +92,33 @@ void Run(void (*log)(const char* event, const char* detail))
     std::snprintf(detail, sizeof(detail), "cases=200000 mismatches=%u inside=%u crossing=%u outside=%u ms=%.1f",
         mismatches, inside, crossing, outside, (sceKernelGetProcessTimeWide() - started) / 1000.0);
     log("vita.selftest.classify_bounds", detail);
+
+    // NEON matrix transform: enable only when VFP already flushes denormals
+    // (then both paths round identically) and random cases match bit for bit.
+    std::uint32_t fpscr = 0;
+    asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
+    const bool flushToZero = (fpscr >> 24) & 1u;
+    unsigned transformMismatches = 0;
+    bMatrixNeonEnabled = 1;
+    const auto transformStarted = sceKernelGetProcessTimeWide();
+    for (int test = 0; test < 200000; ++test) {
+        float matrix[16], input[4], neon[4], scalar[4];
+        const float scale = test % 5 == 0 ? 1.0e-19f : test % 7 == 0 ? 1.0e6f : 8.0f;
+        for (auto& value : matrix) value = Random(scale);
+        for (auto& value : input) value = Random(test % 3 ? 100.0f : 1.0e-20f);
+        if (test & 1) input[3] = 1.0f;
+        vectorMatrixTransform(neon, matrix, input);
+        vectorMatrixTransformScalar(scalar, matrix, input);
+        if (std::memcmp(neon, scalar, sizeof(neon)) != 0) ++transformMismatches;
+        // Aliased input/output must also match.
+        float aliased[4]; std::memcpy(aliased, input, sizeof(aliased));
+        vectorMatrixTransform(aliased, matrix, aliased);
+        if (std::memcmp(aliased, scalar, sizeof(aliased)) != 0) ++transformMismatches;
+    }
+    const double transformMs = (sceKernelGetProcessTimeWide() - transformStarted) / 1000.0;
+    bMatrixNeonEnabled = flushToZero && transformMismatches == 0;
+    std::snprintf(detail, sizeof(detail), "fpscr=0x%08x flush_to_zero=%d cases=400000 mismatches=%u ms=%.1f neon_enabled=%d",
+        static_cast<unsigned>(fpscr), flushToZero ? 1 : 0, transformMismatches, transformMs, bMatrixNeonEnabled);
+    log("vita.selftest.matrix_transform", detail);
 }
 }

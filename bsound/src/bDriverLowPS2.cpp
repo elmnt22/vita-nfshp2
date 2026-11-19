@@ -595,6 +595,26 @@ std::shared_ptr<const PcmWave> NativeSoundBankCache::Acquire(size_t metadataOffs
     return result;
 }
 
+std::shared_ptr<const PcmWave> NativeSoundBankCache::TryAcquire(size_t metadataOffset,size_t& index)
+{
+    if (metadataOffset<12u || (metadataOffset-12u)%52u ||
+        (metadataOffset-12u)/52u>=entries_.size())
+        throw std::out_of_range("PCM request is outside the retained MSH table");
+    index=(metadataOffset-12u)/52u;
+    auto& entry=entries_[index];
+    if (!entry.resident)throw std::invalid_argument("Stream descriptor is not a resident PCM cue");
+    return entry.pcm.lock();
+}
+
+std::shared_ptr<const PcmWave> NativeSoundBankCache::Adopt(size_t index,std::shared_ptr<const PcmWave> pcm)
+{
+    auto& entry=entries_.at(index);
+    if (auto existing=entry.pcm.lock())return existing;
+    entry.pcm=pcm;++decodeCount_;
+    Retain(index,pcm);
+    return pcm;
+}
+
 std::shared_ptr<const PcmWave> NativeSoundBankCache::DecodeEntry(size_t index) const
 {
     const auto& entry=entries_[index];
