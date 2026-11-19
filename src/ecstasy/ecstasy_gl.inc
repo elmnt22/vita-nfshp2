@@ -355,6 +355,7 @@ struct EcstasyVulkanDevice::Storage {
     std::uint64_t lastDrawn{};
     std::uint64_t journalFrames{},gatherJournalFrames{};
     bool residentVerticesAllocated{},residentIndicesAllocated{};
+    SceUInt64 lastSlowPrepareLog{},lastSlowSubmitLog{};
     std::uint64_t skippedBatches{},drawnBatches{};
 
     explicit Storage(const EcstasyVulkanOptions& value):options(value)
@@ -547,6 +548,9 @@ struct EcstasyVulkanDevice::Storage {
             options.width,options.height,4096u);
     }
     void UploadTexture(const TextureInfo& texture,std::size_t index,bool repeatedPadding);
+    void LogReupload(const VkDrawTexture& old,const TextureInfo& texture);
+    std::uint64_t reuploads{};
+    SceUInt64 lastReuploadLog{};
     void Gather(const EcstasyFrame& frame,
         std::vector<VkVertex>& output,std::vector<std::uint32_t>& elementIndices,
         std::vector<VkDrawBatch>& batches);
@@ -555,6 +559,30 @@ struct EcstasyVulkanDevice::Storage {
     // Pipelined host: Complete() is called later on the application thread.
     bool deferRetire{};
 };
+
+// Diagnostic: why a cached texture failed validation and is decoded again.
+void EcstasyVulkanDevice::Storage::LogReupload(const VkDrawTexture& old,const TextureInfo& texture)
+{
+    ++reuploads;
+    const auto now=sceKernelGetSystemTimeWide();
+    if(now-lastReuploadLog<2000000u)return;
+    lastReuploadLog=now;
+    const auto* wire=texture.descriptor ? texture.descriptor->authoredRecord:nullptr;
+    const bool descriptor=wire && std::memcmp(wire,old.sourceDescriptor.data(),old.sourceDescriptor.size())==0;
+    const bool pixels=texture.pixels.Data() && texture.pixels.size>=old.sourcePixels.size() &&
+        std::memcmp(texture.pixels.Data(),old.sourcePixels.data(),old.sourcePixels.size())==0;
+    const bool palette=old.sourcePalette.empty() || (texture.palette.Data() && texture.palette.size>=old.sourcePalette.size() &&
+        std::memcmp(texture.palette.Data(),old.sourcePalette.data(),old.sourcePalette.size())==0);
+    char detail[256];
+    std::snprintf(detail,sizeof(detail),
+        "total=%llu texture=%p size=%ux%u psm=%02x same_descriptor=%d same_pixels=%d same_palette=%d palette_bytes=%d/%d "
+        "linear=%d/%d borrowed=%d owner_alive=%d upload_completed=%d",
+        static_cast<unsigned long long>(reuploads),static_cast<const void*>(&texture),old.width,old.height,
+        wire ? wire[0x4a]:0xffu,descriptor,pixels,palette,static_cast<int>(texture.paletteBytes),
+        static_cast<int>(old.sourcePaletteBytes),texture.palette.nativeLinearPalette ? 1:0,old.sourcePaletteLinear ? 1:0,
+        texture.pixels.borrowed ? 1:0,old.OwnersAlive() ? 1:0,old.uploadCompleted ? 1:0);
+    platform::RecordSessionEvent("renderer.vitagl.texture_reupload",detail);
+}
 
 void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std::size_t index,bool repeatedPadding)
 {
@@ -567,15 +595,12 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
     Require(baseBytes,"Original texture downloader has an empty base level");
     std::uint32_t width{},height{};std::size_t sourceBytes{};
     std::vector<std::uint8_t> base;
-    // Decode every authored level so the retained source range (and so the
-    // cache comparison) matches the Vulkan path; only level 0 is uploaded.
-    for(std::uint32_t level=0;level<levels;++level) {
-        const auto bytes=baseBytes>>(2u*level);
-        std::uint32_t levelWidth{},levelHeight{};
-        auto rgba=DecodeTextureMipRgba(texture,level,sourceBytes,bytes,levelWidth,levelHeight,repeatedPadding);
-        if(!level) {width=levelWidth;height=levelHeight;base=std::move(rgba);}
-        sourceBytes+=bytes;
-    }
+    // Only level 0 is uploaded and decoded. The retained source range (and
+    // so the cache comparison) still spans every authored level.
+    base=DecodeTextureMipRgba(texture,0,0,baseBytes,width,height,repeatedPadding);
+    for(std::uint32_t level=0;level<levels;++level)sourceBytes+=baseBytes>>(2u*level);
+    Require(sourceBytes<=texture.pixels.size,"vitaGL texture lost part of its authored mip chain");
+    if(textures[index].generation)LogReupload(textures[index],texture);
     auto& target=textures[index];
     auto* handle=glTextureOf(target);
     if(!handle) {handle=new GlTexture;target.image.image=reinterpret_cast<VkImage>(handle);}
@@ -671,7 +696,9 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     using Clock=std::chrono::steady_clock;
     const auto milliseconds=[](Clock::duration duration) {return std::chrono::duration<double,std::milli>(duration).count();};
     // Claim a free packet: at most one frame is gathered while one is drawn.
+    const auto claimBegin=Clock::now();
     if(glThreadStarted_)sceKernelWaitSema(freeSema_,1,nullptr);
+    const auto claimMs=milliseconds(Clock::now()-claimBegin);
     struct ReleaseOnThrow {
         Storage& storage;bool armed{true};
         ~ReleaseOnThrow() {if(armed && storage.glThreadStarted_)sceKernelSignalSema(storage.freeSema_,1);}
@@ -695,6 +722,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     RetireUnusedTextures(frameTextures);
     preparedFrame.historyReaders=EcstasyFindNativeHistoryReaders(frame->Commands());
     const auto mirror=MirrorPresentation(*frame);
+    const auto commandCount=frame->Commands().size();
     EnsureTarget(0,options.width,options.height);
     for(const auto& draw:frame->Commands()) {
         Require(draw.target,"vitaGL draw has no retained destination");
@@ -782,6 +810,22 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
                 n,steps[0]/n,steps[1]/n,steps[2]/n,steps[3]/n,steps[4]/n,steps[5]/n,milliseconds(Clock::now()-renderBegin));
             platform::RecordSessionEvent("renderer.vitagl.gather_steps",detail);
             steps={};
+        }
+    }
+    {
+        const auto prepareMs=milliseconds(Clock::now()-renderBegin);
+        const auto now=sceKernelGetSystemTimeWide();
+        if((prepareMs>40.0 || claimMs>15.0) && now-lastSlowPrepareLog>500000u) {
+            lastSlowPrepareLog=now;
+            char detail[320];
+            std::snprintf(detail,sizeof(detail),
+                "claim_wait_ms=%.2f prepare_ms=%.2f gather_ms=%.2f texture_uploads=%u texture_bytes=%llu resident_bytes=%" HP2_ZU " "
+                "commands=%" HP2_ZU " batches=%" HP2_ZU " vertices=%" HP2_ZU " last_gl_submit_ms=%.2f last_gl_present_ms=%.2f",
+                claimMs,prepareMs,statistics.gatherMilliseconds,static_cast<unsigned>(statistics.textureUploads),
+                static_cast<unsigned long long>(statistics.textureUploadBytes),
+                packet.residentVertexBytes.size()+packet.residentIndexBytes.size(),commandCount,
+                packet.batches.size(),packet.vertices.size(),statistics.recordSubmitMilliseconds,statistics.presentMilliseconds);
+            platform::RecordSessionEvent("renderer.vitagl.slow_prepare",detail);
         }
     }
     glRenderStage=0;
@@ -1077,6 +1121,18 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     vglSwapBuffers(GL_FALSE);
     glRenderStage=0;
     const auto presentMs=milliseconds(Clock::now()-submitDone);
+    const auto totalMs=milliseconds(Clock::now()-renderBegin);
+    if(totalMs>25.0) {
+        const auto now=sceKernelGetSystemTimeWide();
+        if(now-lastSlowSubmitLog>500000u) {
+            lastSlowSubmitLog=now;
+            char detail[224];
+            std::snprintf(detail,sizeof(detail),"total_ms=%.2f upload_ms=%.2f draw_ms=%.2f swap_ms=%.2f drawn=%llu",
+                totalMs,milliseconds(uploadDone-renderBegin),milliseconds(submitDone-uploadDone),presentMs,
+                static_cast<unsigned long long>(drawn));
+            platform::RecordSessionEvent("renderer.vitagl.slow_submit",detail);
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(glStatsMutex);
         lastDrawn=drawn;lastSubmitMs=milliseconds(submitDone-uploadDone);lastPresentMs=presentMs;
