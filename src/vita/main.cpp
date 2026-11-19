@@ -45,7 +45,7 @@ unsigned int _newlib_heap_size_user = 330u * 1024u * 1024u;
 unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 }
 
-namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; }
+namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern std::atomic<int> debugDemoStarted; }
 extern int collisionWitnessWarmProbe;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
@@ -185,6 +185,24 @@ public:
             }
             std::fclose(file);
         }
+        // Benchmark: demo_bench.txt "<track>" runs the retail AI attract demo
+        // (live pursuit: AI player car, 4 cops, helicopter, traffic) on that
+        // track. Autopad taps reach the main menu, the demo starts after 1 s
+        // idle and lasts an hour; taps stop once it starts (input ends it).
+        if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/demo_bench.txt").c_str(), "r")) {
+            int track = -1;
+            if (std::fscanf(file, "%d", &track) == 1 && track > 0) {
+                ::hp2::debugDemoTrack = track;
+                applicationLaunchOptions.beginDemoSeconds = 1.0f;
+                applicationLaunchOptions.demoDurationSeconds = 3600.0f;
+                if (!autoPeriod_) {autoPeriod_ = 90; autoHold_ = 10; autoUntil_ = 100000;}
+                demoBench_ = true;
+                char detail[64];
+                std::snprintf(detail, sizeof(detail), "track=%d", track);
+                log_.Line("vita.demo_bench", detail);
+            }
+            std::fclose(file);
+        }
     }
     void BindClock(const GameTime& clock) noexcept { clock_ = &clock; }
 
@@ -229,6 +247,7 @@ public:
             hp2::platform::SetButton(state_, logical, (pad.buttons & physical) != 0);
         state_.sticks = {pad.rx, pad.ry, pad.lx, pad.ly};
         ++inputSteps_;
+        if (demoBench_ && ::hp2::debugDemoStarted.load(std::memory_order_relaxed)) autoPeriod_ = 0;
         if (autoPeriod_ && inputSteps_ < autoUntil_ && (inputSteps_ % autoPeriod_) < autoHold_)
             hp2::platform::SetButton(state_, Ps2Button::Cross, true);
     }
@@ -441,6 +460,7 @@ public:
     std::uint32_t polls_{};
     std::uint64_t inputSteps_{};
     unsigned autoPeriod_{}, autoHold_{}, autoUntil_{};
+    bool demoBench_{};
 #ifdef HP2_ENABLE_VITAGL
     hp2::EcstasyVulkanDevice* graphics_{};
 #endif

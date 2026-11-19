@@ -6781,15 +6781,25 @@ public:
         gather_=gather;active_.clear();
         while(!entries_.empty() && gather_-entries_.front().lastGather>600)Evict(entries_.begin());
     }
+    // tokens[i]==spans[i]->indexToken and indexTotal is the batch's summed
+    // span index count (recorded at gather time, so a hit reads no entry).
     VkResidentIndexEntry* Acquire(const std::vector<const VkResidentGeometryEntry*>& spans,
-        std::uint32_t first,std::uint32_t count)
+        const std::vector<std::uint64_t>& tokens,std::uint32_t first,std::uint32_t count,std::uint32_t indexTotal)
     {
         Require(first<=spans.size() && count<=spans.size()-first,"Resident index spans exceed their frame owner");
-        std::uint64_t hash=1469598103934665603ull;std::uint64_t indices=0;
-        for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at) {
-            const auto& span=*spans[at];indices+=span.indexCount;
-            hash=(hash^span.indexToken)*1099511628211ull;
+        std::uint64_t hash=1469598103934665603ull;const std::uint64_t indices=indexTotal;
+        for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at)
+            hash=(hash^tokens[at])*1099511628211ull;
+#if !defined(__vita__)
+        {
+            std::uint64_t summed=0;
+            for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at) {
+                summed+=spans[at]->indexCount;
+                Require(tokens[at]==spans[at]->indexToken,"Resident span token changed during Gather");
+            }
+            Require(summed==indexTotal,"Resident batch count differs from its span index total");
         }
+#endif
         if(!indices || indices>capacity_) {return nullptr;}
         const auto candidates=lookup_.equal_range(hash);
         for(auto found=candidates.first;found!=candidates.second;++found) {
@@ -6797,7 +6807,7 @@ public:
             if(entry->tokens.size()!=count)continue;
             bool equal=true;
             for(std::size_t at=0;at<count;++at)
-                if(entry->tokens[at]!=spans[first+at]->indexToken) {equal=false;break;}
+                if(entry->tokens[at]!=tokens[first+at]) {equal=false;break;}
             if(!equal)continue;
             Touch(entry);return &*entry;
         }
@@ -7249,12 +7259,13 @@ VkFogDepthPlan PlanFogDepth(const std::vector<VkDrawBatch*>& packets)
 }
 
 void ResolveNativeResidentIndices(VkResidentIndexCache& cache,
-    const std::vector<const VkResidentGeometryEntry*>& spans,std::vector<std::uint32_t>& indices,
-    std::vector<VkDrawBatch>& batches)
+    const std::vector<const VkResidentGeometryEntry*>& spans,const std::vector<std::uint64_t>& tokens,
+    std::vector<std::uint32_t>& indices,std::vector<VkDrawBatch>& batches)
 {
+    Require(tokens.size()==spans.size(),"Resident span tokens lost their spans");
     for(auto& batch:batches) {
         if(!batch.residentGeometry)continue;
-        if(auto* entry=cache.Acquire(spans,batch.nativeSpanFirst,batch.nativeSpanCount)) {
+        if(auto* entry=cache.Acquire(spans,tokens,batch.nativeSpanFirst,batch.nativeSpanCount,batch.count)) {
             Require(entry->shadow.size()==batch.count,"Resident merged index extent changed during Gather");
             batch.residentIndices=true;batch.first=entry->first;
         } else {
@@ -7346,6 +7357,7 @@ struct EcstasyVulkanDevice::Storage {
     VkSceneryPacketCache sceneryPackets;
     std::uint64_t nextTextureGeneration{};
     std::vector<const VkResidentGeometryEntry*> gatheredResidentIndexSpans;
+    std::vector<std::uint64_t> gatheredResidentSpanTokens;
     std::vector<VkResidentIndexEntry*> residentIndexPendingUploads;
     std::vector<VkBufferCopy> residentIndexCopies;
     std::vector<std::uint32_t> residentPendingUploads;

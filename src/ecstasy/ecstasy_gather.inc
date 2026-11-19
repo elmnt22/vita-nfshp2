@@ -30,7 +30,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // BeginGather also identifies validation performed during overlap
     // preflight. The sealed frame cannot mutate between that check and here.
     residentGeometry.Begin(gatherSerial);residentIndexCache.Begin(gatherSerial);
-    residentFrameVertices=0;residentFrameIndices=0;gatheredResidentIndexSpans.clear();
+    residentFrameVertices=0;residentFrameIndices=0;gatheredResidentIndexSpans.clear();gatheredResidentSpanTokens.clear();
     nativeStripJobs.clear();nativeWorkRanges.clear();nativeFrameShading.Clear();
     using Clock=std::chrono::steady_clock;
     auto& profile=statistics.renderProfile;
@@ -288,7 +288,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         Require(gatheredResidentIndexSpans.size()<UINT32_MAX,"Native resident index span count exceeds32-bit range");
         batch.first=static_cast<std::uint32_t>(residentFrameIndices);
         batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());
-        gatheredResidentIndexSpans.push_back(resident);
+        gatheredResidentIndexSpans.push_back(resident);gatheredResidentSpanTokens.push_back(resident->indexToken);
         residentFrameIndices+=resident->indexCount;residentFrameVertices+=job.count;
         job.residentOutput=resident->shadow.data();
         job.workUnits=prepare ? NativePendingVertexWork(job):0;
@@ -349,7 +349,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         batch.count=resident->indexCount;batch.nativeSpanCount=1;
         batch.first=static_cast<std::uint32_t>(residentFrameIndices);
         batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());
-        gatheredResidentIndexSpans.push_back(resident);
+        gatheredResidentIndexSpans.push_back(resident);gatheredResidentSpanTokens.push_back(resident->indexToken);
         residentFrameIndices+=resident->indexCount;residentFrameVertices+=job.count;
         job.residentOutput=resident->shadow.data();
         job.workUnits=prepare ? NativePendingVertexWork(job):0;
@@ -819,7 +819,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
                     "Native resident index span count exceeds32-bit range");
                 batch.first=static_cast<std::uint32_t>(residentFrameIndices);batch.count=resident->indexCount;
                 batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());batch.nativeSpanCount=1;
-                gatheredResidentIndexSpans.push_back(resident);residentFrameIndices+=resident->indexCount;
+                gatheredResidentIndexSpans.push_back(resident);gatheredResidentSpanTokens.push_back(resident->indexToken);residentFrameIndices+=resident->indexCount;
             } else {
                 Require(output.size()+job.count<std::numeric_limits<std::uint32_t>::max(),
                     "Vulkan frame vertex count exceeds32-bit index range");
@@ -959,7 +959,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     const auto indicesStarted=Clock::now();
     profile.gatherVertexJobsMilliseconds+=
         std::chrono::duration<double,std::milli>(indicesStarted-finishStarted).count();
-    ResolveNativeResidentIndices(residentIndexCache,gatheredResidentIndexSpans,elementIndices,batches);
+    ResolveNativeResidentIndices(residentIndexCache,gatheredResidentIndexSpans,gatheredResidentSpanTokens,elementIndices,batches);
     profile.gatherIndicesMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-indicesStarted).count();
     profile.gatherFinishMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-finishStarted).count();
 }
