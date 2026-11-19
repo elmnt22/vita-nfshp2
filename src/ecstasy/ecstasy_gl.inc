@@ -48,6 +48,7 @@ uniform vec4 u_m1;
 uniform vec4 u_m2;
 uniform vec4 u_m3;
 uniform vec4 u_clipmap;
+uniform float u_yflip;
 #if SHADE
 uniform vec4 u_shade[19];
 uniform vec4 u_mat[4];
@@ -117,7 +118,7 @@ void main()
     vec4 p=a_pos;
     p.z=p.z*2.0-p.w;
 #endif
-    p.y=-p.y;
+    p.y=p.y*u_yflip;
     gl_Position=p;
     v_uvq=a_uvq;
     v_col=a_col;
@@ -198,7 +199,7 @@ void main()
 struct GlProgram {
     GLuint program{};
     GLint m0{-1},m1{-1},m2{-1},m3{-1},clipmap{-1},shade{-1},material{-1},flags{-1},flags2{-1};
-    GLint fparam{-1},texture{-1};
+    GLint fparam{-1},texture{-1},yflip{-1};
     bool failed{};
 };
 
@@ -383,11 +384,32 @@ struct EcstasyVulkanDevice::Storage {
     void EnsureTarget(std::int32_t id,std::uint32_t width,std::uint32_t height)
     {
         auto& target=renderedTargets[id];
-        target.width=width;target.height=height;
-        // Gather only checks that a sampled image exists; offscreen passes
-        // are not drawn yet, so the descriptors are non-null placeholders.
+        // Gather only checks that a sampled image exists; GL binds by name.
         target.descriptor=reinterpret_cast<VkDescriptorSet>(std::uintptr_t{1});
         target.previousDescriptor=target.descriptor;
+        if(!id) {target.width=width;target.height=height;return;}
+        width=std::max(1u,width);height=std::max(1u,height);
+        GLuint texture=glName(target.color.image);
+        if(texture && target.width==width && target.height==height)return;
+        target.width=width;target.height=height;target.initialized=false;
+        if(!texture)glGenTextures(1,&texture);
+        target.color.image=glToken<VkImage>(texture);
+        glBindTexture(GL_TEXTURE_2D,texture);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,static_cast<GLsizei>(width),static_cast<GLsizei>(height),0,
+            GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        GLuint fbo=glName(target.framebuffer);
+        if(!fbo)glGenFramebuffers(1,&fbo);
+        target.framebuffer=glToken<VkFramebuffer>(fbo);
+        // vitaGL attaches a hidden depth buffer to a colour-only FBO on demand.
+        glBindFramebuffer(GL_FRAMEBUFFER,fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture,0);
+        glBindFramebuffer(GL_FRAMEBUFFER,0);
+        char detail[96];std::snprintf(detail,sizeof(detail),"id=%d extent=%ux%u",id,width,height);
+        platform::RecordSessionEvent("renderer.vitagl.target",detail);
     }
     EcstasyNativeMirrorPresentation MirrorPresentation(const EcstasyFrame& frame) const
     {
@@ -408,6 +430,8 @@ struct EcstasyVulkanDevice::Storage {
         std::vector<VkDrawBatch>& batches);
     GlProgram& Program(std::uint32_t key);
     bool Render(EcstasyFrame* frame);
+    // Pipelined host: Complete() is called later on the application thread.
+    bool deferRetire{};
 };
 
 void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std::size_t index,bool repeatedPadding)
@@ -514,7 +538,7 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     program.m0=location("u_m0");program.m1=location("u_m1");program.m2=location("u_m2");program.m3=location("u_m3");
     program.clipmap=location("u_clipmap");program.shade=location("u_shade");program.material=location("u_mat");
     program.flags=location("u_flags");program.flags2=location("u_flags2");
-    program.fparam=location("u_fparam");program.texture=location("u_tex");
+    program.fparam=location("u_fparam");program.yflip=location("u_yflip");program.texture=location("u_tex");
     glUseProgram(program.program);
     if(program.texture>=0)glUniform1i(program.texture,0);
     char detail[64];std::snprintf(detail,sizeof(detail),"key=%03x programs=%" HP2_ZU "",key,programs.size());
@@ -522,8 +546,10 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     return program;
 }
 
+std::atomic<int> glRenderStage{0};
 bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
 {
+    glRenderStage=1;
     if(!frame)return false;
     Require(frame->State()==EcstasyFrame::Phase::Ready,"vitaGL accepts only a sealed original frame");
     using Clock=std::chrono::steady_clock;
@@ -558,7 +584,9 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     auto& data=gatheredVertices;auto& elementIndices=gatheredIndices;auto& batches=gatheredBatches;
     data.clear();elementIndices.clear();batches.clear();gatheredGlyphBounds.clear();gatheredGlyphBounds.push_back({});
     const auto gatherBegin=Clock::now();
+    glRenderStage=2;
     Gather(*frame,data,elementIndices,batches);
+    glRenderStage=3;
     statistics.gatherMilliseconds=milliseconds(Clock::now()-gatherBegin);
 
     // Resident geometry/index slots: write dirty entries in place.
@@ -607,148 +635,214 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     }
     const auto uploadDone=Clock::now();
 
-    // Main display pass.
-    const auto height=static_cast<GLint>(options.height);
-    glBindFramebuffer(GL_FRAMEBUFFER,0);
-    glDisable(GL_SCISSOR_TEST);
-    glViewport(0,0,static_cast<GLsizei>(options.width),static_cast<GLsizei>(options.height));
-    glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);glDepthMask(GL_TRUE);
-    glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_SCISSOR_TEST);
+    // Passes: each colour target owns its batches; a target sampled in this
+    // frame renders first (Vulkan's dependency order). Offscreen targets keep
+    // Vulkan's top-left row order, so they are drawn without the Y flip.
+    constexpr std::size_t kTargets=16;
+    std::array<std::vector<std::uint32_t>,kTargets> targetBatches;
+    std::array<std::vector<std::int32_t>,kTargets> targetDependencies;
+    const auto drawable=[&](const VkDrawBatch& batch) {
+        if(batch.textureFunction<0 || batch.textureFunction>3 || batch.postProcess || batch.feedbackGroup || !batch.count)
+            return false;
+        if(batch.target==14 || batch.sampledTarget==14 || batch.sampledTarget==0)return false;
+        if(batch.target<0 || batch.target>=static_cast<std::int32_t>(kTargets))return false;
+        if(batch.sampledTarget>0 && (batch.sampledTarget>=static_cast<std::int32_t>(kTargets) ||
+            !renderedTargets.count(batch.sampledTarget) ||
+            !glName(renderedTargets.at(batch.sampledTarget).color.image)))return false;
+        return true;
+    };
+    std::uint64_t drawn=0,skipped=0;
+    for(std::size_t index=0;index<batches.size();++index) {
+        const auto& batch=batches[index];
+        if(!drawable(batch)) {++skipped;continue;}
+        const auto target=static_cast<std::size_t>(batch.target);
+        targetBatches[target].push_back(static_cast<std::uint32_t>(index));
+        if(batch.sampledTarget>0) {
+            auto& dependencies=targetDependencies[target];
+            if(std::find(dependencies.begin(),dependencies.end(),batch.sampledTarget)==dependencies.end())
+                dependencies.push_back(batch.sampledTarget);
+        }
+    }
     for(GLuint attribute=0;attribute<4;++attribute)glEnableVertexAttribArray(attribute);
     GLuint activeVertexBuffer=0,activeIndexBuffer=0,activeTexture=~0u;
-    const GlProgram* activeProgram{};
-    const VkDrawBatch* previous{};
-    GlBlendState activeBlend;bool blendKnown=false;
-    int activeDepth=-1,activeDepthWrite=-1;
-    std::uint32_t activeShading=UINT32_MAX;
-    std::uint64_t drawn=0,skipped=0;
-    for(const auto& batch:batches) {
-        if(batch.target!=0 || batch.sampledTarget>=0 || batch.textureFunction<0 || batch.textureFunction>3 ||
-            batch.postProcess || batch.feedbackGroup || !batch.count) {++skipped;continue;}
-        if(!batch.scissor.extent.width || !batch.scissor.extent.height) {++skipped;continue;}
-        const auto blend=glBlendFor(batch);
-        const bool shade=batch.nativeGpuPosition && batch.nativeShadingIndex!=0;
-        const bool texturing=!batch.untextured;
-        std::uint32_t key=static_cast<std::uint32_t>(batch.textureFunction)&3u;
-        key|=(texturing ? 1u:0u)<<2;
-        key|=(static_cast<std::uint32_t>(std::clamp(batch.alphaTest,0,2)))<<3;
-        key|=(batch.showcaseEnvironmentBlend ? 1u:0u)<<5;
-        key|=(blend.fixedAlpha ? 1u:0u)<<6;
-        key|=(batch.clampTopLeft && texturing ? 1u:0u)<<7;
-        key|=(batch.nativeGpuPosition ? 1u:0u)<<8;
-        key|=(shade ? 1u:0u)<<9;
-        auto& program=Program(key);
-        if(!program.program) {++skipped;continue;}
-        if(&program!=activeProgram) {
-            glUseProgram(program.program);activeProgram=&program;activeShading=UINT32_MAX;
-        }
-        const auto vertexBuffer=batch.residentGeometry ? residentVertices.name:vertexStream.name;
-        if(!vertexBuffer) {++skipped;continue;}
-        if(vertexBuffer!=activeVertexBuffer) {
-            glBindBuffer(GL_ARRAY_BUFFER,vertexBuffer);
-            constexpr GLsizei stride=sizeof(VkVertex);
-            glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,stride,reinterpret_cast<const void*>(offsetof(VkVertex,position)));
-            glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,stride,reinterpret_cast<const void*>(offsetof(VkVertex,uvq)));
-            glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,stride,reinterpret_cast<const void*>(offsetof(VkVertex,color)));
-            glVertexAttribPointer(3,3,GL_FLOAT,GL_FALSE,stride,reinterpret_cast<const void*>(offsetof(VkVertex,normal)));
-            activeVertexBuffer=vertexBuffer;
-        }
-        if(!previous || std::memcmp(&previous->viewport,&batch.viewport,sizeof(batch.viewport))) {
-            const auto& viewport=batch.viewport;
-            glViewport(static_cast<GLint>(viewport.x),
-                height-static_cast<GLint>(viewport.y)-static_cast<GLint>(viewport.height),
-                static_cast<GLsizei>(viewport.width),static_cast<GLsizei>(viewport.height));
-            glDepthRangef(viewport.minDepth,viewport.maxDepth);
-        }
-        if(!previous || std::memcmp(&previous->scissor,&batch.scissor,sizeof(batch.scissor))) {
-            const auto& scissor=batch.scissor;
-            glScissor(scissor.offset.x,height-scissor.offset.y-static_cast<GLint>(scissor.extent.height),
-                static_cast<GLsizei>(scissor.extent.width),static_cast<GLsizei>(scissor.extent.height));
-        }
-        if(!blendKnown || !(blend==activeBlend)) {
-            if(blend.enable) {
-                glEnable(GL_BLEND);
-                glBlendEquationSeparate(blend.equation,GL_FUNC_ADD);
-                // FIX replaces the written source alpha; keep destination alpha.
-                glBlendFuncSeparate(blend.source,blend.destination,
-                    blend.fixedAlpha ? GL_ZERO:GL_ONE,blend.fixedAlpha ? GL_ONE:GL_ZERO);
-            } else glDisable(GL_BLEND);
-            activeBlend=blend;blendKnown=true;
-        }
-        const int depth=batch.depth ? 1:0,depthWrite=batch.depthWrite ? 1:0;
-        if(depth!=activeDepth) {
-            if(depth)glEnable(GL_DEPTH_TEST);else glDisable(GL_DEPTH_TEST);
-            activeDepth=depth;
-        }
-        if(depthWrite!=activeDepthWrite) {glDepthMask(depthWrite ? GL_TRUE:GL_FALSE);activeDepthWrite=depthWrite;}
-        if(texturing) {
-            Require(batch.texture<textures.size(),"vitaGL draw lost its cached texture");
-            const auto name=glName(textures[batch.texture].image.image);
-            if(name!=activeTexture) {glBindTexture(GL_TEXTURE_2D,name);activeTexture=name;}
-        }
-        if(program.fparam>=0) {
-            const auto& texture=textures[texturing ? batch.texture:0];
-            const float texelX=texturing && texture.width ? 1.0f/static_cast<float>(texture.width):0.0f;
-            const float texelY=texturing && texture.height ? 1.0f/static_cast<float>(texture.height):0.0f;
-            glUniform4f(program.fparam,batch.blendConstant,texelX,texelY,0.0f);
-        }
-        if(batch.nativeGpuPosition) {
-            const auto& m=batch.nativeLocalToClip;
-            glUniform4f(program.m0,m[0],m[1],m[2],m[3]);
-            glUniform4f(program.m1,m[4],m[5],m[6],m[7]);
-            glUniform4f(program.m2,m[8],m[9],m[10],m[11]);
-            glUniform4f(program.m3,m[12],m[13],m[14],m[15]);
-            const auto& c=batch.nativeClipMapping;
-            glUniform4f(program.clipmap,c[0],c[1],c[2],c[3]);
-        }
-        if(shade && batch.nativeShadingIndex!=activeShading) {
-            const auto first=batch.nativeShadingIndex;
-            Require(first+19u<=gatheredGlyphBounds.size(),"vitaGL shading record exceeds the frame table");
-            const auto& record=gatheredGlyphBounds;
-            std::uint32_t flags{},mode{},material{};
-            std::memcpy(&flags,&record[first][0],4);std::memcpy(&mode,&record[first][1],4);
-            std::memcpy(&material,&record[first][2],4);
-            glUniform4fv(program.shade,19,record[first].data());
-            if(material && material+4u<=gatheredGlyphBounds.size())
-                glUniform4fv(program.material,4,record[material].data());
-            else {
-                static const float zero[16]{};
-                glUniform4fv(program.material,4,zero);
-            }
-            glUniform4f(program.flags,(flags&128u) ? 1.0f:0.0f,(flags&64u) ? 1.0f:0.0f,
-                (flags&4u) ? 1.0f:0.0f,(mode&1u) ? 1.0f:0.0f);
-            glUniform4f(program.flags2,(mode&2u) ? 1.0f:0.0f,0.0f,0.0f,0.0f);
-            activeShading=first;
-        }
-        const GLenum topology=batch.wireframe ? GL_LINES:GL_TRIANGLES;
-        if(batch.indexed) {
-            const auto indexBuffer=batch.residentIndices ? residentIndices.name:indexStream.name;
-            if(!indexBuffer) {++skipped;previous=&batch;continue;}
-            if(indexBuffer!=activeIndexBuffer) {glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,indexBuffer);activeIndexBuffer=indexBuffer;}
-            glDrawElements(topology,static_cast<GLsizei>(batch.count),GL_UNSIGNED_INT,
-                reinterpret_cast<const void*>(static_cast<std::uintptr_t>(batch.first)*sizeof(std::uint32_t)));
+    const auto drawPass=[&](std::int32_t id) {
+        glRenderStage=100+id;
+        const bool offscreen=id!=0;
+        GLint height=static_cast<GLint>(options.height);
+        glDisable(GL_SCISSOR_TEST);
+        if(offscreen) {
+            const auto& target=renderedTargets.at(id);
+            height=static_cast<GLint>(target.height);
+            glBindFramebuffer(GL_FRAMEBUFFER,glName(target.framebuffer));
+            glViewport(0,0,static_cast<GLsizei>(target.width),static_cast<GLsizei>(target.height));
         } else {
-            // vitaGL's linear index table is 16-bit: split very long arrays.
-            constexpr std::uint32_t chunk=60000u;
-            for(std::uint32_t done=0;done<batch.count;done+=chunk)
-                glDrawArrays(topology,static_cast<GLint>(batch.first+done),
-                    static_cast<GLsizei>(std::min(chunk,batch.count-done)));
+            glBindFramebuffer(GL_FRAMEBUFFER,0);
+            glViewport(0,0,static_cast<GLsizei>(options.width),static_cast<GLsizei>(options.height));
         }
-        ++drawn;previous=&batch;
-    }
+        glClearColor(0.0f,0.0f,0.0f,1.0f);glClearDepthf(1.0f);
+        glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);glDepthMask(GL_TRUE);
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_SCISSOR_TEST);
+        const float yflip=offscreen ? 1.0f:-1.0f;
+        const GlProgram* activeProgram{};
+        const VkDrawBatch* previous{};
+        GlBlendState activeBlend;bool blendKnown=false;
+        int activeDepth=-1,activeDepthWrite=-1;
+        std::uint32_t activeShading=UINT32_MAX;
+        activeTexture=~0u;
+        for(const auto batchIndex:targetBatches[static_cast<std::size_t>(id)]) [&] {
+            const auto& batch=batches[batchIndex];
+            const bool sampled=batch.sampledTarget>0;
+            if(!batch.scissor.extent.width || !batch.scissor.extent.height) {++skipped;return;}
+            const auto blend=glBlendFor(batch);
+            const bool shade=batch.nativeGpuPosition && batch.nativeShadingIndex!=0;
+            const bool texturing=!batch.untextured;
+            std::uint32_t key=static_cast<std::uint32_t>(batch.textureFunction)&3u;
+            key|=(texturing ? 1u:0u)<<2;
+            key|=(static_cast<std::uint32_t>(std::clamp(batch.alphaTest,0,2)))<<3;
+            key|=(batch.showcaseEnvironmentBlend ? 1u:0u)<<5;
+            key|=(blend.fixedAlpha ? 1u:0u)<<6;
+            key|=(batch.clampTopLeft && texturing ? 1u:0u)<<7;
+            key|=(batch.nativeGpuPosition ? 1u:0u)<<8;
+            key|=(shade ? 1u:0u)<<9;
+            auto& program=Program(key);
+            if(!program.program) {++skipped;return;}
+            if(&program!=activeProgram) {
+                glUseProgram(program.program);activeProgram=&program;activeShading=UINT32_MAX;
+                if(program.yflip>=0)glUniform1f(program.yflip,yflip);
+            }
+            const auto vertexBuffer=batch.residentGeometry ? residentVertices.name:vertexStream.name;
+            if(!vertexBuffer) {++skipped;return;}
+            if(vertexBuffer!=activeVertexBuffer) {
+                glBindBuffer(GL_ARRAY_BUFFER,vertexBuffer);
+                constexpr GLsizei stride=sizeof(VkVertex);
+                glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,stride,reinterpret_cast<const void*>(offsetof(VkVertex,position)));
+                glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,stride,reinterpret_cast<const void*>(offsetof(VkVertex,uvq)));
+                glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,stride,reinterpret_cast<const void*>(offsetof(VkVertex,color)));
+                glVertexAttribPointer(3,3,GL_FLOAT,GL_FALSE,stride,reinterpret_cast<const void*>(offsetof(VkVertex,normal)));
+                activeVertexBuffer=vertexBuffer;
+            }
+            if(!previous || std::memcmp(&previous->viewport,&batch.viewport,sizeof(batch.viewport))) {
+                const auto& viewport=batch.viewport;
+                glViewport(static_cast<GLint>(viewport.x),
+                    offscreen ? static_cast<GLint>(viewport.y):
+                    height-static_cast<GLint>(viewport.y)-static_cast<GLint>(viewport.height),
+                    static_cast<GLsizei>(viewport.width),static_cast<GLsizei>(viewport.height));
+                glDepthRangef(viewport.minDepth,viewport.maxDepth);
+            }
+            if(!previous || std::memcmp(&previous->scissor,&batch.scissor,sizeof(batch.scissor))) {
+                const auto& scissor=batch.scissor;
+                glScissor(scissor.offset.x,offscreen ? scissor.offset.y:
+                    height-scissor.offset.y-static_cast<GLint>(scissor.extent.height),
+                    static_cast<GLsizei>(scissor.extent.width),static_cast<GLsizei>(scissor.extent.height));
+            }
+            if(!blendKnown || !(blend==activeBlend)) {
+                if(blend.enable) {
+                    glEnable(GL_BLEND);
+                    glBlendEquationSeparate(blend.equation,GL_FUNC_ADD);
+                    // FIX replaces the written source alpha; keep destination alpha.
+                    glBlendFuncSeparate(blend.source,blend.destination,
+                        blend.fixedAlpha ? GL_ZERO:GL_ONE,blend.fixedAlpha ? GL_ONE:GL_ZERO);
+                } else glDisable(GL_BLEND);
+                activeBlend=blend;blendKnown=true;
+            }
+            const int depth=batch.depth ? 1:0,depthWrite=batch.depthWrite ? 1:0;
+            if(depth!=activeDepth) {
+                if(depth)glEnable(GL_DEPTH_TEST);else glDisable(GL_DEPTH_TEST);
+                activeDepth=depth;
+            }
+            if(depthWrite!=activeDepthWrite) {glDepthMask(depthWrite ? GL_TRUE:GL_FALSE);activeDepthWrite=depthWrite;}
+            std::uint32_t texWidth{},texHeight{};
+            if(texturing) {
+                GLuint name{};
+                if(sampled) {
+                    const auto& source=renderedTargets.at(batch.sampledTarget);
+                    name=glName(source.color.image);texWidth=source.width;texHeight=source.height;
+                } else {
+                    Require(batch.texture<textures.size(),"vitaGL draw lost its cached texture");
+                    const auto& texture=textures[batch.texture];
+                    name=glName(texture.image.image);texWidth=texture.width;texHeight=texture.height;
+                }
+                if(name!=activeTexture) {glBindTexture(GL_TEXTURE_2D,name);activeTexture=name;}
+            }
+            if(program.fparam>=0) {
+                const float texelX=texWidth ? 1.0f/static_cast<float>(texWidth):0.0f;
+                const float texelY=texHeight ? 1.0f/static_cast<float>(texHeight):0.0f;
+                glUniform4f(program.fparam,batch.blendConstant,texelX,texelY,0.0f);
+            }
+            if(batch.nativeGpuPosition) {
+                const auto& m=batch.nativeLocalToClip;
+                glUniform4f(program.m0,m[0],m[1],m[2],m[3]);
+                glUniform4f(program.m1,m[4],m[5],m[6],m[7]);
+                glUniform4f(program.m2,m[8],m[9],m[10],m[11]);
+                glUniform4f(program.m3,m[12],m[13],m[14],m[15]);
+                const auto& c=batch.nativeClipMapping;
+                glUniform4f(program.clipmap,c[0],c[1],c[2],c[3]);
+            }
+            if(shade && batch.nativeShadingIndex!=activeShading) {
+                const auto first=batch.nativeShadingIndex;
+                Require(first+19u<=gatheredGlyphBounds.size(),"vitaGL shading record exceeds the frame table");
+                const auto& record=gatheredGlyphBounds;
+                std::uint32_t flags{},mode{},material{};
+                std::memcpy(&flags,&record[first][0],4);std::memcpy(&mode,&record[first][1],4);
+                std::memcpy(&material,&record[first][2],4);
+                glUniform4fv(program.shade,19,record[first].data());
+                if(material && material+4u<=gatheredGlyphBounds.size())
+                    glUniform4fv(program.material,4,record[material].data());
+                else {
+                    static const float zero[16]{};
+                    glUniform4fv(program.material,4,zero);
+                }
+                glUniform4f(program.flags,(flags&128u) ? 1.0f:0.0f,(flags&64u) ? 1.0f:0.0f,
+                    (flags&4u) ? 1.0f:0.0f,(mode&1u) ? 1.0f:0.0f);
+                glUniform4f(program.flags2,(mode&2u) ? 1.0f:0.0f,0.0f,0.0f,0.0f);
+                activeShading=first;
+            }
+            const GLenum topology=batch.wireframe ? GL_LINES:GL_TRIANGLES;
+            if(batch.indexed) {
+                const auto indexBuffer=batch.residentIndices ? residentIndices.name:indexStream.name;
+                if(!indexBuffer) {++skipped;previous=&batch;return;}
+                if(indexBuffer!=activeIndexBuffer) {glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,indexBuffer);activeIndexBuffer=indexBuffer;}
+                glDrawElements(topology,static_cast<GLsizei>(batch.count),GL_UNSIGNED_INT,
+                    reinterpret_cast<const void*>(static_cast<std::uintptr_t>(batch.first)*sizeof(std::uint32_t)));
+            } else {
+                // vitaGL's linear index table is 16-bit: split very long arrays.
+                constexpr std::uint32_t chunk=60000u;
+                for(std::uint32_t done=0;done<batch.count;done+=chunk)
+                    glDrawArrays(topology,static_cast<GLint>(batch.first+done),
+                        static_cast<GLsizei>(std::min(chunk,batch.count-done)));
+            }
+            ++drawn;previous=&batch;
+        }();
+        glDisable(GL_SCISSOR_TEST);
+    };
+    std::array<std::uint8_t,kTargets> visited{};
+    const auto visit=[&](const auto& self,std::int32_t id)->void {
+        auto& state=visited[static_cast<std::size_t>(id)];
+        if(state)return;
+        state=1;
+        for(const auto dependency:targetDependencies[static_cast<std::size_t>(id)])self(self,dependency);
+        if(id==0 || !targetBatches[static_cast<std::size_t>(id)].empty())drawPass(id);
+        if(id)renderedTargets.at(id).initialized=true;
+        state=2;
+    };
+    visit(visit,0);
+    // Offscreen targets nobody samples this frame (env-map faces) are not drawn.
+    for(std::size_t id=1;id<kTargets;++id)if(!visited[id])skipped+=targetBatches[id].size();
     glDisable(GL_SCISSOR_TEST);
     statistics.drawBatches=drawn;
     drawnBatches+=drawn;skippedBatches+=skipped;
     residentGeometry.PublishUploads(residentPendingUploads);
     residentIndexCache.PublishUploads(residentIndexPendingUploads);
     frame->MarkSubmitted();
-    frame->Complete();
+    if(!deferRetire)frame->Complete();
     for(auto& texture:textures)texture.uploadCompleted=true;
     for(auto& entry:renderedTargets)entry.second.initialized=true;
     const auto submitDone=Clock::now();
     statistics.recordSubmitMilliseconds=milliseconds(submitDone-uploadDone);
+    glRenderStage=4;
     vglSwapBuffers(GL_FALSE);
+    glRenderStage=0;
     statistics.presentMilliseconds=milliseconds(Clock::now()-submitDone);
     statistics.presentAccepted=true;
     if((++journalFrames%300u)==0) {
@@ -768,6 +862,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
 
 EcstasyVulkanDevice::EcstasyVulkanDevice(const EcstasyVulkanOptions& options):storage_(std::make_unique<Storage>(options)){}
 EcstasyVulkanDevice::~EcstasyVulkanDevice()=default;
+void EcstasyVulkanDevice::SetDeferredRetire(bool defer) noexcept {storage_->deferRetire=defer;}
+int EcstasyVulkanDevice::RenderStage() noexcept {return glRenderStage.load();}
 void EcstasyVulkanDevice::Render(EcstasyFrame& frame)
 {
     try {(void)storage_->Render(&frame);}

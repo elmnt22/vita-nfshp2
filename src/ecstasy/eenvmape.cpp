@@ -148,7 +148,7 @@ void EnvironmentMap::UpdateCameras(const float viewEye[3],const float reflection
     eTransposeMatrix(orientation,baseline);eMulMatrix(orientation,towardOrigin,orientation);
     rotationOnly(orientation);eTransposeMatrix(orientation,orientation);
     const std::size_t bank=applicationState==3 ? 0:1;
-#if defined(__SWITCH__) && !defined(__SWITCH2__)
+#if (defined(__SWITCH__) && !defined(__SWITCH2__)) || defined(__vita__)
     // Use the split-screen round-robin schedule in solo play too: one face
     // per source refresh, keeping the union pending until a frame submits.
     constexpr bool primary=false;

@@ -37,6 +37,9 @@
 #include "bware/inc/bMath.hpp"
 #include <cstring>
 #include <algorithm>
+#ifdef __vita__
+#include <psp2/kernel/threadmgr.h>
+#endif
 #ifdef __SWITCH__
 #include <switch.h>
 #include "src/nx/controller_art.hpp"
@@ -132,6 +135,10 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
         return std::max(1u,std::thread::hardware_concurrency());
     }();
     return cores;
+#elif defined(__vita__)
+    // Cores 0-2 are user cores (core 3 belongs to the system). Main thread
+    // stays on core 0; scene workers float on cores 1-2.
+    return 3u;
 #elif defined(__linux__)
     cpu_set_t allowed;
     CPU_ZERO(&allowed);
@@ -145,6 +152,12 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
     return std::max(1u,std::thread::hardware_concurrency());
 }
 
+#ifdef __vita__
+void ConfigureNativeSceneWorker() noexcept
+{
+    (void)sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_1|SCE_KERNEL_CPU_MASK_USER_2);
+}
+#endif
 #ifdef __SWITCH__
 void ConfigureNativeSceneWorker() noexcept
 {
@@ -817,7 +830,13 @@ void ecstasyViewsApplyMode(CarCinematicServices* services)
     auto& firstAux=one.auxiliaryTarget ? *one.auxiliaryTarget:first;
     auto& secondAux=two.auxiliaryTarget ? *two.auxiliaryTarget:second;
     const auto width=services->screens[0].target->width,height=services->screens[0].target->height;
-    const auto rectangle=[](EcstasyRenderTarget& target,int32_t left,int32_t top,int32_t w,int32_t h) {
+    // A pipelined host may still be drawing the previous frame from these
+    // targets: drain it before the first rectangle that actually changes.
+    bool drained=false;
+    const auto rectangle=[&drained](EcstasyRenderTarget& target,int32_t left,int32_t top,int32_t w,int32_t h) {
+        if(!drained && (target.left!=left || target.top!=top || target.width!=w || target.height!=h)) {
+            hp2::NativeDrainRendering();drained=true;
+        }
         target.left=left;target.top=top;target.width=w;target.height=h;
     };
     switch(services->appliedPresentationLayout) {
