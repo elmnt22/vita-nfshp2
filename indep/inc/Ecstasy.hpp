@@ -1179,6 +1179,7 @@ struct FlailerRenderManager;
 struct EcstasySceneCaptureProfile {
     // Setup, background, world, particles, solids, alpha/mirrors, effects, HUD.
     std::array<double,8> milliseconds{};
+    std::array<double,8> discardedMilliseconds{}; // same phases, catch-up captures only
     std::uint64_t emittedCaptures{},discardedCaptures{};
 };
 

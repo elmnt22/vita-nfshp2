@@ -928,13 +928,15 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     auto* resources=models_->resourceRegistry;
     std::optional<SceneLightContext> worldContext;
     std::vector<std::size_t> lightJobs;
-    if(resources && draws.size()>=128 && NativeSceneEffectiveHardwareConcurrency()>1) {
+    // Lighting is per-draw pure owner input (no shared writes), so the pool
+    // takes it once there is enough work to amortize the wakeup.
+    if(resources && draws.size()>=32 && NativeSceneEffectiveHardwareConcurrency()>1) {
         for(std::size_t index=0;index<draws.size();++index) {
             const auto& draw=draws[index];
             if(!draw.identity && draw.model->solid && (draw.model->solid->renderFlags&0x1c0u))
                 lightJobs.push_back(index);
         }
-        if(lightJobs.size()>=128) {
+        if(lightJobs.size()>=24) {
             preparedLights.resize(draws.size());
             const auto applicationState=frame.ApplicationState();
             const auto* environment=frame.EnvironmentMatrix();
@@ -942,11 +944,11 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 const auto index=lightJobs[job];
                 preparedLights[index]=SetupLightContext(resources->Lights(),draws[index].matrix.data(),
                     environment,camera.eye,view,applicationState);
-            },128);
+            },24);
         }
     }
     const auto splitLit=std::chrono::steady_clock::now();
-    std::size_t splitBatched=0;
+    std::size_t splitBatched=0,splitInlineLights=0;double splitInlineLightMs=0,splitModelMs=0;
     for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
         auto& draw=draws[drawIndex];
         std::optional<SceneLightContext> localContext;
@@ -966,8 +968,11 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                     // A preceding draw can select a new vertex-animation
                     // solid on this same live model. Re-evaluate the original
                     // predicate above and retain its owner-side fallback.
+                    const auto lightStart=std::chrono::steady_clock::now();
                     localContext=SetupLightContext(resources->Lights(),draw.matrix.data(),
                         frame.EnvironmentMatrix(),camera.eye,view,frame.ApplicationState());context=&*localContext;
+                    ++splitInlineLights;
+                    splitInlineLightMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lightStart).count();
                 }
             }
         }
@@ -982,19 +987,22 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context)) {++splitBatched;continue;}
         }
 #endif
+        const auto modelStart=std::chrono::steady_clock::now();
         frame.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context);
+        splitModelMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-modelStart).count();
     }
     {
         // Diagnostic: prepare / light / emit split per view (logged every 300 renders).
-        static std::array<double,3> split{};static std::array<double,3> counts{};static unsigned renders=0;
+        static std::array<double,5> split{};static std::array<double,4> counts{};static unsigned renders=0;
         const auto now=std::chrono::steady_clock::now();
         const auto ms=[](auto a,auto b){return std::chrono::duration<double,std::milli>(b-a).count();};
         split[0]+=ms(splitStarted,splitPrepared);split[1]+=ms(splitPrepared,splitLit);split[2]+=ms(splitLit,now);
-        counts[0]+=draws.size();counts[1]+=splitBatched;counts[2]+=lightJobs.size();
+        counts[0]+=draws.size();counts[1]+=splitBatched;counts[2]+=lightJobs.size();counts[3]+=splitInlineLights;
+        split[3]+=splitInlineLightMs;split[4]+=splitModelMs;
         if(++renders==300) {
             char text[256];
-            std::snprintf(text,sizeof(text),"renders=300 prepare_ms=%.3f light_ms=%.3f emit_ms=%.3f draws=%.1f batched=%.1f light_jobs=%.1f",
-                split[0]/300,split[1]/300,split[2]/300,counts[0]/300,counts[1]/300,counts[2]/300);
+            std::snprintf(text,sizeof(text),"renders=300 prepare_ms=%.3f light_ms=%.3f emit_ms=%.3f inline_light_ms=%.3f model_ms=%.3f draws=%.1f batched=%.1f light_jobs=%.1f inline_lights=%.1f",
+                split[0]/300,split[1]/300,split[2]/300,split[3]/300,split[4]/300,counts[0]/300,counts[1]/300,counts[2]/300,counts[3]/300);
             platform::RecordSessionEvent("render.scenery_split",text);
             split={};counts={};renders=0;
         }

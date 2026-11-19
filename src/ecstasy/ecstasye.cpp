@@ -3399,8 +3399,9 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     const auto captureCheckpoint=[&](std::size_t phase) {
         if(!scene.captureProfile)return;
         const auto now=CaptureClock::now();
-        scene.captureProfile->milliseconds[phase]+=
-            std::chrono::duration<double,std::milli>(now-capturePhaseStarted).count();
+        const auto spent=std::chrono::duration<double,std::milli>(now-capturePhaseStarted).count();
+        scene.captureProfile->milliseconds[phase]+=spent;
+        if(!scene.emitRaceGeometry)scene.captureProfile->discardedMilliseconds[phase]+=spent;
         capturePhaseStarted=now;
     };
     if(scene.captureProfile) {
