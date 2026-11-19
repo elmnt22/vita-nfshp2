@@ -46,6 +46,7 @@ unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 }
 
 namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; }
+extern int collisionWitnessWarmProbe;
 
 namespace {
 class VitaLog;
@@ -275,12 +276,15 @@ public:
         if (result != WORLD_AUDIO_OK) log_.Line("audio.failure", audio_.Error().c_str());
         if (++audioPumps_ % 300u == 0) {
             const auto audio = audio_.TakeStatistics();
-            char detail[256];
+            char detail[384];
             std::snprintf(detail, sizeof(detail),
-                "pumps=300 decode_ms=%.3f commands_ms=%.3f pump_peak_ms=%.3f apply_peak_ms=%.3f apply_peak_kind=%d mix_ms_total=%.1f buffers=%llu voices_peak=%u",
+                "pumps=300 decode_ms=%.3f commands_ms=%.3f pump_peak_ms=%.3f apply_peak_ms=%.3f apply_peak_kind=%d "
+                "inner_peak_ms=%.3f inner_peak_music_ms=%.3f inner_peak_install_ms=%.3f inner_peak_commands_ms=%.3f inner_peak_requests=%u "
+                "mix_ms_total=%.1f buffers=%llu voices_peak=%u",
                 audio.decodeMilliseconds / 300.0, audio.commandMilliseconds / 300.0, pumpPeakUs_ / 1000.0,
-                audio.applyPeakMilliseconds, audio.applyPeakKind, audio.mixMilliseconds,
-                static_cast<unsigned long long>(audio.buffers), audio.voicesPeak);
+                audio.applyPeakMilliseconds, audio.applyPeakKind,
+                audio.pumpPeakMilliseconds, audio.pumpPeakMusicMs, audio.pumpPeakInstallMs, audio.pumpPeakCommandsMs, audio.pumpPeakRequests,
+                audio.mixMilliseconds, static_cast<unsigned long long>(audio.buffers), audio.voicesPeak);
             pumpPeakUs_ = 0;
             log_.Line("audio.backend_window", detail);
         }
@@ -432,6 +436,11 @@ int main(int, char**)
             host.DisableAudio();
             applicationLaunchOptions.musicEnabled = 0;
             log.Line("vita.audio", "disabled by noaudio.txt");
+        }
+        SceIoStat probe{};
+        if (sceIoGetstat((std::string(kDataDirectory) + "/witness_probe.txt").c_str(), &probe) >= 0) {
+            collisionWitnessWarmProbe = 1;
+            log.Line("vita.diag", "witness warm probe on");
         }
         hp2::ApplicationRuntime application(files, host, saves);
         host.BindClock(application.Clock());

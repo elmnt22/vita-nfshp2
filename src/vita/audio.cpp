@@ -384,6 +384,13 @@ struct AudioDevice::State {
         case WORLD_AUDIO_LOAD_REGION:
             if(!operation.bank || !banks.try_emplace(operation.bank,*operation.bank).second)
                 throw AudioFailure{WORLD_AUDIO_INVALID_BINDING,"Invalid Vita audio bank load"};
+            {
+                auto warm=std::make_shared<BankWarm>();
+                const auto& cache=banks.find(operation.bank)->second;
+                warm->total=cache.CueCount();
+                bankWarms[operation.bank]=warm;
+                PostWarmSlice(&cache,warm);
+            }
             check(library.CompleteRegion(operation,true),"Complete Vita audio bank load");
             break;
         case WORLD_AUDIO_UNLOAD_BANK:
@@ -393,6 +400,7 @@ struct AudioDevice::State {
                     voice=Voice{};
                 }
             }
+            CancelWarm(operation.bank);
             if(banks.erase(operation.bank)!=1)
                 throw AudioFailure{WORLD_AUDIO_STALE_REFERENCE,"Vita audio bank was already unloaded"};
             break;
@@ -562,6 +570,55 @@ struct AudioDevice::State {
     NativeAudioCommandPump commands;
     AudioStatistics statistics;
     std::map<const WorldAudioBank*,NativeSoundBankCache> banks;
+    // Cue warm-up: after a bank loads, the worker decodes its resident cues
+    // in small slices (music reads interleave between slices) and the game
+    // thread installs them in Pump, so first plays no longer decode inline.
+    struct BankWarm {
+        std::atomic<bool> cancel{false},busy{true};
+        std::mutex mutex;
+        std::vector<std::pair<std::size_t,std::vector<std::shared_ptr<const PcmWave>>>> ready;
+        std::size_t next{},total{};
+    };
+    std::map<const WorldAudioBank*,std::shared_ptr<BankWarm>> bankWarms;
+    void PostWarmSlice(const NativeSoundBankCache* cache,std::shared_ptr<BankWarm> warm)
+    {
+        worker.Post([this,cache,warm]() {
+            constexpr std::size_t slice=8;
+            if(warm->cancel.load(std::memory_order_acquire) || warm->next>=warm->total) {
+                warm->busy.store(false,std::memory_order_release);return;
+            }
+            const auto first=warm->next;
+            auto decoded=cache->DecodeResidentRange(first,slice);
+            {std::lock_guard<std::mutex> lock(warm->mutex);warm->ready.emplace_back(first,std::move(decoded));}
+            warm->next=first+slice;
+            if(warm->next<warm->total && !warm->cancel.load(std::memory_order_acquire))PostWarmSlice(cache,warm);
+            else warm->busy.store(false,std::memory_order_release);
+        });
+    }
+    void InstallWarmedCues()
+    {
+        for(auto it=bankWarms.begin();it!=bankWarms.end();) {
+            auto& warm=*it->second;
+            std::vector<std::pair<std::size_t,std::vector<std::shared_ptr<const PcmWave>>>> ready;
+            {std::lock_guard<std::mutex> lock(warm.mutex);ready.swap(warm.ready);}
+            const auto bank=banks.find(it->first);
+            if(bank!=banks.end())for(auto& item:ready)bank->second.InstallDecoded(item.first,std::move(item.second));
+            if(!warm.busy.load(std::memory_order_acquire)) {
+                std::lock_guard<std::mutex> lock(warm.mutex);
+                if(warm.ready.empty()) {it=bankWarms.erase(it);continue;}
+            }
+            ++it;
+        }
+    }
+    void CancelWarm(const WorldAudioBank* bank)
+    {
+        const auto found=bankWarms.find(bank);
+        if(found==bankWarms.end())return;
+        found->second->cancel.store(true,std::memory_order_release);
+        // At most one slice (8 cues) is in flight; the bank must outlive it.
+        while(found->second->busy.load(std::memory_order_acquire))sceKernelDelayThread(200);
+        bankWarms.erase(found);
+    }
     std::array<Voice,48> voices{};
     std::array<OutputBuffer,2> buffers{};
     std::mutex mutex;
@@ -617,11 +674,15 @@ WorldAudioResult AudioDevice::Pump()
                 });
             }
         }
+        const auto installStarted=std::chrono::steady_clock::now();
+        state_->InstallWarmedCues();
         const auto commandsStarted=std::chrono::steady_clock::now();
+        std::uint32_t requests=0;
         // Only this thread runs commands; the voice lock covers each apply
         // (what the mixer reads), not the stream decode that precedes it.
-        check(state_->commands.Pump(state_->queue,256,[this](const auto& request) {
+        check(state_->commands.Pump(state_->queue,256,[this,&requests](const auto& request) {
             state_->PreDecode(request);
+            ++requests;
             std::lock_guard<std::mutex> lock(state_->mutex);
             const auto applyStarted=std::chrono::steady_clock::now();
             const auto applied=state_->Apply(request);
@@ -634,7 +695,20 @@ WorldAudioResult AudioDevice::Pump()
         }),"Pump retained Vita audio commands");
         std::lock_guard<std::mutex> statisticsLock(state_->mutex);
         state_->statistics.decodeMilliseconds+=std::chrono::duration<double,std::milli>(commandsStarted-decodeStarted).count();
-        state_->statistics.commandMilliseconds+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-commandsStarted).count();
+        const auto finished=std::chrono::steady_clock::now();
+        state_->statistics.commandMilliseconds+=std::chrono::duration<double,std::milli>(finished-commandsStarted).count();
+        {
+            using Ms=std::chrono::duration<double,std::milli>;
+            const auto total=Ms(finished-decodeStarted).count();
+            auto& stats=state_->statistics;
+            if(total>stats.pumpPeakMilliseconds) {
+                stats.pumpPeakMilliseconds=total;
+                stats.pumpPeakMusicMs=Ms(installStarted-decodeStarted).count();
+                stats.pumpPeakInstallMs=Ms(commandsStarted-installStarted).count();
+                stats.pumpPeakCommandsMs=Ms(finished-commandsStarted).count();
+                stats.pumpPeakRequests=requests;
+            }
+        }
         if(!state_->initialized)
             throw AudioFailure{WORLD_AUDIO_INVALID_BINDING,"Missing Vita audio initialize request"};
         return WORLD_AUDIO_OK;

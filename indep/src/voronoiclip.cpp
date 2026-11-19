@@ -5,6 +5,7 @@
 #include "bware/inc/bMath.hpp"
 #include "indep/inc/VoronoiClip.hpp"
 
+#include <chrono>
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
@@ -631,10 +632,42 @@ int32_t collisionWitnessEdgeFace(CollisionWitness* witness, const float featureF
     return 0;
 }
 
+// Diagnostic counters (logged with render.collision_solve).
+uint64_t collisionWitnessQueries=0,collisionWitnessIterations=0,collisionWitnessRestarts=0,collisionWitnessExhausted=0;
+double collisionWitnessMilliseconds=0,collisionWitnessWarmMilliseconds=0;
+int collisionWitnessWarmProbe=0;
+uint64_t collisionWitnessWarmMismatches=0;
+static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
+                              const float firstPosition[4], const float secondFrame[16],
+                              const float secondPosition[4], uint32_t* randomState);
 int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState)
 {
+    const CollisionWitness before=*witness;
+    const uint32_t randomBefore=*randomState;
+    const auto started=std::chrono::steady_clock::now();
+    const int32_t result=collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState);
+    const auto finished=std::chrono::steady_clock::now();
+    collisionWitnessMilliseconds+=std::chrono::duration<double,std::milli>(finished-started).count();
+    if(collisionWitnessWarmProbe) {
+        // Diagnostic only: rerun the same query on copies with a warm cache.
+        CollisionWitness copy=before;
+        uint32_t random=randomBefore;
+        const uint64_t q=collisionWitnessQueries,i=collisionWitnessIterations,r=collisionWitnessRestarts,e=collisionWitnessExhausted;
+        const auto warmStarted=std::chrono::steady_clock::now();
+        collisionWitnessQueryBody(&copy,firstFrame,firstPosition,secondFrame,secondPosition,&random);
+        collisionWitnessWarmMilliseconds+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-warmStarted).count();
+        collisionWitnessQueries=q;collisionWitnessIterations=i;collisionWitnessRestarts=r;collisionWitnessExhausted=e;
+        if(memcmp(&copy,witness,sizeof(copy))!=0 || random!=*randomState) ++collisionWitnessWarmMismatches;
+    }
+    return result;
+}
+static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
+                              const float firstPosition[4], const float secondFrame[16],
+                              const float secondPosition[4], uint32_t* randomState)
+{
+    ++collisionWitnessQueries;
     float firstToSecond[16], secondToFirst[16];
     collisionRelativeTransform(firstToSecond, secondFrame, secondPosition, firstFrame, firstPosition);
     collisionRelativeTransform(secondToFirst, firstFrame, firstPosition, secondFrame, secondPosition);
@@ -676,7 +709,10 @@ int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[
             witness->first = &witness->firstGeometry->vertices[vectorRandomBounded((uint32_t)witness->firstGeometry->vertexCount, randomState)];
             witness->second = &witness->secondGeometry->vertices[vectorRandomBounded((uint32_t)witness->secondGeometry->vertexCount, randomState)];
         } else ++iteration;
+        ++collisionWitnessIterations;
     } while (result == 0 && restarts < 3 && iteration < 80);
+    collisionWitnessRestarts+=(uint64_t)restarts;
+    if (result == 0) ++collisionWitnessExhausted;
     return result;
 }
 
