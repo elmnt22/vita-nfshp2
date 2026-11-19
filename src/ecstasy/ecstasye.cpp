@@ -2166,8 +2166,13 @@ void EcstasyFrame::AttachSolidPolys()
     std::pmr::vector<std::size_t> next(output-pendingAlphaBegin_,noCommand,&scratch);
     std::pmr::vector<TextureChain> chains{&scratch};
     std::pmr::map<std::pair<const TextureInfo*,const EcstasyRenderTarget*>,std::size_t> active{&scratch};
-    struct ChainSlot {const TextureInfo* texture{};const EcstasyRenderTarget* sampled{};std::size_t chain{};bool used{};};
-    std::array<ChainSlot,1024> chainTable{};std::size_t chainTableUsed=0;
+    // Generation-tagged so the table needs no clearing per flush.
+    struct ChainSlot {const TextureInfo* texture{};const EcstasyRenderTarget* sampled{};std::size_t chain{};std::uint32_t generation{};};
+    static thread_local std::array<ChainSlot,1024> chainTable{};
+    static thread_local std::uint32_t chainGeneration=0;
+    if(++chainGeneration==0) {for(auto& slot:chainTable)slot.generation=0;chainGeneration=1;}
+    const auto generation=chainGeneration;
+    std::size_t chainTableUsed=0;
     // Source strips and their material passes frequently keep the same
     // ordering texture. This lookup is local to this exact solid flush;
     // only an already-created chain index is reused, never its draw order.
@@ -2188,14 +2193,14 @@ void EcstasyFrame::AttachSolidPolys()
             std::size_t slot=((identity>>4)^(identity>>13))&(chainTable.size()-1);
             bool resolved=false;
             if(chainTableUsed<chainTable.size()/2) {
-                while(chainTable[slot].used) {
+                while(chainTable[slot].generation==generation) {
                     if(chainTable[slot].texture==texture && chainTable[slot].sampled==sampled) {
                         chainIndex=chainTable[slot].chain;resolved=true;break;
                     }
                     slot=(slot+1)&(chainTable.size()-1);
                 }
                 if(!resolved) {
-                    chainTable[slot]={texture,sampled,chains.size(),true};++chainTableUsed;
+                    chainTable[slot]={texture,sampled,chains.size(),generation};++chainTableUsed;
                     chainIndex=chains.size();chains.emplace_back(texture,sampled);resolved=true;
                     active.emplace(std::make_pair(texture,sampled),chainIndex);
                 }
@@ -5824,6 +5829,7 @@ class VkNativeFrameShading {
         std::array<float,4> unit{};
         std::array<float,16> coefficients{};
         SceneLightContext context;
+        const SceneLightContext* contextSource{};
         bool valid{};
         bool Matches(const VkSolidStripJob& job,std::uint32_t requestedMode) const noexcept {
             const auto& draw=*job.draw;
@@ -5834,7 +5840,11 @@ class VkNativeFrameShading {
             if(!(job.reflection || (draw.drawFlags&0xc0u)))return true;
             if(material!=draw.lightMaterial || !draw.lightMaterial || !draw.LightContext())return false;
             const auto& light=*draw.LightContext();
-            return std::memcmp(coefficients.data(),draw.lightMaterial->NativeCoefficients(),sizeof(coefficients))==0 &&
+            if(std::memcmp(coefficients.data(),draw.lightMaterial->NativeCoefficients(),sizeof(coefficients)))return false;
+            // Sealed-frame instances own immutable light snapshots and inputs
+            // are cleared every Gather, so the same snapshot object matches.
+            if(contextSource==&light)return true;
+            return
                 std::memcmp(context.colorMatrix.data(),light.colorMatrix.data(),sizeof(context.colorMatrix))==0 &&
                 std::memcmp(context.directionMatrix.data(),light.directionMatrix.data(),sizeof(context.directionMatrix))==0 &&
                 std::memcmp(context.environmentMatrix.data(),light.environmentMatrix.data(),sizeof(context.environmentMatrix))==0 &&
@@ -5845,9 +5855,9 @@ class VkNativeFrameShading {
             flags=draw.drawFlags;mode=requestedMode;alpha=draw.alphaScale;
             scroll=job.scroll;std::copy_n(eUnitVector4,unit.size(),unit.begin());index=first;
             if(job.reflection || (draw.drawFlags&0xc0u)) {
-                material=draw.lightMaterial;context=*draw.LightContext();
+                material=draw.lightMaterial;context=*draw.LightContext();contextSource=draw.LightContext();
                 std::copy_n(draw.lightMaterial->NativeCoefficients(),coefficients.size(),coefficients.begin());
-            } else material=nullptr;
+            } else {material=nullptr;contextSource=nullptr;}
             valid=true;
         }
     };
