@@ -2512,6 +2512,28 @@ void EcstasyFrame::AttachSolidPolys()
     static_assert(std::is_nothrow_move_constructible<EcstasyDrawCommand>::value &&
         std::is_nothrow_move_assignable<EcstasyDrawCommand>::value,
         "In-place native command ordering requires nonthrowing value moves");
+    if constexpr(std::is_trivially_copyable<EcstasyDrawCommand>::value) {
+        // Out of place: one sequential copy, then independent reads with
+        // sequential writes. The in-place cycle walk was a dependent chain of
+        // random 152-byte moves (~2 ms/frame on Vita). Same final order.
+        std::size_t first=0;
+        while(first<order.size() && order[first]==first)++first;
+        if(first<order.size()) {
+            const auto count=order.size()-first;
+            const auto words=(count*sizeof(EcstasyDrawCommand)+sizeof(std::uint64_t)-1)/sizeof(std::uint64_t);
+            if(attachPermuteScratch_.size()<words)attachPermuteScratch_.resize(words);
+            std::memcpy(static_cast<void*>(attachPermuteScratch_.data()),&commands_[rangeBegin+first],count*sizeof(EcstasyDrawCommand));
+            auto* destination=&commands_[rangeBegin];
+            const auto* source=reinterpret_cast<const EcstasyDrawCommand*>(attachPermuteScratch_.data());
+            for(std::size_t index=first;index<order.size();++index) {
+                const auto from=order[index];
+                // Every source before 'first' is already in place.
+                std::memcpy(static_cast<void*>(destination+index),
+                    from>=first ? static_cast<const void*>(source+(from-first)):static_cast<const void*>(destination+from),
+                    sizeof(EcstasyDrawCommand));
+            }
+        }
+    } else
     for(std::size_t start=0;start<order.size();++start) {
         if(order[start]==start)continue;
         auto saved=std::move(commands_[rangeBegin+start]);

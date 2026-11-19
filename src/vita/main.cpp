@@ -49,6 +49,8 @@ namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; }
 extern int collisionWitnessWarmProbe;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
+extern int collisionSpeculationMode;
+extern uint64_t collisionSpeculationVerifyBudget;
 
 namespace {
 class VitaLog;
@@ -516,6 +518,20 @@ int main(int, char**)
         }
         SceIoStat probe{};
         collisionWitnessClockMicros = []{ return (uint32_t)sceKernelGetProcessTimeLow(); };
+        // Exact speculative collision separation on cores 1/2: verify the
+        // first separations against the serial path, then run speculatively.
+        collisionSpeculationMode = 3; collisionSpeculationVerifyBudget = 2000;
+        if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/collision_spec.txt").c_str(), "r")) {
+            int mode = 0; unsigned long long budget = 0;
+            if (std::fscanf(file, "%d %llu", &mode, &budget) >= 1) { collisionSpeculationMode = mode; collisionSpeculationVerifyBudget = budget; }
+            std::fclose(file);
+        }
+        {
+            char detail[96];
+            std::snprintf(detail, sizeof(detail), "collision_speculation mode=%d verify_budget=%llu", collisionSpeculationMode,
+                static_cast<unsigned long long>(collisionSpeculationVerifyBudget));
+            log.Line("vita.diag", detail);
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/witness_probe.txt").c_str(), &probe) >= 0) {
             collisionWitnessWarmProbe = 1;
             collisionWitnessProbeClock = [] { return static_cast<uint32_t>(sceKernelGetProcessTimeLow()); };

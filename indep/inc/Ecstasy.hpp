@@ -1077,6 +1077,7 @@ private:
     const EcstasyDrawProjection* lastProjection_{};
     std::uint32_t nextFeedbackGroup_{};
     std::vector<EcstasyDrawCommand> pendingAlphaCommands_;
+    std::vector<std::uint64_t> attachPermuteScratch_; // raw command bytes (AttachSolidPolys)
     // Native temporary capacity only. Neither scratch list survives a call
     // with live elements, so it cannot retain a track/texture borrower.
     std::vector<EcstasyDrawCommand> orderingScratch_;
