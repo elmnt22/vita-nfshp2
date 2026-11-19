@@ -62,6 +62,9 @@ namespace hp2 { extern std::array<double,4> ecstasyAttachSolidPartMs; extern dou
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
 extern uint64_t collisionWitnessWarmMismatches;
+extern int collisionSpeculationMode;
+extern uint64_t collisionSpecSeparations,collisionSpecAccepted,collisionSpecWasted,collisionSpecMispredicts,
+    collisionSpecRounds,collisionSpecVerified,collisionSpecMismatches,collisionFindQueries,collisionSeparateQueries,collisionSeparateCalls;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint64_t collisionWitnessKindMicros[9],collisionWitnessKindSteps[9];
 static double soundUpdatePeakMs=0;
@@ -1380,8 +1383,16 @@ bool ApplicationRuntime::Tick()
                     ms={};calls={};
                 }
                 auto& solve=worldCollisionSolveMs;
-                std::snprintf(detail,sizeof(detail),"find_ms=%.3f queue_ms=%.3f resolve_ms=%.3f tail_ms=%.3f",
-                    solve[0]/count,solve[1]/count,solve[2]/count,solve[3]/count);
+                std::snprintf(detail,sizeof(detail),"find_ms=%.3f queue_ms=%.3f resolve_ms=%.3f tail_ms=%.3f "
+                    "find_queries=%.1f separate_calls=%.1f separate_queries=%.1f spec_mode=%d spec_separations=%.1f spec_rounds=%.1f "
+                    "spec_accepted=%.1f spec_wasted=%.1f spec_mispredicts=%.1f spec_verified=%llu spec_mismatches=%llu",
+                    solve[0]/count,solve[1]/count,solve[2]/count,solve[3]/count,
+                    ::collisionFindQueries/count,::collisionSeparateCalls/count,::collisionSeparateQueries/count,::collisionSpeculationMode,
+                    ::collisionSpecSeparations/count,::collisionSpecRounds/count,::collisionSpecAccepted/count,::collisionSpecWasted/count,
+                    ::collisionSpecMispredicts/count,static_cast<unsigned long long>(::collisionSpecVerified),
+                    static_cast<unsigned long long>(::collisionSpecMismatches));
+                ::collisionFindQueries=::collisionSeparateCalls=::collisionSeparateQueries=0;
+                ::collisionSpecSeparations=::collisionSpecRounds=::collisionSpecAccepted=::collisionSpecWasted=::collisionSpecMispredicts=0;
                 s.host.RecordSessionEvent("render.collision_solve",detail);
                 {
                     std::snprintf(detail,sizeof(detail),"queries_per_frame=%.1f iterations_per_query=%.2f restarts_per_frame=%.2f exhausted_per_frame=%.2f witness_ms=%.3f warm_ms=%.3f warm_mismatches=%llu",

@@ -643,7 +643,16 @@ uint64_t collisionWitnessKindMicros[9]={},collisionWitnessKindSteps[9]={};
 uint64_t collisionWitnessWarmMismatches=0;
 static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
-                              const float secondPosition[4], uint32_t* randomState);
+                              const float secondPosition[4], uint32_t* randomState,
+                              uint64_t* counters=nullptr);
+// Thread-safe variant for speculative helpers: no timers, probes or global
+// counters (counters[4] = queries, iterations, restarts, exhausted).
+int32_t collisionWitnessQueryDetached(CollisionWitness* witness, const float firstFrame[16],
+                              const float firstPosition[4], const float secondFrame[16],
+                              const float secondPosition[4], uint32_t* randomState, uint64_t counters[4])
+{
+    return collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState,counters);
+}
 int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState)
@@ -676,9 +685,11 @@ int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[
 }
 static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
-                              const float secondPosition[4], uint32_t* randomState)
+                              const float secondPosition[4], uint32_t* randomState,
+                              uint64_t* counters)
 {
-    ++collisionWitnessQueries;
+    const bool detached=counters!=nullptr;
+    if(!detached) ++collisionWitnessQueries; else ++counters[0];
     float firstToSecond[16], secondToFirst[16];
     collisionRelativeTransform(firstToSecond, secondFrame, secondPosition, firstFrame, firstPosition);
     collisionRelativeTransform(secondToFirst, firstFrame, firstPosition, secondFrame, secondPosition);
@@ -689,7 +700,7 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
     int32_t iteration = 0, restarts = 0, result = 0;
     do {
         const int firstKind = witness->first->kind, secondKind = witness->second->kind;
-        const uint32_t stepStarted = collisionWitnessProbeClock ? collisionWitnessProbeClock() : 0;
+        const uint32_t stepStarted = !detached && collisionWitnessProbeClock ? collisionWitnessProbeClock() : 0;
         if (firstKind == 0 && secondKind == 0) {
             witness->side = 1;
             result = collisionWitnessVertices(witness, firstToSecond, secondToFirst, &firstVertex, &secondVertex);
@@ -715,7 +726,7 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
             witness->side = 2;
             result = collisionWitnessEdgeFace(witness, secondToFirst, firstToSecond, &secondEdge);
         }
-        if (collisionWitnessProbeClock && firstKind < 3 && secondKind < 3) {
+        if (!detached && collisionWitnessProbeClock && firstKind < 3 && secondKind < 3) {
             collisionWitnessKindMicros[firstKind * 3 + secondKind] += collisionWitnessProbeClock() - stepStarted;
             ++collisionWitnessKindSteps[firstKind * 3 + secondKind];
         }
@@ -725,10 +736,15 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
             witness->first = &witness->firstGeometry->vertices[vectorRandomBounded((uint32_t)witness->firstGeometry->vertexCount, randomState)];
             witness->second = &witness->secondGeometry->vertices[vectorRandomBounded((uint32_t)witness->secondGeometry->vertexCount, randomState)];
         } else ++iteration;
-        ++collisionWitnessIterations;
+        if (!detached) ++collisionWitnessIterations; else ++counters[1];
     } while (result == 0 && restarts < 3 && iteration < 80);
-    collisionWitnessRestarts+=(uint64_t)restarts;
-    if (result == 0) ++collisionWitnessExhausted;
+    if (!detached) {
+        collisionWitnessRestarts+=(uint64_t)restarts;
+        if (result == 0) ++collisionWitnessExhausted;
+    } else {
+        counters[2]+=(uint64_t)restarts;
+        if (result == 0) ++counters[3];
+    }
     return result;
 }
 
