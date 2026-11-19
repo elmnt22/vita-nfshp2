@@ -1488,6 +1488,13 @@ bool particleCarVisible(const WorldParticleGroup& group,const CarCinematicScreen
 }
 }
 
+// Parallel particle quad build (exact; PC HP2_PARALLEL_PARTICLES=0 / Vita particles_serial.txt off).
+int ecstasyParallelParticles=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_PARALLEL_PARTICLES"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 1;
+}();
 WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& system,
     const ChopperEffectData& catalogue,const CarCinematicScreen& view,EcstasyFrame& frame)
 {
@@ -1512,9 +1519,26 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
     const auto* projection=view.matrices.clipToScreen;
     Require(projection[0]!=0.0f && projection[5]!=0.0f,
         "Particle projection has no native pixel scale");
-    // Reuse one producer buffer across groups. AttachParticleGroup copies
-    // directly into the frame's contiguous native storage before it clears.
-    std::vector<EcstasyParticleQuad> quads;
+    // Three passes, exact: the owner walks the groups (filters, texture
+    // lookups, authored constants) and lists their particles; workers build
+    // each particle's quad in its own slot (pure reads of the simulation);
+    // the owner then counts, sums depth in source order and attaches each
+    // group in source list order.
+    struct GroupPlan {
+        const WorldParticleDefinition* definition;const EditorMarkerTexture* descriptor;
+        std::uint8_t widthPower;std::uint32_t width,height;float du,dv,inverseLifetime,maximum;
+        std::size_t first,count;
+    };
+    enum : std::uint8_t {Drawn,CenterClipped,SizeClipped,DistanceClipped};
+    struct ParticleSlot {EcstasyParticleQuad quad;float depth;std::uint8_t status;};
+    // Per capture thread; workers must use the owner's storage through these
+    // references (a thread_local named inside the job would be their own).
+    static thread_local std::vector<GroupPlan> planStorage;
+    static thread_local std::vector<const WorldParticle*> particleStorage;
+    static thread_local std::vector<std::uint32_t> ownerStorage;
+    static thread_local std::vector<ParticleSlot> slotStorage;
+    auto& plans=planStorage;auto& particles=particleStorage;auto& owners=ownerStorage;auto& slots=slotStorage;
+    plans.clear();particles.clear();owners.clear();
     for(const auto* group=system.firstGroup;group;group=group->next) {
         ++result.groups;
         Require(group->occupied && group->definition,"Particle list contains a retired definition/group");
@@ -1529,75 +1553,136 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
         const auto heightPower=static_cast<std::uint8_t>(definition.atlasHeightPower);
         Require(definition.atlasWidthPower>=0 && definition.atlasHeightPower>=0 &&
             widthPower<=30 && heightPower<=30,"Particle atlas dimensions exceed their authored domain");
-        const auto width=std::uint32_t(1)<<widthPower,height=std::uint32_t(1)<<heightPower;
-        const float du=1.0f/static_cast<float>(width),dv=1.0f/static_cast<float>(height);
-        const float inverseLifetime=1.0f/definition.lifetime;
+        GroupPlan plan;
+        plan.definition=&definition;plan.descriptor=descriptor;plan.widthPower=widthPower;
+        plan.width=std::uint32_t(1)<<widthPower;plan.height=std::uint32_t(1)<<heightPower;
+        plan.du=1.0f/static_cast<float>(plan.width);plan.dv=1.0f/static_cast<float>(plan.height);
+        plan.inverseLifetime=1.0f/definition.lifetime;
         const float sourceMaximum=definition.maximumPixelSize==0.0f ? 512.0f:definition.maximumPixelSize;
-        const float maximum=sourceMaximum*particlePixelScale;
-        quads.clear();
-        float depthSum=0.0f;
+        plan.maximum=sourceMaximum*particlePixelScale;
+        plan.first=particles.size();
+        const auto owner=static_cast<std::uint32_t>(plans.size());
         for(const auto* particle=group->first;particle;particle=particle->next) {
             ++result.particles;
             if(!particle->occupied)throw std::runtime_error("Particle list contains a retired particle");
-            const float age=1.0f-(static_cast<float>(particle->remainingTicks)*0.0009765625f)*inverseLifetime;
-            const float point[4]={particle->position[0],particle->position[1],particle->position[2],1.0f};
-            if(eGetClipFlags(point,view.matrices.worldToClip)) {++result.centerClipped;continue;}
-            float camera[4],clip[4],size[4];
-            eMulVector4(camera,view.matrices.worldToView,point);
-            eMulVector4(clip,view.matrices.worldToClip,point);
-            worldParticleHermiteEvaluate(size,definition.sizeRotationCurve,age);
-            float pixels=size[0]>0.0f ? (size[0]*view.pixelScale)/camera[2]:0.0f;
-            if(maximum<pixels)pixels=maximum;
-            if(!(pixels>1.0f)) {++result.sizeClipped;continue;}
-            if(!(camera[2]<definition.interestDistance)) {++result.distanceClipped;continue;}
-            const auto delta=static_cast<std::uint16_t>(convertFloatToInt32(size[1]));
-            const auto rotation=static_cast<std::uint16_t>((particle->rotation&1u) ?
-                particle->rotation-delta:particle->rotation+delta);
-            EcstasyParticleQuad quad;
-            Require(std::isfinite(clip[3]) && clip[3]>0.0f,"Particle clip divisor is invalid");
-            const float z=clip[2]/clip[3];
-            const float divisor=projection[11]*z+projection[15];
-            Require(std::isfinite(divisor) && divisor!=0.0f,"Particle screen divisor is invalid");
-            const float scaleX=projection[0]/divisor,scaleY=projection[5]/divisor;
-            // Pixel-centre snapping is an authored visual convention. Work
-            // around the native viewport centre, without the GS2048 bias,
-            // unsigned12.4 wrapping, or integer bits carried in float Z.
-            const float centerX=std::floor((clip[0]/clip[3])*scaleX);
-            const float centerY=std::floor((clip[1]/clip[3])*scaleY);
-            quad.depth=depthRange[0]+(depthRange[1]-depthRange[0])*(z+1.0f)*0.5f;
-            if(rotation==0) {
-                const float halfX=std::trunc(pixels*8.0f)*(1.0f/16.0f);
-                const float halfY=std::trunc(pixels*7.0f)*(1.0f/16.0f);
-                for(std::size_t i=0;i<4;++i) {
-                    quad.clipXY[i][0]=(centerX+((i&1u) ? halfX:-halfX))/scaleX;
-                    quad.clipXY[i][1]=(centerY+((i&2u) ? halfY:-halfY))/scaleY;
-                }
-            } else {
-                float sine,cosine;motionAngleComponents(rotation,&sine,&cosine);
-                for(std::size_t i=0;i<4;++i) {
-                    const float px=(i&1u) ? pixels:-pixels,py=(i&2u) ? pixels:-pixels;
-                    // PAL1293DC..12946C: rotate, apply the authored X8/Y7
-                    // proportions, then retain its sixteenth-pixel grid.
-                    const float rotatedX=(cosine*px)+((-sine)*py);
-                    const float rotatedY=(sine*px)+(cosine*py);
-                    quad.clipXY[i][0]=(std::floor(rotatedX*8.0f+centerX*16.0f)*(1.0f/16.0f))/scaleX;
-                    quad.clipXY[i][1]=(std::floor(rotatedY*7.0f+centerY*16.0f)*(1.0f/16.0f))/scaleY;
+            particles.push_back(particle);owners.push_back(owner);
+        }
+        plan.count=particles.size()-plan.first;
+        plans.push_back(plan);
+    }
+    if(slots.size()<particles.size())slots.resize(particles.size());
+    const auto buildQuad=[&](std::size_t index) {
+        const auto& plan=plans[owners[index]];
+        const auto& definition=*plan.definition;
+        const auto* particle=particles[index];
+        auto& slot=slots[index];
+        const float age=1.0f-(static_cast<float>(particle->remainingTicks)*0.0009765625f)*plan.inverseLifetime;
+        const float point[4]={particle->position[0],particle->position[1],particle->position[2],1.0f};
+        if(eGetClipFlags(point,view.matrices.worldToClip)) {slot.status=CenterClipped;return;}
+        float camera[4],clip[4],size[4];
+        eMulVector4(camera,view.matrices.worldToView,point);
+        eMulVector4(clip,view.matrices.worldToClip,point);
+        worldParticleHermiteEvaluate(size,definition.sizeRotationCurve,age);
+        float pixels=size[0]>0.0f ? (size[0]*view.pixelScale)/camera[2]:0.0f;
+        if(plan.maximum<pixels)pixels=plan.maximum;
+        if(!(pixels>1.0f)) {slot.status=SizeClipped;return;}
+        if(!(camera[2]<definition.interestDistance)) {slot.status=DistanceClipped;return;}
+        const auto delta=static_cast<std::uint16_t>(convertFloatToInt32(size[1]));
+        const auto rotation=static_cast<std::uint16_t>((particle->rotation&1u) ?
+            particle->rotation-delta:particle->rotation+delta);
+        EcstasyParticleQuad quad;
+        Require(std::isfinite(clip[3]) && clip[3]>0.0f,"Particle clip divisor is invalid");
+        const float z=clip[2]/clip[3];
+        const float divisor=projection[11]*z+projection[15];
+        Require(std::isfinite(divisor) && divisor!=0.0f,"Particle screen divisor is invalid");
+        const float scaleX=projection[0]/divisor,scaleY=projection[5]/divisor;
+        // Pixel-centre snapping is an authored visual convention. Work
+        // around the native viewport centre, without the GS2048 bias,
+        // unsigned12.4 wrapping, or integer bits carried in float Z.
+        const float centerX=std::floor((clip[0]/clip[3])*scaleX);
+        const float centerY=std::floor((clip[1]/clip[3])*scaleY);
+        quad.depth=depthRange[0]+(depthRange[1]-depthRange[0])*(z+1.0f)*0.5f;
+        if(rotation==0) {
+            const float halfX=std::trunc(pixels*8.0f)*(1.0f/16.0f);
+            const float halfY=std::trunc(pixels*7.0f)*(1.0f/16.0f);
+            for(std::size_t i=0;i<4;++i) {
+                quad.clipXY[i][0]=(centerX+((i&1u) ? halfX:-halfX))/scaleX;
+                quad.clipXY[i][1]=(centerY+((i&2u) ? halfY:-halfY))/scaleY;
+            }
+        } else {
+            float sine,cosine;motionAngleComponents(rotation,&sine,&cosine);
+            for(std::size_t i=0;i<4;++i) {
+                const float px=(i&1u) ? pixels:-pixels,py=(i&2u) ? pixels:-pixels;
+                // PAL1293DC..12946C: rotate, apply the authored X8/Y7
+                // proportions, then retain its sixteenth-pixel grid.
+                const float rotatedX=(cosine*px)+((-sine)*py);
+                const float rotatedY=(sine*px)+(cosine*py);
+                quad.clipXY[i][0]=(std::floor(rotatedX*8.0f+centerX*16.0f)*(1.0f/16.0f))/scaleX;
+                quad.clipXY[i][1]=(std::floor(rotatedY*7.0f+centerY*16.0f)*(1.0f/16.0f))/scaleY;
+            }
+        }
+        float color[4];worldParticleHermiteEvaluate(color,definition.colorCurve,age);
+        for(std::size_t lane=0;lane<4;++lane) {
+            if(!std::isfinite(color[lane]))throw std::runtime_error("Particle curve produced a nonfinite color");
+            const auto component=static_cast<std::uint32_t>(convertFloatToInt32(std::clamp(color[lane],0.0f,255.0f)));
+            quad.color|=component<<(lane*8);
+        }
+        const float u=static_cast<float>(particle->atlasFrame&(plan.width-1u))*plan.du;
+        const float v=static_cast<float>((particle->atlasFrame>>plan.widthPower)&(plan.height-1u))*plan.dv;
+        quad.uv={{{u,v},{u+plan.du,v},{u,v+plan.dv},{u+plan.du,v+plan.dv}}};
+        slot.quad=quad;slot.depth=static_cast<float>(convertFloatToInt32(camera[2]));slot.status=Drawn;
+    };
+    constexpr std::size_t particleChunk=96;
+    const auto chunkCount=(particles.size()+particleChunk-1)/particleChunk;
+    RunNativeSceneJobs(chunkCount,[&](std::size_t chunk) {
+        const auto first=chunk*particleChunk,last=std::min(first+particleChunk,particles.size());
+        for(auto index=first;index<last;++index)buildQuad(index);
+    },ecstasyParallelParticles ? 3:std::numeric_limits<std::size_t>::max(),2);
+#if !defined(__SWITCH__) && !defined(__vita__)
+    // PC HP2_VERIFY_PARTICLES=1: rebuild every slot serially and compare.
+    static const bool verifyParticles=[] {const char* value=std::getenv("HP2_VERIFY_PARTICLES");return value && *value=='1';}();
+    if(verifyParticles && !particles.empty()) {
+        static std::uint64_t checks=0,mismatches=0,calls=0;
+        const std::vector<ParticleSlot> parallel(slots.begin(),slots.begin()+particles.size());
+        for(std::size_t index=0;index<particles.size();++index) {
+            buildQuad(index);++checks;
+            const auto& a=parallel[index];const auto& b=slots[index];
+            if(a.status!=b.status || (a.status==Drawn && (std::memcmp(&a.quad,&b.quad,sizeof(a.quad))!=0 ||
+                std::memcmp(&a.depth,&b.depth,sizeof(a.depth))!=0))) {
+                if(++mismatches<=12) {
+                    char text[200];std::snprintf(text,sizeof(text),"st=%d/%d depth=%.9g/%.9g qd=%.9g/%.9g x=%.9g/%.9g col=%08x/%08x u=%.9g/%.9g n=%zu",
+                        a.status,b.status,a.depth,b.depth,a.quad.depth,b.quad.depth,a.quad.clipXY[0][0],b.quad.clipXY[0][0],
+                        a.quad.color,b.quad.color,a.quad.uv[0][0],b.quad.uv[0][0],particles.size());
+                    platform::RecordSessionEvent("render.particle_mismatch",text);
                 }
             }
-            float color[4];worldParticleHermiteEvaluate(color,definition.colorCurve,age);
-            for(std::size_t lane=0;lane<4;++lane) {
-                if(!std::isfinite(color[lane]))throw std::runtime_error("Particle curve produced a nonfinite color");
-                const auto component=static_cast<std::uint32_t>(convertFloatToInt32(std::clamp(color[lane],0.0f,255.0f)));
-                quad.color|=component<<(lane*8);
+        }
+        if((++calls&127u)==0) {
+            char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
+                (unsigned long long)checks,(unsigned long long)mismatches);
+            platform::RecordSessionEvent("render.particle_verify",text);
+        }
+    }
+#endif
+    // Reuse one producer buffer across groups. AttachParticleGroup copies
+    // directly into the frame's contiguous native storage before it clears.
+    std::vector<EcstasyParticleQuad> quads;
+    for(const auto& plan:plans) {
+        quads.clear();
+        float depthSum=0.0f;
+        for(auto index=plan.first;index<plan.first+plan.count;++index) {
+            const auto& slot=slots[index];
+            switch(slot.status) {
+            case CenterClipped:++result.centerClipped;continue;
+            case SizeClipped:++result.sizeClipped;continue;
+            case DistanceClipped:++result.distanceClipped;continue;
+            default:break;
             }
-            const float u=static_cast<float>(particle->atlasFrame&(width-1u))*du;
-            const float v=static_cast<float>((particle->atlasFrame>>widthPower)&(height-1u))*dv;
-            quad.uv={{{u,v},{u+du,v},{u,v+dv},{u+du,v+dv}}};
-            depthSum=depthSum+static_cast<float>(convertFloatToInt32(camera[2]));
-            quads.push_back(quad);++result.drawnParticles;
+            depthSum=depthSum+slot.depth;
+            quads.push_back(slot.quad);++result.drawnParticles;
         }
         if(!quads.empty()) {
-            frame.AttachParticleGroup(quads,*descriptor,view,depthSum/static_cast<float>(quads.size()));
+            frame.AttachParticleGroup(quads,*plan.descriptor,view,depthSum/static_cast<float>(quads.size()));
             ++result.drawnGroups;
         }
     }

@@ -184,6 +184,18 @@ private:
     std::vector<RenderNode> nodeScratch_;
     std::vector<RenderSectionCapture> sectionCaptureScratch_;
     std::vector<std::optional<SceneLightContext>> lightContextScratch_;
+    // Parallel cached-scenery emit scratch (see SceneryResources::Render).
+    struct EmitPlan {
+        OpaqueSceneryBatch* batch{};const SceneLightContext* context{};EcstasyDrawInstance* instance{};
+        std::uint32_t begin{},end{};bool stripCull{};
+    };
+    struct EmitChunk {
+        std::vector<EcstasyDrawCommand> commands;
+        std::vector<const EditorMarkerSolidGeometry::Strip*> runStrips;
+    };
+    std::vector<EmitPlan> emitPlanScratch_;
+    std::vector<EmitChunk> emitChunkScratch_;
+    std::uint64_t emitPass_{},parallelEmitViews_{},verifyParallelEmitViews_{};
     std::vector<std::int16_t> sectionScratch_;
     // Exact selected-solid / current native matrix / animation and material
     // bindings. A generation table reuses one allocation between extended
