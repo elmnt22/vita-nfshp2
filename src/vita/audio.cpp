@@ -7,6 +7,8 @@
 
 #include <atomic>
 #include <mutex>
+#include <optional>
+#include <utility>
 #include <pthread.h>
 
 #include <algorithm>
@@ -14,6 +16,9 @@
 #include <cmath>
 #include <chrono>
 #include <deque>
+#include <exception>
+#include <functional>
+#include <memory>
 #include <map>
 #include <stdexcept>
 #include <utility>
@@ -38,6 +43,85 @@ void check(WorldAudioResult result,const char* detail)
 }
 
 
+// Result of one background music job (file reads + ADPCM decode).
+template<class T> struct AsyncResult {
+    std::atomic<bool> done{false};
+    std::optional<T> value;
+    std::exception_ptr error;
+    T Take() {
+        if(error)std::rethrow_exception(error);
+        return std::move(*value);
+    }
+};
+
+// One low-priority worker for music file I/O and decode, so neither the game
+// thread nor the mixer waits on the memory card. Jobs own their inputs
+// (copied decode ranges, shared stream objects); nothing reads live voices.
+class AudioWorker {
+public:
+    ~AudioWorker() {Stop();}
+    bool Start()
+    {
+        if(started_)return true;
+        sema_=sceKernelCreateSema("hp2_audio_jobs",0,0,1<<20,nullptr);
+        if(sema_<0)return false;
+        stopping_=false;
+        pthread_attr_t attributes;pthread_attr_init(&attributes);
+        // The jukebox opener keeps a 64 KB tail buffer on its stack.
+        pthread_attr_setstacksize(&attributes,512*1024);
+        started_=pthread_create(&thread_,&attributes,[](void* self) -> void* {
+            static_cast<AudioWorker*>(self)->Run();return nullptr;
+        },this)==0;
+        pthread_attr_destroy(&attributes);
+        if(!started_) {sceKernelDeleteSema(sema_);sema_=-1;}
+        return started_;
+    }
+    void Stop() noexcept
+    {
+        if(!started_)return;
+        {std::lock_guard<std::mutex> lock(mutex_);stopping_=true;}
+        sceKernelSignalSema(sema_,1);
+        pthread_join(thread_,nullptr);started_=false;
+        sceKernelDeleteSema(sema_);sema_=-1;
+        jobs_.clear();
+    }
+    // Runs job inline when the worker is unavailable.
+    void Post(std::function<void()> job)
+    {
+        if(!started_ && !Start()) {job();return;}
+        {std::lock_guard<std::mutex> lock(mutex_);jobs_.push_back(std::move(job));}
+        sceKernelSignalSema(sema_,1);
+    }
+private:
+    void Run()
+    {
+        // Core 2 with the mixer, below it and below the GL thread.
+        sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_2);
+        sceKernelChangeThreadPriority(0,180);
+        for(;;) {
+            sceKernelWaitSema(sema_,1,nullptr);
+            std::function<void()> job;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if(stopping_)return;
+                if(jobs_.empty())continue;
+                job=std::move(jobs_.front());jobs_.pop_front();
+            }
+            job();
+        }
+    }
+    pthread_t thread_{};
+    SceUID sema_{-1};
+    bool started_{},stopping_{};
+    std::mutex mutex_;
+    std::deque<std::function<void()>> jobs_;
+};
+
+struct MusicRead {
+    std::shared_ptr<NativeJukeboxStream> stream;
+    AsyncResult<NativeJukeboxStream::Chunk> result;
+};
+
 struct Voice {
     WorldAudioVoiceRef sample{};
     const WorldAudioBank* bank{};
@@ -45,7 +129,11 @@ struct Voice {
     NativeVoiceMix mix;
     NativeEnvelope envelope{};
     std::deque<std::shared_ptr<const PcmWave>> chunks;
-    std::unique_ptr<NativeJukeboxStream> music;
+    // The worker reads `music` only through a MusicRead it shares; Finished()
+    // is mirrored in musicFinished so no other thread reads the cursor.
+    std::shared_ptr<NativeJukeboxStream> music;
+    std::shared_ptr<MusicRead> pendingRead;
+    bool musicFinished{};
     const WorldAudioStreamSource* movie{};
     Ps2AdpcmHistory movieHistory{};
     double cursor{};
@@ -60,9 +148,9 @@ struct Voice {
         chunks.push_back(std::make_shared<PcmWave>(std::move(pcm)));
     }
 
-    bool Streaming() const noexcept {return movie || (music && !music->Finished());}
+    bool Streaming() const noexcept {return movie || (music && !musicFinished);}
 
-    bool NeedsMusic() const noexcept {return chunks.size()<2 && music && !music->Finished();}
+    bool NeedsMusic() const noexcept {return chunks.size()<2 && music && !musicFinished && !pendingRead;}
 
     void RefillMovie()
     {
@@ -149,6 +237,7 @@ struct AudioDevice::State {
 
     void StopOutput() noexcept
     {
+        worker.Stop();
         if(threadStarted) {running=false;pthread_join(thread,nullptr);threadStarted=false;}
         if(initialized) {sceAudioOutReleasePort(port);port=-1;initialized=false;}
     }
@@ -240,6 +329,37 @@ struct AudioDevice::State {
         }
     }
 
+    // Stream decodes for the next request, done before taking the voice
+    // lock so neither the mixer nor the game thread waits on a decode.
+    using JukeboxStart=decltype(PrepareJukeboxStream(CaptureStreamDecodeRange(std::declval<const WorldAudioRequest&>())));
+    std::optional<PcmWave> predecoded;
+    std::shared_ptr<AsyncResult<JukeboxStart>> jukeboxOpen;
+    uint64_t jukeboxOpenSequence{};
+    AudioWorker worker;
+    void PreDecode(const WorldAudioRequest& operation)
+    {
+        predecoded.reset();
+        if(operation.instance && operation.instance->retiring && operation.kind!=WORLD_AUDIO_STOP)return;
+        switch(operation.kind) {
+        case WORLD_AUDIO_OPEN_STREAM:
+            if(!operation.streamSource || !operation.instance || operation.streamSource->movie)return;
+            // Jukebox opens decode on the worker (Apply returns Blocked meanwhile).
+            if(operation.instance->completionKind!=WORLD_AUDIO_COMPLETION_JUKEBOX)
+                predecoded.emplace(DecodeSoundStreamRange(operation));
+            return;
+        case WORLD_AUDIO_APPEND_CHAIN:
+        case WORLD_AUDIO_OPEN_CHAIN:
+            predecoded.emplace(DecodeSoundStreamRange(operation));
+            return;
+        default:
+            return;
+        }
+    }
+    PcmWave DecodedRange(const WorldAudioRequest& operation)
+    {
+        if(predecoded) {auto pcm=std::move(*predecoded);predecoded.reset();return pcm;}
+        return DecodeSoundStreamRange(operation);
+    }
     NativeAudioApply Apply(const WorldAudioRequest& operation)
     {
         if(operation.instance && operation.instance->retiring && operation.kind!=WORLD_AUDIO_STOP)
@@ -314,13 +434,33 @@ struct AudioDevice::State {
                 voice->opened=true;
                 voice->sequence=operation.sequence;
             } else if(operation.instance->completionKind==WORLD_AUDIO_COMPLETION_JUKEBOX) {
-                auto stream=PrepareJukeboxStream(CaptureStreamDecodeRange(operation));
+                if(jukeboxOpen && jukeboxOpenSequence!=operation.sequence) {
+                    // A different open owns the slot; a finished orphan is dropped.
+                    if(!jukeboxOpen->done.load(std::memory_order_acquire))return NativeAudioApply::Blocked;
+                    jukeboxOpen.reset();
+                }
+                if(!jukeboxOpen) {
+                    auto range=CaptureStreamDecodeRange(operation);
+                    jukeboxOpen=std::make_shared<AsyncResult<JukeboxStart>>();
+                    jukeboxOpenSequence=operation.sequence;
+                    worker.Post([job=jukeboxOpen,range=std::move(range)]() {
+                        try {job->value.emplace(PrepareJukeboxStream(range));}
+                        catch(...) {job->error=std::current_exception();}
+                        job->done.store(true,std::memory_order_release);
+                    });
+                    return NativeAudioApply::Blocked;
+                }
+                if(!jukeboxOpen->done.load(std::memory_order_acquire))return NativeAudioApply::Blocked;
+                auto opened=std::move(jukeboxOpen);
+                auto stream=opened->Take();
                 auto& voice=Allocate(operation,stream.first.pcm.channels);
                 voice.music=std::move(stream.stream);
+                voice.pendingRead.reset();
+                voice.musicFinished=stream.first.last;
                 voice.Append(std::move(stream.first.pcm));
                 voice.opened=true;
             } else {
-                auto pcm=DecodeSoundStreamRange(operation);
+                auto pcm=DecodedRange(operation);
                 auto& voice=Allocate(operation,pcm.channels);
                 voice.Append(std::move(pcm));
                 voice.opened=true;
@@ -329,7 +469,7 @@ struct AudioDevice::State {
         }
         case WORLD_AUDIO_APPEND_CHAIN:
         case WORLD_AUDIO_OPEN_CHAIN: {
-            auto pcm=DecodeSoundStreamRange(operation);
+            auto pcm=DecodedRange(operation);
             auto* voice=Find(operation);
             if(!voice) {
                 if(operation.kind==WORLD_AUDIO_APPEND_CHAIN)
@@ -355,6 +495,8 @@ struct AudioDevice::State {
                 voice->movie=nullptr;
                 voice->movieHistory={};
                 voice->music.reset();
+                voice->pendingRead.reset();
+                voice->musicFinished=false;
                 voice->cursor=0;
                 if(operation.releaseDeviceVoice)*voice=Voice{};
             }
@@ -438,20 +580,38 @@ WorldAudioResult AudioDevice::Pump()
         // Music decode runs outside the voice lock (the output thread keeps
         // mixing); only the chunk append is locked. Voices are reassigned
         // only by commands on this thread, so the pointer stays valid.
-        for(auto& voice:state_->voices) {
-            bool needs;
-            {std::lock_guard<std::mutex> lock(state_->mutex);needs=voice.NeedsMusic();}
-            if(!needs)continue;
-            auto pcm=voice.music->Read().pcm;
+        {
             std::lock_guard<std::mutex> lock(state_->mutex);
-            voice.Append(std::move(pcm));
+            for(auto& voice:state_->voices) {
+                if(voice.pendingRead && voice.pendingRead->result.done.load(std::memory_order_acquire)) {
+                    auto read=std::move(voice.pendingRead);
+                    if(read->stream==voice.music) {
+                        auto chunk=read->result.Take();
+                        voice.musicFinished=chunk.last;
+                        voice.Append(std::move(chunk.pcm));
+                    }
+                }
+                if(!voice.NeedsMusic())continue;
+                auto read=std::make_shared<MusicRead>();
+                read->stream=voice.music;
+                voice.pendingRead=read;
+                state_->worker.Post([read]() {
+                    try {read->result.value.emplace(read->stream->Read());}
+                    catch(...) {read->result.error=std::current_exception();}
+                    read->result.done.store(true,std::memory_order_release);
+                });
+            }
         }
         const auto commandsStarted=std::chrono::steady_clock::now();
-        std::unique_lock<std::mutex> commandLock(state_->mutex);
-        state_->statistics.decodeMilliseconds+=std::chrono::duration<double,std::milli>(commandsStarted-decodeStarted).count();
+        // Only this thread runs commands; the voice lock covers each apply
+        // (what the mixer reads), not the stream decode that precedes it.
         check(state_->commands.Pump(state_->queue,256,[this](const auto& request) {
+            state_->PreDecode(request);
+            std::lock_guard<std::mutex> lock(state_->mutex);
             return state_->Apply(request);
         }),"Pump retained Vita audio commands");
+        std::lock_guard<std::mutex> statisticsLock(state_->mutex);
+        state_->statistics.decodeMilliseconds+=std::chrono::duration<double,std::milli>(commandsStarted-decodeStarted).count();
         state_->statistics.commandMilliseconds+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-commandsStarted).count();
         if(!state_->initialized)
             throw AudioFailure{WORLD_AUDIO_INVALID_BINDING,"Missing Vita audio initialize request"};

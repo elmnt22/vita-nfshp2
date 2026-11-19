@@ -1,4 +1,5 @@
 #include "indep/inc/Collision.hpp"
+#include <array>
 #include "indep/inc/Contact.hpp"
 #include "indep/inc/VoronoiClip.hpp"
 #include "indep/inc/Smokeable.hpp"
@@ -8,6 +9,7 @@
 #include "indep/inc/World.hpp"
 #include "indep/inc/CarDriver.hpp"
 #include "indep/inc/Player.hpp"
+std::array<double,4> worldCollisionSubPhaseMs{};
 #include "indep/inc/World.hpp"
 #include "indep/inc/RaceCoordinator.hpp"
 #include "indep/inc/Race.hpp"
@@ -349,15 +351,28 @@ WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed
         return simulation->result = WORLD_SIMULATION_COLLISION_FAILURE;
 
     finishPhase(&WorldStepProfile::driveMs);
+    // Collision sub-phases (diagnostic): pre-step, participants, solve, post-step.
+    auto subStart=profile?ProfileClock::now():ProfileClock::time_point{};
+    const auto subPhase=[&](int index) {
+        if(!profile)return;
+        const auto now=ProfileClock::now();
+        worldCollisionSubPhaseMs[index]+=std::chrono::duration<double,std::milli>(now-subStart).count();
+        subStart=now;
+    };
     for (int32_t index = 0; index < world->totalCars; ++index)
         if (carFramePreStep(simulation->frames[index], elapsed) != CAR_FRAME_OK)
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
-    if (worldServicesAdvanceParticipants(collisions, elapsed) != COLLISION_SYSTEM_OK ||
-        collisionSystemStep(collisions, elapsed) != COLLISION_SYSTEM_OK)
+    subPhase(0);
+    if (worldServicesAdvanceParticipants(collisions, elapsed) != COLLISION_SYSTEM_OK)
         return simulation->result = WORLD_SIMULATION_COLLISION_FAILURE;
+    subPhase(1);
+    if (collisionSystemStep(collisions, elapsed) != COLLISION_SYSTEM_OK)
+        return simulation->result = WORLD_SIMULATION_COLLISION_FAILURE;
+    subPhase(2);
     for (int32_t index = 0; index < world->totalCars; ++index)
         if (carFramePostStep(simulation->frames[index], elapsed) != CAR_FRAME_OK)
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
+    subPhase(3);
     finishPhase(&WorldStepProfile::collisionMs);
 
     const auto effectsStart=phaseStart;
