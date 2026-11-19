@@ -405,6 +405,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             current=fallback;
         } else ++commandAt;
         const auto& draw=*current;
+        const auto drawVertexStart=output.size();
         categoryTimer.Enter(draw);
         timeDraw=sampleCategories && (stepDrawIndex++&7u)==0;
         if(timeDraw)stepMark=Clock::now();
@@ -905,6 +906,11 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
                 const auto shadow=static_cast<std::size_t>(draw.carShadow)-1;
                 ++profile.shadowStrips[shadow];
                 profile.shadowTriangles[shadow]+=batch.count/3u;
+            }
+            if(!batch.residentGeometry && !batch.nativeGpuPosition && output.size()>drawVertexStart) {
+                bool unit=true;
+                for(auto at=drawVertexStart;unit && at<output.size();++at)unit=output[at].uvq[2]==1.0f;
+                batch.affineUV=unit;
             }
             step(solidStep ? 3:5);
             // A Vulkan draw is only a transport boundary. Concatenate adjacent
