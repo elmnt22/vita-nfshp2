@@ -210,7 +210,12 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         batch.viewport.minDepth=lastDepthRange[0];batch.viewport.maxDepth=lastDepthRange[1];
     };
     std::array<const EcstasyDrawInstance*,1024> validatedSceneryInstances{};
+    // Template of the last scenery packet (all fields but its index range),
+    // reused by later strips of the same run command: same texture, target,
+    // material state, transform and shading, so only geometry differs.
+    VkDrawBatch sceneryTemplate;const EcstasyDrawCommand* sceneryTemplateDraw=nullptr;
     const auto prepareSceneryPacket=[&](const EcstasyDrawCommand& draw,const EditorMarkerSolidGeometry::Strip* runStrip) {
+        sceneryTemplateDraw=nullptr;
         if(draw.kind!=EcstasyDrawKind::SolidStrip || !draw.instance || !runStrip ||
             !draw.texture || draw.sampledTarget || draw.orderingTexture ||
             draw.carShadow!=EcstasyCarShadow::None || !draw.target ||
@@ -292,6 +297,68 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             else {nativePendingWork+=job.workUnits;nativeStripJobs.push_back(job);}
         }
         if(batch.count)appendBatch(batch);
+        sceneryTemplate=batch;sceneryTemplateDraw=&draw;
+        return true;
+    };
+    // A later strip of the run whose template was just built. Only the
+    // per-strip resident geometry, its validation and its index span differ;
+    // the packet cache, raster, depth range and shading resolve identically.
+    const auto continueSceneryRun=[&](const EcstasyDrawCommand& draw,const EditorMarkerSolidGeometry::Strip* runStrip) {
+        if(!ecstasySceneryRunFastPath || sceneryTemplateDraw!=&draw)return prepareSceneryPacket(draw,runStrip);
+#if !defined(__vita__) && !defined(__SWITCH__)
+        // PC HP2_VERIFY_RUN_FAST=1: take the full path and compare its batch
+        // with the template the fast path would reuse (all but index range).
+        static const bool verifyRunFast=[] {const char* value=std::getenv("HP2_VERIFY_RUN_FAST");return value && *value=='1';}();
+        if(verifyRunFast) {
+            const auto expected=sceneryTemplate;
+            const bool taken=prepareSceneryPacket(draw,runStrip);
+            if(taken) {
+                const auto& actual=sceneryTemplate;
+                const bool same=actual.SameDrawState(expected) && actual.cachedOpaqueScenery==expected.cachedOpaqueScenery &&
+                    actual.nativeLocalToClip==expected.nativeLocalToClip && actual.nativeClipMapping==expected.nativeClipMapping &&
+                    actual.nativeTextureQScale==expected.nativeTextureQScale && actual.nativeShadingIndex==expected.nativeShadingIndex &&
+                    actual.nativeTransformIndex==expected.nativeTransformIndex;
+                static std::uint64_t checks=0,mismatches=0;
+                ++checks;if(!same)++mismatches;
+                if((checks&16383u)==0) {
+                    char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
+                        (unsigned long long)checks,(unsigned long long)mismatches);
+                    platform::RecordSessionEvent("render.run_fast_verify",text);
+                }
+            }
+            return taken;
+        }
+#endif
+        const auto& strip=*runStrip;
+        const auto count=strip.positions.size();
+        Require(strip.textureCoordinates.size()==count && strip.colors.size()==count,
+            "Original strip vertex/color/UV extents differ");
+        Require(count<=48,"Vulkan strip exceeds the original packet vertex extent");
+        if(draw.drawFlags&0xc0u)
+            Require(strip.normals.size()==count,"Lit strip lacks its signed normal payload");
+        VkSolidStripJob job;job.draw=&draw;job.strip=runStrip;
+        job.lod={{draw.textureQScale,static_cast<std::uint8_t>(strip.autoK)*0.0625f}};
+        job.lineTopology=(draw.nativeRenderEggState&EcstasyRenderEggWireframe)!=0;
+        bool prepare=false;
+        auto* resident=residentGeometry.Acquire(job,prepare);
+        if(!resident) {sceneryTemplateDraw=nullptr;return false;}
+        Require(residentFrameIndices+resident->indexCount<=UINT32_MAX,
+            "Native resident frame index count exceeds32-bit draw range");
+        Require(gatheredResidentIndexSpans.size()<UINT32_MAX,"Native resident index span count exceeds32-bit range");
+        auto& batch=sceneryTemplate;
+        batch.count=resident->indexCount;batch.nativeSpanCount=1;
+        batch.first=static_cast<std::uint32_t>(residentFrameIndices);
+        batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());
+        gatheredResidentIndexSpans.push_back(resident);
+        residentFrameIndices+=resident->indexCount;residentFrameVertices+=job.count;
+        job.residentOutput=resident->shadow.data();
+        job.workUnits=prepare ? NativePendingVertexWork(job):0;
+        if(job.workUnits) {
+            if(directSourcePreparation)PrepareNativeSolidStripVertices(job,job.residentOutput);
+            else {nativePendingWork+=job.workUnits;nativeStripJobs.push_back(job);}
+        }
+        ++statistics.sceneryPacketHits;
+        if(batch.count)appendBatch(batch);
         return true;
     };
     const bool sampleCategories=platform::nativeDiagnosticsEnabled && nextSubmission%32u==0;
@@ -326,7 +393,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
 #if defined(HP2_ENABLE_VITAGL) && !defined(HP2_VITA_ENVIRONMENT_MAP)
                 if(run.target && run.target->id==14)continue;
 #endif
-                if(prepareSceneryPacket(run,strip))continue;
+                if(continueSceneryRun(run,strip))continue;
                 ++statistics.sceneryPacketFallbacks;
                 sceneryRunFallbacks.push_back(run);
                 auto& single=sceneryRunFallbacks.back();
@@ -769,7 +836,20 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             }
         } else if(particle) {
             Require(draw.particleGroup,"Particle draw lost its contiguous group");
+            const double coverageScale=static_cast<double>(batch.viewport.width)*batch.viewport.height/
+                (4.0*static_cast<double>(options.width)*options.height);
+            auto& coverage=nativeParticleCoverage[destination==0 ? 0:1];
             for(const auto& quad:*draw.particleGroup) {
+                {
+                    float x0=quad.clipXY[0][0],x1=x0,y0=quad.clipXY[0][1],y1=y0;
+                    for(std::size_t corner=1;corner<4;++corner) {
+                        x0=std::min(x0,quad.clipXY[corner][0]);x1=std::max(x1,quad.clipXY[corner][0]);
+                        y0=std::min(y0,quad.clipXY[corner][1]);y1=std::max(y1,quad.clipXY[corner][1]);
+                    }
+                    x0=std::max(x0,-1.0f);y0=std::max(y0,-1.0f);x1=std::min(x1,1.0f);y1=std::min(y1,1.0f);
+                    if(x1>x0 && y1>y0)coverage+=static_cast<double>(x1-x0)*(y1-y0)*coverageScale;
+                    nativeParticleCoverage[2]+=1.0;
+                }
                 const auto firstVertex=output.size();
                 const auto particleColor=vulkanColor(quad.color,draw.alphaScale);
                 for(std::size_t corner=0;corner<4;++corner) {
