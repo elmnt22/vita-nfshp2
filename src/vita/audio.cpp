@@ -86,6 +86,7 @@ public:
         sceKernelDeleteSema(sema_);sema_=-1;
         jobs_.clear();
     }
+    bool Running() const noexcept {return started_;}
     // Runs job inline when the worker is unavailable.
     void Post(std::function<void()> job)
     {
@@ -375,6 +376,9 @@ struct AudioDevice::State {
             // A cancelled request never returns for its decode; finished
             // jobs are dropped here, unfinished ones when they complete.
             streamDecodes.erase(operation.sequence);
+            // An in-flight cue decode stays tracked until done (bank unload waits on it).
+            if(const auto cue=cueDecodes.find(operation.sequence);
+                cue!=cueDecodes.end() && cue->second->done.load(std::memory_order_acquire))cueDecodes.erase(cue);
             return NativeAudioApply::Cancelled;
         }
         switch(operation.kind) {
@@ -401,6 +405,13 @@ struct AudioDevice::State {
                 }
             }
             CancelWarm(operation.bank);
+            // Worker cue decodes read this bank's bytes; let them finish.
+            for(auto it=cueDecodes.begin();it!=cueDecodes.end();) {
+                if(it->second->bank!=operation.bank) {++it;continue;}
+                // A stopped worker has joined: queued jobs were dropped unrun.
+                while(!it->second->done.load(std::memory_order_acquire) && worker.Running())sceKernelDelayThread(200);
+                it=cueDecodes.erase(it);
+            }
             if(banks.erase(operation.bank)!=1)
                 throw AudioFailure{WORLD_AUDIO_STALE_REFERENCE,"Vita audio bank was already unloaded"};
             break;
@@ -423,7 +434,29 @@ struct AudioDevice::State {
                 if(!base || address<base || address-base>operation.bank->metadataSize ||
                     operation.bank->metadataSize-(address-base)<52)
                     throw AudioFailure{WORLD_AUDIO_RESOURCE_FAILURE,"PLAY has invalid resident cue metadata"};
-                auto pcm=bank->second.Acquire(address-base);
+                // A cue that is not cached decodes on the worker; the
+                // voice starts on a later pump instead of stalling this one.
+                std::size_t cueIndex=0;
+                auto pcm=bank->second.TryAcquire(address-base,cueIndex);
+                if(!pcm) {
+                    auto found=cueDecodes.find(operation.sequence);
+                    if(found==cueDecodes.end()) {
+                        auto job=std::make_shared<CueDecode>();
+                        job->bank=operation.bank;
+                        found=cueDecodes.emplace(operation.sequence,job).first;
+                        const auto* cache=&bank->second;
+                        worker.Post([job,cache,cueIndex]() {
+                            auto decoded=cache->DecodeResidentRange(cueIndex,1);
+                            if(!decoded.empty())job->pcm=std::move(decoded.front());
+                            job->done.store(true,std::memory_order_release);
+                        });
+                    }
+                    if(!found->second->done.load(std::memory_order_acquire))return NativeAudioApply::Blocked;
+                    auto job=std::move(found->second);
+                    cueDecodes.erase(found);
+                    // A failed worker decode reports through the original path.
+                    pcm=job->pcm ? bank->second.Adopt(cueIndex,std::move(job->pcm)):bank->second.Acquire(address-base);
+                }
                 voice=&Allocate(operation,pcm->channels);
                 voice->chunks.push_back(std::move(pcm));
                 voice->loop=GetLoop(operation.cue->metadata[0x21])!=0;
@@ -567,6 +600,12 @@ struct AudioDevice::State {
 
     bSound& library;
     WorldAudioRequestQueue& queue;
+    struct CueDecode {
+        const WorldAudioBank* bank{};
+        std::shared_ptr<const PcmWave> pcm;
+        std::atomic<bool> done{false};
+    };
+    std::unordered_map<uint64_t,std::shared_ptr<CueDecode>> cueDecodes;
     NativeAudioCommandPump commands;
     AudioStatistics statistics;
     std::map<const WorldAudioBank*,NativeSoundBankCache> banks;

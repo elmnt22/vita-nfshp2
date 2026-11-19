@@ -2121,15 +2121,13 @@ void EcstasyFrame::AddPolygon(const frontend::FlailerPoly& polygon,
 double ecstasyAttachSolidMs=0;
 std::array<double,4> ecstasyAttachSolidPartMs{};
 std::uint64_t ecstasyAttachSolidCalls=0,ecstasyAttachSolidCommands=0;
-void EcstasyFrame::AttachSolidPolys()
+#if !defined(__vita__)
+namespace {
+// HP2_VERIFY_ATTACH=1 (PC): rerun the previous two-move implementation on
+// a copy of every flush and require the identical command bytes.
+static void ReferenceAttachSolidPolys(std::vector<EcstasyDrawCommand>& commands_,std::size_t& pendingAlphaBegin_,std::vector<EcstasyDrawCommand>& pendingAlphaCommands_)
 {
     const auto attachStarted=std::chrono::steady_clock::now();
-    ++ecstasyAttachSolidCalls;ecstasyAttachSolidCommands+=commands_.size()-pendingAlphaBegin_;
-    struct AttachTimer {
-        std::chrono::steady_clock::time_point start;
-        ~AttachTimer() {ecstasyAttachSolidMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();}
-    } attachTimer{attachStarted};
-    Require(phase_==Phase::Building,"Cannot attach solid lists in a sealed graphics frame");
     // PAL10BB20 walks only the solid texture chains. The alpha arena/list
     // survives this call, including the two display calls1134A4/1135B8
     // between scenery/particles, environment remap and the later cars.
@@ -2149,7 +2147,7 @@ void EcstasyFrame::AttachSolidPolys()
     auto partMark=attachStarted;
     const auto part=[&](int index) {
         const auto now=std::chrono::steady_clock::now();
-        ecstasyAttachSolidPartMs[index]+=std::chrono::duration<double,std::milli>(now-partMark).count();
+        (void)index;
         partMark=now;
     };
     part(0);
@@ -2304,6 +2302,229 @@ void EcstasyFrame::AttachSolidPolys()
         commands_[pendingAlphaBegin_+destination]=std::move(saved);
         order[destination]=destination;
     }
+    part(3);
+    pendingAlphaBegin_=output;
+}
+const bool verifyAttachSolid=[] {const char* value=std::getenv("HP2_VERIFY_ATTACH");return value && *value=='1';}();
+std::uint64_t verifyAttachCalls=0,verifyAttachMismatches=0;
+}
+#endif
+void EcstasyFrame::AttachSolidPolys()
+{
+    const auto attachStarted=std::chrono::steady_clock::now();
+    ++ecstasyAttachSolidCalls;ecstasyAttachSolidCommands+=commands_.size()-pendingAlphaBegin_;
+    struct AttachTimer {
+        std::chrono::steady_clock::time_point start;
+        ~AttachTimer() {ecstasyAttachSolidMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();}
+    } attachTimer{attachStarted};
+    Require(phase_==Phase::Building,"Cannot attach solid lists in a sealed graphics frame");
+#if !defined(__vita__)
+    std::vector<EcstasyDrawCommand> verifyCommands,verifyAlpha;std::size_t verifyBegin=0;
+    if(verifyAttachSolid) {verifyCommands=commands_;verifyAlpha=pendingAlphaCommands_;verifyBegin=pendingAlphaBegin_;}
+    struct VerifyAttach {
+        EcstasyFrame* frame;std::vector<EcstasyDrawCommand>* commands;std::vector<EcstasyDrawCommand>* alpha;std::size_t* begin;
+        ~VerifyAttach() {
+            if(!verifyAttachSolid)return;
+            ReferenceAttachSolidPolys(*commands,*begin,*alpha);
+            ++verifyAttachCalls;
+            const auto same=[](const std::vector<EcstasyDrawCommand>& a,const std::vector<EcstasyDrawCommand>& b) {
+                return a.size()==b.size() && (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(EcstasyDrawCommand))==0);
+            };
+            if(*begin!=frame->pendingAlphaBegin_ || !same(*commands,frame->commands_) || !same(*alpha,frame->pendingAlphaCommands_))
+                ++verifyAttachMismatches;
+            if((verifyAttachCalls&4095u)==0 || verifyAttachMismatches==1) {
+                char text[96];std::snprintf(text,sizeof(text),"calls=%llu mismatches=%llu",
+                    static_cast<unsigned long long>(verifyAttachCalls),static_cast<unsigned long long>(verifyAttachMismatches));
+                platform::RecordSessionEvent("render.attach_verify",text);
+            }
+        }
+    } verifyAttach{this,&verifyCommands,&verifyAlpha,&verifyBegin};
+#endif
+    // PAL10BB20 walks only the solid texture chains. The alpha arena/list
+    // survives this call, including the two display calls1134A4/1135B8
+    // between scenery/particles, environment remap and the later cars.
+    // Alpha commands leave in their original order. Solid commands stay at
+    // their source slots until the single ordered permutation below, so
+    // each is moved once (previously compacted here, then permuted).
+    const auto rangeBegin=pendingAlphaBegin_,rangeEnd=commands_.size();
+    std::size_t alphaCount=0;
+    for(auto index=rangeBegin;index<rangeEnd;++index)alphaCount+=commands_[index].depthSorted ? 1u:0u;
+    if(alphaCount) {
+        pendingAlphaCommands_.reserve(pendingAlphaCommands_.size()+alphaCount);
+        for(auto index=rangeBegin;index<rangeEnd;++index)
+            if(commands_[index].depthSorted)pendingAlphaCommands_.push_back(std::move(commands_[index]));
+    }
+    const auto output=rangeEnd-alphaCount;
+    auto partMark=attachStarted;
+    const auto part=[&](int index) {
+        const auto now=std::chrono::steady_clock::now();
+        ecstasyAttachSolidPartMs[index]+=std::chrono::duration<double,std::milli>(now-partMark).count();
+        partMark=now;
+    };
+    part(0);
+    if(output==pendingAlphaBegin_) {commands_.resize(output);return;}
+    // AddTexturesSorted PAL109358..109488 groups the first-use texture
+    // list into priorities0..7. Linked textures insert immediately after
+    // their parent's first anchor when both priorities match; later siblings
+    // therefore precede earlier siblings. A stable priority sort alone is
+    // different. These local anchors expire with this source flush, exactly
+    // as DeleteDownloadedTextures109488 clears TextureInfo+9C.
+    // The source uses temporary packet/list storage. Bulk native scratch
+    // avoids allocating one heap node for every texture and list link.
+    // Overflow still uses the ordinary allocator; no packet is truncated.
+    std::array<std::byte,65536> localStorage;
+    std::pmr::monotonic_buffer_resource scratch(localStorage.data(),localStorage.size());
+    struct TextureChain {
+        const TextureInfo* texture{};
+        const EcstasyRenderTarget* sampled{};
+        std::array<std::size_t,15> first,last;
+        TextureChain(const TextureInfo* image,const EcstasyRenderTarget* target)
+            :texture(image),sampled(target)
+        {
+            first.fill(std::numeric_limits<std::size_t>::max());last=first;
+        }
+    };
+    constexpr auto noCommand=std::numeric_limits<std::size_t>::max();
+    // Each command has exactly one target. Link its position once rather
+    // than rescanning every texture's full command list for all15 targets.
+    // These indices are scratch only; original frame/texture owners survive
+    // until the ordered command values have been moved back below.
+    std::pmr::vector<std::size_t> next(rangeEnd-rangeBegin,noCommand,&scratch);
+    std::pmr::vector<TextureChain> chains{&scratch};
+    std::pmr::map<std::pair<const TextureInfo*,const EcstasyRenderTarget*>,std::size_t> active{&scratch};
+    // Generation-tagged so the table needs no clearing per flush.
+    struct ChainSlot {const TextureInfo* texture{};const EcstasyRenderTarget* sampled{};std::size_t chain{};std::uint32_t generation{};};
+    static thread_local std::array<ChainSlot,1024> chainTable{};
+    static thread_local std::uint32_t chainGeneration=0;
+    if(++chainGeneration==0) {for(auto& slot:chainTable)slot.generation=0;chainGeneration=1;}
+    const auto generation=chainGeneration;
+    std::size_t chainTableUsed=0;
+    // Source strips and their material passes frequently keep the same
+    // ordering texture. This lookup is local to this exact solid flush;
+    // only an already-created chain index is reused, never its draw order.
+    const TextureInfo* previousTexture=nullptr;
+    const EcstasyRenderTarget* previousSampled=nullptr;
+    std::size_t previousChain=noCommand;
+    for(auto index=rangeBegin;index<rangeEnd;++index) {
+        const auto& command=commands_[index];
+        if(alphaCount && command.depthSorted)continue;
+        const auto* texture=command.orderingTexture ? command.orderingTexture:command.texture;
+        const auto* sampled=texture ? nullptr:command.sampledTarget;
+        Require((texture || sampled) && command.target && command.target->id>=0 && command.target->id<15,
+            "Solid texture chain lost its original image or target");
+        std::size_t chainIndex=previousChain;
+        if(previousChain==noCommand || texture!=previousTexture || sampled!=previousSampled) {
+            // Open-addressed front (chain creation order is unchanged); the
+            // ordered map only takes over if this flush exceeds the table.
+            const auto identity=reinterpret_cast<std::uintptr_t>(texture)^(reinterpret_cast<std::uintptr_t>(sampled)<<1);
+            std::size_t slot=((identity>>4)^(identity>>13))&(chainTable.size()-1);
+            bool resolved=false;
+            if(chainTableUsed<chainTable.size()/2) {
+                while(chainTable[slot].generation==generation) {
+                    if(chainTable[slot].texture==texture && chainTable[slot].sampled==sampled) {
+                        chainIndex=chainTable[slot].chain;resolved=true;break;
+                    }
+                    slot=(slot+1)&(chainTable.size()-1);
+                }
+                if(!resolved) {
+                    chainTable[slot]={texture,sampled,chains.size(),generation};++chainTableUsed;
+                    chainIndex=chains.size();chains.emplace_back(texture,sampled);resolved=true;
+                }
+            } else {
+                // Table full: chains it already holds are still found there.
+                while(chainTable[slot].generation==generation) {
+                    if(chainTable[slot].texture==texture && chainTable[slot].sampled==sampled) {
+                        chainIndex=chainTable[slot].chain;resolved=true;break;
+                    }
+                    slot=(slot+1)&(chainTable.size()-1);
+                }
+            }
+            if(!resolved) {
+                const auto key=std::make_pair(texture,sampled);
+                auto found=active.find(key);
+                if(found==active.end()) {
+                    found=active.emplace(key,chains.size()).first;
+                    chains.emplace_back(texture,sampled);
+                }
+                chainIndex=found->second;
+            }
+            previousTexture=texture;previousSampled=sampled;previousChain=chainIndex;
+        }
+        auto& chain=chains[chainIndex];
+        const auto target=static_cast<std::size_t>(command.target->id);
+        if(chain.last[target]==noCommand)chain.first[target]=index;
+        else next[chain.last[target]-rangeBegin]=index;
+        chain.last[target]=index;
+    }
+    part(1);
+    std::array<std::pmr::list<std::size_t>,8> priorities{{
+        std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch},
+        std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch},
+        std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch},
+        std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch}}};
+    struct Anchor {std::uint8_t bucket{};std::pmr::list<std::size_t>::iterator position;};
+    std::pmr::map<const TextureInfo*,Anchor> anchors{&scratch};
+    const auto priority=[](const TextureInfo& texture) {
+        Require(texture.descriptor && texture.descriptor->authoredRecord &&
+            texture.descriptor->authoredRecordSize>=164,"Solid chain lost its TextureInfo priority");
+        const auto value=texture.descriptor->authoredRecord[0x29];
+        Require(value<8,"Solid texture priority exceeds the original eight lists");
+        return value;
+    };
+    for(std::size_t index=0;index<chains.size();++index) {
+        const auto* texture=chains[index].texture;
+        if(!texture) {
+            // UpdateGifTags105F1C builds generated-target TextureInfos from
+            // cleared storage: priority0 and a self-linked download owner.
+            priorities[0].push_back(index);continue;
+        }
+        const auto value=priority(*texture);
+        const auto* parent=texture->linkedTexture;
+        Require(parent,"Solid texture lacks its canonical linked download owner");
+        const auto anchor=anchors.find(parent);
+        if(anchor!=anchors.end() && priority(*parent)==value)
+            priorities[anchor->second.bucket].insert(std::next(anchor->second.position),index);
+        else {
+            priorities[value].push_back(index);
+            anchors[parent]={value,std::prev(priorities[value].end())};
+        }
+    }
+    // Keep the source chain walk, but carry only source indices through
+    // the permutation. Copying every large captured lighting/transform
+    // value to a second command buffer and back is unnecessary. A cycle
+    // moves each nonidentity command once plus one temporary per cycle.
+    // No command or borrower can outlive this exact source flush.
+    part(2);
+    std::pmr::vector<std::size_t> order{&scratch};
+    order.reserve(rangeEnd-rangeBegin);
+    for(const auto& bucket:priorities)for(const auto chain:bucket) {
+        // AttachSolidPolys10BC40..10BCC0 walks all15 target chains for
+        // each texture. Material's base/specular/reflection packets remain
+        // together inside their actual parent chain and original target.
+        for(const auto first:chains[chain].first)
+            for(auto index=first;index!=noCommand;index=next[index-rangeBegin])
+                order.push_back(index-rangeBegin);
+    }
+    Require(order.size()==output-rangeBegin,"Native solid command order lost a source command");
+    if(alphaCount)
+        for(auto index=rangeBegin;index<rangeEnd;++index)
+            if(commands_[index].depthSorted)order.push_back(index-rangeBegin);
+    static_assert(std::is_nothrow_move_constructible<EcstasyDrawCommand>::value &&
+        std::is_nothrow_move_assignable<EcstasyDrawCommand>::value,
+        "In-place native command ordering requires nonthrowing value moves");
+    for(std::size_t start=0;start<order.size();++start) {
+        if(order[start]==start)continue;
+        auto saved=std::move(commands_[rangeBegin+start]);
+        auto destination=start;
+        while(order[destination]!=start) {
+            const auto source=order[destination];
+            commands_[rangeBegin+destination]=std::move(commands_[rangeBegin+source]);
+            order[destination]=destination;destination=source;
+        }
+        commands_[rangeBegin+destination]=std::move(saved);
+        order[destination]=destination;
+    }
+    commands_.resize(output);
     part(3);
     pendingAlphaBegin_=output;
 }

@@ -636,6 +636,10 @@ int32_t collisionWitnessEdgeFace(CollisionWitness* witness, const float featureF
 uint64_t collisionWitnessQueries=0,collisionWitnessIterations=0,collisionWitnessRestarts=0,collisionWitnessExhausted=0;
 double collisionWitnessMilliseconds=0,collisionWitnessWarmMilliseconds=0;
 int collisionWitnessWarmProbe=0;
+// Diagnostic per feature-kind split (Vita sets the clock when probing).
+uint32_t (*collisionWitnessProbeClock)()=nullptr;
+uint32_t (*collisionWitnessClockMicros)()=nullptr;
+uint64_t collisionWitnessKindMicros[9]={},collisionWitnessKindSteps[9]={};
 uint64_t collisionWitnessWarmMismatches=0;
 static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
@@ -644,6 +648,13 @@ int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState)
 {
+    if(collisionWitnessClockMicros && !collisionWitnessWarmProbe) {
+        // Cheap host microsecond clock (Vita): ~0.4 us vs ~0.75 us per read.
+        const uint32_t started=collisionWitnessClockMicros();
+        const int32_t result=collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState);
+        collisionWitnessMilliseconds+=(double)(collisionWitnessClockMicros()-started)*0.001;
+        return result;
+    }
     const CollisionWitness before=*witness;
     const uint32_t randomBefore=*randomState;
     const auto started=std::chrono::steady_clock::now();
@@ -678,6 +689,7 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
     int32_t iteration = 0, restarts = 0, result = 0;
     do {
         const int firstKind = witness->first->kind, secondKind = witness->second->kind;
+        const uint32_t stepStarted = collisionWitnessProbeClock ? collisionWitnessProbeClock() : 0;
         if (firstKind == 0 && secondKind == 0) {
             witness->side = 1;
             result = collisionWitnessVertices(witness, firstToSecond, secondToFirst, &firstVertex, &secondVertex);
@@ -702,6 +714,10 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
         } else if (firstKind == 2 && secondKind == 1) {
             witness->side = 2;
             result = collisionWitnessEdgeFace(witness, secondToFirst, firstToSecond, &secondEdge);
+        }
+        if (collisionWitnessProbeClock && firstKind < 3 && secondKind < 3) {
+            collisionWitnessKindMicros[firstKind * 3 + secondKind] += collisionWitnessProbeClock() - stepStarted;
+            ++collisionWitnessKindSteps[firstKind * 3 + secondKind];
         }
         if (collisionWitnessRemember(witness, firstHistory, secondHistory, iteration)) {
             ++restarts;
