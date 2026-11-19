@@ -2320,17 +2320,37 @@ void EcstasyFrame::AttachSolidPolys()
     Require(phase_==Phase::Building,"Cannot attach solid lists in a sealed graphics frame");
 #if !defined(__vita__)
     std::vector<EcstasyDrawCommand> verifyCommands,verifyAlpha;std::size_t verifyBegin=0;
-    if(verifyAttachSolid) {verifyCommands=commands_;verifyAlpha=pendingAlphaCommands_;verifyBegin=pendingAlphaBegin_;}
+    // Scenery runs are checked against the reference applied to the
+    // per-strip commands they replace (the order they must expand to).
+    const auto expand=[this](const std::vector<EcstasyDrawCommand>& source,std::size_t limit) {
+        std::vector<EcstasyDrawCommand> result;
+        for(std::size_t index=0;index<limit;++index) {
+            const auto& command=source[index];
+            if(!command.sceneryRunCount) {result.push_back(command);continue;}
+            for(std::uint32_t at=0;at<command.sceneryRunCount;++at) {
+                result.push_back(command);auto& single=result.back();
+                single.strip=sceneryRunStrips_[command.sceneryRunFirst+at];single.sceneryRunCount=0;single.sceneryRunFirst=0;
+            }
+        }
+        return result;
+    };
+    if(verifyAttachSolid) {
+        verifyCommands=expand(commands_,commands_.size());verifyAlpha=pendingAlphaCommands_;
+        verifyBegin=expand(commands_,pendingAlphaBegin_).size();
+    }
     struct VerifyAttach {
         EcstasyFrame* frame;std::vector<EcstasyDrawCommand>* commands;std::vector<EcstasyDrawCommand>* alpha;std::size_t* begin;
+        decltype(expand)* expandCommands;
         ~VerifyAttach() {
             if(!verifyAttachSolid)return;
             ReferenceAttachSolidPolys(*commands,*begin,*alpha);
+            const auto actual=(*expandCommands)(frame->commands_,frame->commands_.size());
+            const auto actualBegin=(*expandCommands)(frame->commands_,frame->pendingAlphaBegin_).size();
             ++verifyAttachCalls;
             const auto same=[](const std::vector<EcstasyDrawCommand>& a,const std::vector<EcstasyDrawCommand>& b) {
                 return a.size()==b.size() && (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(EcstasyDrawCommand))==0);
             };
-            if(*begin!=frame->pendingAlphaBegin_ || !same(*commands,frame->commands_) || !same(*alpha,frame->pendingAlphaCommands_))
+            if(*begin!=actualBegin || !same(*commands,actual) || !same(*alpha,frame->pendingAlphaCommands_))
                 ++verifyAttachMismatches;
             if((verifyAttachCalls&4095u)==0 || verifyAttachMismatches==1) {
                 char text[96];std::snprintf(text,sizeof(text),"calls=%llu mismatches=%llu",
@@ -2338,7 +2358,7 @@ void EcstasyFrame::AttachSolidPolys()
                 platform::RecordSessionEvent("render.attach_verify",text);
             }
         }
-    } verifyAttach{this,&verifyCommands,&verifyAlpha,&verifyBegin};
+    } verifyAttach{this,&verifyCommands,&verifyAlpha,&verifyBegin,&expand};
 #endif
     // PAL10BB20 walks only the solid texture chains. The alpha arena/list
     // survives this call, including the two display calls1134A4/1135B8
@@ -3379,6 +3399,14 @@ EcstasyReflectionVertex EcstasyReflectVertex(const SceneLightContext& context,
     return ReflectNativeVertex(context,material,position,normal,color,flags,nullptr);
 }
 
+// Opaque scenery strip runs (one command per same-state strip run). PC:
+// HP2_SCENERY_RUNS=0 disables; Vita: scenery_runs_off.txt.
+int ecstasySceneryRuns=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_SCENERY_RUNS"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 1;
+}();
 bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
     const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext)
 {
@@ -3427,6 +3455,8 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
     const auto* root=model.resources && model.resources->catalogueRoot ?
         model.resources->catalogueRoot:model.resources;
     const auto* fallback=root?root->defaultLightMaterial:nullptr;
+    constexpr auto noRun=std::numeric_limits<std::size_t>::max();
+    std::size_t runCommand=noRun;
     for(const auto& strip:batch.strips) {
         if(command.texture!=strip.texture) {
             command.texture=strip.texture;
@@ -3438,6 +3468,22 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
         if(!material)material=fallback;
         command.lightMaterial=material && inGameMaterials_ && material->inGameVariant ?
             material->inGameVariant.get():material;
+        // Consecutive strips with identical draw state share one command.
+        // Solid chains keep commands of one texture/target in source order,
+        // so the expanded strip order is exactly the per-strip order.
+        if(ecstasySceneryRuns && runCommand!=noRun) {
+            auto& previous=commands_[runCommand];
+            if(previous.texture==command.texture && previous.drawFlags==command.drawFlags &&
+                previous.lightMaterial==command.lightMaterial && previous.sceneryRunCount<0xffffu) {
+                if(!previous.sceneryRunCount) {
+                    previous.sceneryRunFirst=static_cast<std::uint32_t>(sceneryRunStrips_.size());
+                    sceneryRunStrips_.push_back(previous.strip);previous.sceneryRunCount=1;
+                }
+                sceneryRunStrips_.push_back(command.strip);++previous.sceneryRunCount;
+                continue;
+            }
+        }
+        runCommand=commands_.size();
         commands_.push_back(command);
     }
     if(reused)reusedOpaqueSceneryStrips_+=batch.strips.size();
@@ -4032,7 +4078,7 @@ void EcstasyFrame::BeginNextFrame()
 void EcstasyFrame::Release() noexcept
 {
     textureAnimationResources_=nullptr;environmentCameraFaces_=0;
-    commands_.clear();pendingAlphaCommands_.clear();orderingScratch_.clear();visibleScratch_.clear();depthTransfers_.clear();
+    commands_.clear();sceneryRunStrips_.clear();pendingAlphaCommands_.clear();orderingScratch_.clear();visibleScratch_.clear();depthTransfers_.clear();
     modelStripScratch_.clear();modelTextureScratch_.clear();
     for(auto& chunk:modelCaptureScratch_) {
         chunk.commands.clear();chunk.animatedStrips.clear();chunk.alphaGroups=0;
@@ -5967,6 +6013,9 @@ using VkNativeDrawPush = NativeVulkanDrawPush;
 // no CPU job evaluates lighting or reflection for the native Vulkan path.
 struct VkSolidStripJob {
     const EcstasyDrawCommand* draw{};
+    // Set for one strip of a scenery run command; otherwise draw->strip.
+    const EditorMarkerSolidGeometry::Strip* strip{};
+    const EditorMarkerSolidGeometry::Strip* Strip() const noexcept {return strip ? strip:draw->strip;}
     std::uint32_t destination{};
     std::array<float,2> scroll{},lod{};
     std::uint32_t glyphBoundsIndex{};
@@ -6063,7 +6112,7 @@ VkSolidTopology DecodeNativeSolidTopology(const EditorMarkerSolidGeometry::Strip
 // a separately captured draw record, including on cache-capacity misses.
 void PrepareNativeSolidStripVertices(const VkSolidStripJob& job,VkVertex* output)
 {
-    const auto& strip=*job.draw->strip;
+    const auto& strip=*job.Strip();
     for(std::size_t ordinal=0;ordinal<job.count;++ordinal) {
         const auto index=job.sourceOrder[ordinal];const auto packed=strip.colors[index];
         auto& vertex=output[job.destination+ordinal];
@@ -6381,18 +6430,19 @@ public:
         // presenter still waits before any GPU allocation, upload or reuse.
         // No current-Gather slot is recycled, even under cache pressure.
         if(gather<=gather_) {
-            sources_.clear();recency_.clear();free_.clear();
+            sources_.clear();recency_.clear();free_.clear();frameSources_.fill(nullptr);
             for(std::size_t at=entries_.size();at;--at) {
                 entries_[at-1].reset();free_.push_back(static_cast<std::uint32_t>(at-1));
             }
         }
-        gather_=gather;active_.clear();frameEntries_.fill(nullptr);frameSources_.fill(nullptr);
+        gather_=gather;active_.clear();frameEntries_.fill(nullptr);
         validations_.clear();validationsReady_=false;
         while(!recency_.empty() && gather_-entries_[recency_.front()]->lastGather>600)
             Evict(recency_.front());
     }
     std::size_t PreparedValidationCount() const noexcept {return validationsReady_ ? validations_.size():0;}
-    void ValidateSources(const std::vector<EcstasyDrawCommand>& commands,unsigned workers) {
+    void ValidateSources(const std::vector<EcstasyDrawCommand>& commands,
+        const std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips,unsigned workers) {
         if(workers<2 || commands.size()<1024 || sources_.empty())return;
         // Resolve and deduplicate all borrowed sources on the owner. The
         // workers only compare immutable bytes with separate result slots;
@@ -6400,7 +6450,9 @@ public:
         for(const auto& draw:commands) {
             if(draw.kind!=EcstasyDrawKind::SolidStrip && draw.kind!=EcstasyDrawKind::SolidReflectionStrip &&
                 draw.kind!=EcstasyDrawKind::SolidSpecularStrip)continue;
-            const auto* token=draw.strip;
+          const auto runCount=draw.sceneryRunCount ? draw.sceneryRunCount:1u;
+          for(std::uint32_t runAt=0;runAt<runCount;++runAt) {
+            const auto* token=draw.sceneryRunCount ? runStrips[draw.sceneryRunFirst+runAt]:draw.strip;
             if(!token || token->nativeVertexRevision)continue;
             // Malformed or cropped-out commands keep their existing Gather
             // validation point. Do not add a failure for a draw that would
@@ -6411,6 +6463,7 @@ public:
             if(!source || source->validatedGather==gather_ || source->queuedValidationGather==gather_)continue;
             const auto index=validations_.size();validations_.push_back({source,token,false});
             source->queuedValidation=index;source->queuedValidationGather=gather_;
+          }
         }
         if(validations_.size()<512)return;
         RunNativeSceneJobs(validations_.size(),[&](std::size_t index) {
@@ -6424,7 +6477,7 @@ public:
     VkResidentGeometryEntry* Acquire(VkSolidStripJob& job,bool& prepare) {
         prepare=false;VkResidentGeometryKey key;
         if(!Capacity() || !NativeResidentGeometryKey(job,key))return nullptr;
-        const auto* token=job.draw->strip;
+        const auto* token=job.Strip();
         const auto identity=reinterpret_cast<std::uintptr_t>(token);
         const auto hash=(identity>>4)^(identity>>12)^(identity>>20)^
             (static_cast<std::size_t>(key.words[1])*0x9e3779b9u)^key.words[0]^key.words[2];
@@ -6569,8 +6622,11 @@ private:
     std::uint64_t gather_{};
     std::uint64_t nextIndexToken_{};
     std::vector<std::unique_ptr<VkResidentGeometryEntry>> entries_;
-    std::array<VkResidentGeometryEntry*,1024> frameEntries_{};
-    std::array<VkResidentGeometrySource*,1024> frameSources_{};
+    std::array<VkResidentGeometryEntry*,8192> frameEntries_{};
+    // Persistent lookup front for sources_: a slot is only ever a cached
+    // copy of a live map value (ForgetSource clears the token's slot before
+    // erasing it; a full clear wipes it). Hits are checked by token.
+    std::array<VkResidentGeometrySource*,8192> frameSources_{};
     std::vector<Validation> validations_;
     bool validationsReady_{};
     std::vector<std::uint32_t> free_,active_;
@@ -7768,6 +7824,7 @@ struct EcstasyVulkanDevice::Storage {
     // Reused across frames. Input commands belong to the sealed source frame;
     // workers only read that frame and write disjoint completed vertex slots.
     std::vector<VkSolidStripJob> nativeStripJobs;
+    std::deque<EcstasyDrawCommand> sceneryRunFallbacks;
     VkNativeFrameShading nativeFrameShading;
     std::vector<VkNativeStripWorkRange> nativeWorkRanges;
     void Gather(const EcstasyFrame& frame,
