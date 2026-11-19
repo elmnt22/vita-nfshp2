@@ -1250,7 +1250,7 @@ struct EcstasyVulkanFrameStatistics {
     EcstasyVulkanRenderProfile renderProfile;
     EcstasyVulkanGpuProfile gpuProfile;
     std::uint64_t submittedFrame{},completedGpuFrame{};
-    std::uint64_t textureValidations{},textureUploads{},textureUploadBytes{},textureStagingAllocations{};
+    std::uint64_t textureVariantHits{},textureValidations{},textureUploads{},textureUploadBytes{},textureStagingAllocations{};
     std::uint64_t pipelineCreations{},pendingPipelineDraws{},drawBatches{},particles{},gpuWorldVertices{};
     std::uint64_t sceneryPipelineHits{};
     std::uint64_t sceneryPacketHits{},sceneryPacketMisses{},sceneryPacketFallbacks{};
