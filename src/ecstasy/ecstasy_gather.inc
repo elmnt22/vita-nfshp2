@@ -214,6 +214,10 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // reused by later strips of the same run command: same texture, target,
     // material state, transform and shading, so only geometry differs.
     VkDrawBatch sceneryTemplate;const EcstasyDrawCommand* sceneryTemplateDraw=nullptr;
+    // batches.size() right after the template's last append: batches.back()
+    // then has the template's draw state (appendBatch only merges equal
+    // state), so a contiguous next strip extends it without the compare.
+    std::size_t sceneryTemplateBatches=0;
     const auto prepareSceneryPacket=[&](const EcstasyDrawCommand& draw,const EditorMarkerSolidGeometry::Strip* runStrip) {
         sceneryTemplateDraw=nullptr;
         if(draw.kind!=EcstasyDrawKind::SolidStrip || !draw.instance || !runStrip ||
@@ -297,7 +301,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             else {nativePendingWork+=job.workUnits;nativeStripJobs.push_back(job);}
         }
         if(batch.count)appendBatch(batch);
-        sceneryTemplate=batch;sceneryTemplateDraw=&draw;
+        sceneryTemplate=batch;sceneryTemplateDraw=&draw;sceneryTemplateBatches=batch.count ? batches.size():0;
         return true;
     };
     // A later strip of the run whose template was just built. Only the
@@ -358,7 +362,19 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             else {nativePendingWork+=job.workUnits;nativeStripJobs.push_back(job);}
         }
         ++statistics.sceneryPacketHits;
-        if(batch.count)appendBatch(batch);
+        if(batch.count) {
+            if(ecstasySceneryFastMerge && sceneryTemplateBatches && sceneryTemplateBatches==batches.size()) {
+                auto& previous=batches.back();
+                if(previous.first+previous.count==batch.first && previous.nativeSpanFirst+previous.nativeSpanCount==batch.nativeSpanFirst) {
+#if !defined(__vita__) && !defined(__SWITCH__)
+                    Require(batch.Continues(previous),"Scenery template merge differs from appendBatch");
+#endif
+                    previous.count+=batch.count;previous.nativeSpanCount+=batch.nativeSpanCount;
+                    return true;
+                }
+            }
+            appendBatch(batch);sceneryTemplateBatches=batches.size();
+        }
         return true;
     };
     const bool sampleCategories=platform::nativeDiagnosticsEnabled && nextSubmission%32u==0;

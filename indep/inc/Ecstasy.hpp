@@ -937,6 +937,7 @@ struct OpaqueSceneryBatch {
     std::vector<std::uint32_t> drawFlags;
     const EditorMarkerLightMaterial* runFallback{};
     bool runLit{},runInGame{},runsValid{};
+        std::vector<std::array<float,6>> runBounds; // union of each run's strip boxes (min xyz, max xyz)
         std::vector<const TextureInfo*> uniqueTextures; // distinct strips[].texture (pixel residency check)
 };
 
