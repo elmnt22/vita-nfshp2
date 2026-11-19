@@ -2117,8 +2117,18 @@ void EcstasyFrame::AddPolygon(const frontend::FlailerPoly& polygon,
     commands_.push_back(command);
 }
 
+// Diagnostic: solid flush cost (logged with render.capture_detail).
+double ecstasyAttachSolidMs=0;
+std::array<double,4> ecstasyAttachSolidPartMs{};
+std::uint64_t ecstasyAttachSolidCalls=0,ecstasyAttachSolidCommands=0;
 void EcstasyFrame::AttachSolidPolys()
 {
+    const auto attachStarted=std::chrono::steady_clock::now();
+    ++ecstasyAttachSolidCalls;ecstasyAttachSolidCommands+=commands_.size()-pendingAlphaBegin_;
+    struct AttachTimer {
+        std::chrono::steady_clock::time_point start;
+        ~AttachTimer() {ecstasyAttachSolidMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();}
+    } attachTimer{attachStarted};
     Require(phase_==Phase::Building,"Cannot attach solid lists in a sealed graphics frame");
     // PAL10BB20 walks only the solid texture chains. The alpha arena/list
     // survives this call, including the two display calls1134A4/1135B8
@@ -2136,6 +2146,13 @@ void EcstasyFrame::AttachSolidPolys()
         }
     }
     commands_.resize(output);
+    auto partMark=attachStarted;
+    const auto part=[&](int index) {
+        const auto now=std::chrono::steady_clock::now();
+        ecstasyAttachSolidPartMs[index]+=std::chrono::duration<double,std::milli>(now-partMark).count();
+        partMark=now;
+    };
+    part(0);
     if(output==pendingAlphaBegin_)return;
     // AddTexturesSorted PAL109358..109488 groups the first-use texture
     // list into priorities0..7. Linked textures insert immediately after
@@ -2222,6 +2239,7 @@ void EcstasyFrame::AttachSolidPolys()
         else next[chain.last[target]-pendingAlphaBegin_]=index;
         chain.last[target]=index;
     }
+    part(1);
     std::array<std::pmr::list<std::size_t>,8> priorities{{
         std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch},
         std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch},
@@ -2259,6 +2277,7 @@ void EcstasyFrame::AttachSolidPolys()
     // value to a second command buffer and back is unnecessary. A cycle
     // moves each nonidentity command once plus one temporary per cycle.
     // No command or borrower can outlive this exact source flush.
+    part(2);
     std::pmr::vector<std::size_t> order{&scratch};
     order.reserve(output-pendingAlphaBegin_);
     for(const auto& bucket:priorities)for(const auto chain:bucket) {
@@ -2285,6 +2304,7 @@ void EcstasyFrame::AttachSolidPolys()
         commands_[pendingAlphaBegin_+destination]=std::move(saved);
         order[destination]=destination;
     }
+    part(3);
     pendingAlphaBegin_=output;
 }
 

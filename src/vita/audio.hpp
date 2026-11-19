@@ -13,6 +13,9 @@ struct AudioStatistics {
     std::uint32_t voicesPeak{};
     double applyPeakMilliseconds{};
     int applyPeakKind{-1};
+    // Slowest pump in the window: its request count and phase split.
+    double pumpPeakMilliseconds{},pumpPeakMusicMs{},pumpPeakInstallMs{},pumpPeakCommandsMs{};
+    std::uint32_t pumpPeakRequests{};
 };
 class AudioDevice final {
 public:

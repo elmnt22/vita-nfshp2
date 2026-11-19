@@ -145,7 +145,15 @@ public:
     size_t CueCount() const noexcept { return entries_.size(); }
     size_t DecodeCount() const noexcept { return decodeCount_; }
     size_t ResidentBytes() const;
+    // Background warm-up (Vita): decodes cues [first, first+count) from the
+    // immutable bank bytes without touching cache state, so it may run on a
+    // worker while the owner thread keeps calling Acquire. Failed cues are
+    // left empty (Acquire reports them as usual). Install runs on the owner.
+    std::vector<std::shared_ptr<const PcmWave>> DecodeResidentRange(size_t first,size_t count) const;
+    void InstallDecoded(size_t first,std::vector<std::shared_ptr<const PcmWave>>&& decoded);
 private:
+    std::shared_ptr<const PcmWave> DecodeEntry(size_t index) const;
+    void Retain(size_t index,const std::shared_ptr<const PcmWave>& pcm);
     struct Entry {
         size_t offset{},bytes{};
         uint32_t rate{};
