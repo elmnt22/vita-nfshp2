@@ -1,3 +1,4 @@
+#include <atomic>
 #include "FMenus.hpp"
 #ifdef __SWITCH__
 #include "src/nx/controller_session.hpp"
@@ -17,7 +18,9 @@
 #include <cstring>
 #include <memory>
 
-namespace hp2 {int debugQuickRaceTrack=-1,debugQuickRaceReverse=0;}
+namespace hp2 {int debugQuickRaceTrack=-1,debugQuickRaceReverse=0;
+// Host benchmark hooks: pin the AI attract-demo track; set once it starts.
+int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};}
 namespace hp2::frontend {
 
 // Final3319F8. The source checks and clears this independent cell after

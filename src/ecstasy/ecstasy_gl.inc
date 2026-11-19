@@ -306,6 +306,7 @@ struct EcstasyVulkanDevice::Storage {
     VkSceneryPacketCache sceneryPackets;
     std::uint64_t nextTextureGeneration{};
     std::vector<const VkResidentGeometryEntry*> gatheredResidentIndexSpans;
+    std::vector<std::uint64_t> gatheredResidentSpanTokens; // indexToken of each span, recorded while hot
     std::vector<VkResidentIndexEntry*> residentIndexPendingUploads;
     std::vector<std::uint32_t> residentPendingUploads;
     std::uint64_t residentFrameVertices{};

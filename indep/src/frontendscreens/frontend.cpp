@@ -8,6 +8,8 @@
 #include "indep/src/MoviePlayer/MV3Codec.h"
 #include "DemoModeReplay.hpp"
 #include "Flags.hpp"
+#include <atomic>
+namespace hp2 {extern int debugDemoTrack;extern std::atomic<int> debugDemoStarted;}
 #include "FEAnim.hpp"
 #include "Language.hpp"
 #ifdef __SWITCH__
@@ -423,7 +425,9 @@ void FrontendDemoMode::BuildDemoTrackList()
     // PAL16EC10 caches the original one-based authored order, up to32.
     if (trackListBuilt)return;
     Require(raceSetup && raceSetup->tracks,"Demo track list has no actual track catalogue");
-    if (applicationBootState.trackSelectedInConfigFile!=-1) {
+    if (hp2::debugDemoTrack>=0 && raceSetup->tracks->Find(hp2::debugDemoTrack)) {
+        tracks[0]=hp2::debugDemoTrack;trackCount=1;
+    } else if (applicationBootState.trackSelectedInConfigFile!=-1) {
         tracks[0]=applicationBootState.trackSelectedInConfigFile;
         trackCount=1;
     } else {
@@ -450,6 +454,7 @@ void FrontendDemoMode::StartDemoMode()
     std::memcpy(&trackSequence,&next,sizeof(next));
     const auto track=demoDisc->ActivationWord() ? 12 : tracks[static_cast<std::size_t>(selected)];
     frontend->StartDemoMode(track,*raceSetup);
+    hp2::debugDemoStarted.store(1,std::memory_order_relaxed);
 }
 
 void FrontendDemoMode::ConsiderStartDemoMode(std::int32_t idleStartedTicks)
