@@ -1407,6 +1407,12 @@ bool ApplicationRuntime::Tick()
                 static_cast<unsigned long long>(nativeDiscardedCaptures),
                 nativeDiscardedCaptures ? nativeDiscardedCaptureMs/nativeDiscardedCaptures:0.0,nativeDiscardedCaptureMs/count);
             s.host.RecordSessionEvent("render.discarded_capture",detail);
+            {
+                const auto& d=capture.discardedMilliseconds;
+                std::snprintf(detail,sizeof(detail),"setup=%.3f background=%.3f world=%.3f particles=%.3f solids=%.3f alpha=%.3f effects=%.3f hud=%.3f",
+                    d[0]/count,d[1]/count,d[2]/count,d[3]/count,d[4]/count,d[5]/count,d[6]/count,d[7]/count);
+                s.host.RecordSessionEvent("render.discarded_phases",detail);
+            }
             nativeDiscardedCaptureMs=0;nativeDiscardedCaptures=0;
             const auto& phases=cpu.submitPhaseMilliseconds;
             double accounted=cpu.pipelineLookupMilliseconds+cpu.recordSceneMilliseconds+cpu.queueSubmitMilliseconds;

@@ -254,10 +254,17 @@ struct AudioDevice::State {
             using Clock=std::chrono::steady_clock;
             const auto mixStarted=Clock::now();
             {
-                std::lock_guard<std::mutex> lock(mutex);
+                // Lock per voice, not per buffer: a whole-buffer hold (~2.7 ms)
+                // stalled every game-thread command apply behind the mixer.
+                // Voices are a fixed array; commands replace entries only
+                // under this same lock, so each voice mixes consistently.
                 mixBuffer.fill(0.0f);
                 std::uint32_t active=0;
-                for(auto& voice:voices)if(voice.playing && !voice.paused && !voice.chunks.empty()) {++active;voice.Mix(mixBuffer);}
+                for(auto& voice:voices) {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if(voice.playing && !voice.paused && !voice.chunks.empty()) {++active;voice.Mix(mixBuffer);}
+                }
+                std::lock_guard<std::mutex> lock(mutex);
                 statistics.voicesPeak=std::max(statistics.voicesPeak,active);
                 statistics.voiceBuffers+=active;++statistics.buffers;
                 statistics.mixMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-mixStarted).count();
