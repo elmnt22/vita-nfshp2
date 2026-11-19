@@ -201,6 +201,14 @@ struct GlProgram {
     GLint m0{-1},m1{-1},m2{-1},m3{-1},clipmap{-1},shade{-1},material{-1},flags{-1},flags2{-1};
     GLint fparam{-1},texture{-1},yflip{-1};
     bool failed{};
+    // Last values uploaded to this program (GL keeps uniforms per program).
+    // vitaGL re-reserves and copies a program's uniform buffer on any
+    // change, so identical consecutive values are not set again.
+    std::array<float,20> transform{};
+    std::array<float,4> parameters{};
+    float flip{};
+    bool transformValid{},parametersValid{},flipValid{};
+    std::uint32_t shading{UINT32_MAX};
 };
 
 struct GlBlendState {
@@ -665,6 +673,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     }
     for(GLuint attribute=0;attribute<4;++attribute)glEnableVertexAttribArray(attribute);
     GLuint activeVertexBuffer=0,activeIndexBuffer=0,activeTexture=~0u;
+    // Shading indices address this frame's table only.
+    for(auto& entry:programs)entry.second.shading=UINT32_MAX;
     const auto drawPass=[&](std::int32_t id) {
         glRenderStage=100+id;
         const bool offscreen=id!=0;
@@ -688,7 +698,6 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         const VkDrawBatch* previous{};
         GlBlendState activeBlend;bool blendKnown=false;
         int activeDepth=-1,activeDepthWrite=-1;
-        std::uint32_t activeShading=UINT32_MAX;
         activeTexture=~0u;
         for(const auto batchIndex:targetBatches[static_cast<std::size_t>(id)]) [&] {
             const auto& batch=batches[batchIndex];
@@ -708,8 +717,10 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             auto& program=Program(key);
             if(!program.program) {++skipped;return;}
             if(&program!=activeProgram) {
-                glUseProgram(program.program);activeProgram=&program;activeShading=UINT32_MAX;
-                if(program.yflip>=0)glUniform1f(program.yflip,yflip);
+                glUseProgram(program.program);activeProgram=&program;
+                if(program.yflip>=0 && (!program.flipValid || program.flip!=yflip)) {
+                    glUniform1f(program.yflip,yflip);program.flip=yflip;program.flipValid=true;
+                }
             }
             const auto vertexBuffer=batch.residentGeometry ? residentVertices.name:vertexStream.name;
             if(!vertexBuffer) {++skipped;return;}
@@ -768,18 +779,25 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             if(program.fparam>=0) {
                 const float texelX=texWidth ? 1.0f/static_cast<float>(texWidth):0.0f;
                 const float texelY=texHeight ? 1.0f/static_cast<float>(texHeight):0.0f;
-                glUniform4f(program.fparam,batch.blendConstant,texelX,texelY,0.0f);
+                const std::array<float,4> parameters{{batch.blendConstant,texelX,texelY,0.0f}};
+                if(!program.parametersValid || parameters!=program.parameters) {
+                    glUniform4fv(program.fparam,1,parameters.data());
+                    program.parameters=parameters;program.parametersValid=true;
+                }
             }
             if(batch.nativeGpuPosition) {
-                const auto& m=batch.nativeLocalToClip;
-                glUniform4f(program.m0,m[0],m[1],m[2],m[3]);
-                glUniform4f(program.m1,m[4],m[5],m[6],m[7]);
-                glUniform4f(program.m2,m[8],m[9],m[10],m[11]);
-                glUniform4f(program.m3,m[12],m[13],m[14],m[15]);
-                const auto& c=batch.nativeClipMapping;
-                glUniform4f(program.clipmap,c[0],c[1],c[2],c[3]);
+                std::array<float,20> transform;
+                std::copy_n(batch.nativeLocalToClip.begin(),16,transform.begin());
+                std::copy_n(batch.nativeClipMapping.begin(),4,transform.begin()+16);
+                if(!program.transformValid || std::memcmp(transform.data(),program.transform.data(),sizeof(transform))) {
+                    const auto* m=transform.data();
+                    glUniform4fv(program.m0,1,m);glUniform4fv(program.m1,1,m+4);
+                    glUniform4fv(program.m2,1,m+8);glUniform4fv(program.m3,1,m+12);
+                    glUniform4fv(program.clipmap,1,m+16);
+                    program.transform=transform;program.transformValid=true;
+                }
             }
-            if(shade && batch.nativeShadingIndex!=activeShading) {
+            if(shade && batch.nativeShadingIndex!=program.shading) {
                 const auto first=batch.nativeShadingIndex;
                 Require(first+19u<=gatheredGlyphBounds.size(),"vitaGL shading record exceeds the frame table");
                 const auto& record=gatheredGlyphBounds;
@@ -796,7 +814,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
                 glUniform4f(program.flags,(flags&128u) ? 1.0f:0.0f,(flags&64u) ? 1.0f:0.0f,
                     (flags&4u) ? 1.0f:0.0f,(mode&1u) ? 1.0f:0.0f);
                 glUniform4f(program.flags2,(mode&2u) ? 1.0f:0.0f,0.0f,0.0f,0.0f);
-                activeShading=first;
+                program.shading=first;
             }
             const GLenum topology=batch.wireframe ? GL_LINES:GL_TRIANGLES;
             if(batch.indexed) {
@@ -856,6 +874,15 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             milliseconds(uploadDone-renderBegin)-statistics.gatherMilliseconds,
             statistics.recordSubmitMilliseconds,statistics.presentMilliseconds);
         platform::RecordSessionEvent("renderer.vitagl.frame",detail);
+        auto& steps=nativeGatherStepMilliseconds;
+        if(steps[6]>0.0) {
+            const double n=steps[6];
+            std::snprintf(detail,sizeof(detail),
+                "sampled=%.0f solid_preamble_ms=%.2f shading_ms=%.2f acquire_ms=%.2f solid_rest_ms=%.2f append_ms=%.2f other_draws_ms=%.2f",
+                n,steps[0]/n,steps[1]/n,steps[2]/n,steps[3]/n,steps[4]/n,steps[5]/n);
+            platform::RecordSessionEvent("renderer.vitagl.gather_steps",detail);
+            steps={};
+        }
     }
     return true;
 }

@@ -14,6 +14,11 @@ std::array<float,2> nativeUiCanvasScale(float width,float height)
 }
 }
 
+// Diagnostic (sampled frames): solid-draw gather steps, milliseconds summed
+// since the last read: 0 preamble, 1 shading, 2 resident acquire, 3 rest of
+// the solid branch, 4 batch append, 5 non-solid draws; [6] = sampled frames.
+std::array<double,7> nativeGatherStepMilliseconds{};
+
 void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     std::vector<VkVertex>& output,std::vector<std::uint32_t>& elementIndices,
     std::vector<VkDrawBatch>& batches)
@@ -270,8 +275,17 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     const bool sampleCategories=platform::nativeDiagnosticsEnabled && nextSubmission%32u==0;
     if(sampleCategories)++profile.gatherCategorySamples;
     NativeGatherCategoryTimer categoryTimer(sampleCategories ? &profile:nullptr);
+    if(sampleCategories)nativeGatherStepMilliseconds[6]+=1.0;
+    Clock::time_point stepMark{};
+    const auto step=[&](std::size_t index) {
+        if(!sampleCategories)return;
+        const auto now=Clock::now();
+        nativeGatherStepMilliseconds[index]+=std::chrono::duration<double,std::milli>(now-stepMark).count();
+        stepMark=now;
+    };
     for (const auto& draw:frame.Commands()) {
         categoryTimer.Enter(draw);
+        if(sampleCategories)stepMark=Clock::now();
         if(draw.kind==EcstasyDrawKind::SceneHistoryBoundary || draw.kind==EcstasyDrawKind::SceneHistorySource) {
             // Ordinary racing retains its single pass and does no history copy.
             if(preparedFrame.historyReaders.display) {
@@ -610,6 +624,8 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             }
             return result;
         };
+        const bool solidStep=draw.kind==EcstasyDrawKind::SolidStrip || reflection || specular;
+        step(solidStep ? 0:5);
         if(draw.kind==EcstasyDrawKind::SolidStrip || reflection || specular) {
             batch.nativeGpuPosition=true;
             Require(std::isfinite(draw.textureQScale),"Native solid texture Q scale is nonfinite");
@@ -650,8 +666,11 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             job.scroll={{scroll[0],scroll[1]}};job.lod=textureLod;
             job.glyphBoundsIndex=glyphBoundsIndex;job.reflection=reflection;job.targetSample=targetSample;
             job.lineTopology=batch.wireframe;
+            step(3);
             batch.nativeShadingIndex=nativeFrameShading.Capture(job,gatheredGlyphBounds);
+            step(1);
             bool prepare=false;auto* resident=residentGeometry.Acquire(job,prepare);
+            step(2);
             VkSolidTopology topology;
             if(!resident) {
                 topology=DecodeNativeSolidTopology(strip,job.lineTopology);
@@ -743,11 +762,13 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
                 ++profile.shadowStrips[shadow];
                 profile.shadowTriangles[shadow]+=batch.count/3u;
             }
+            step(solidStep ? 3:5);
             // A Vulkan draw is only a transport boundary. Concatenate adjacent
             // triangles when every consumed GPU state value agrees. Original
             // packet order, texture versions, alpha/depth, and target changes
             // are untouched; no sorting or transparency approximation occurs.
             appendBatch(batch);
+            step(4);
         }
         if(shadowStarted!=Clock::time_point{}) {
             const auto shadow=static_cast<std::size_t>(draw.carShadow)-1;

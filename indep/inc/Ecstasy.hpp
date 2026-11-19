@@ -1520,6 +1520,9 @@ void graphicsNotifyPresentationComplete() noexcept;
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
+#if defined(__vita__)
+#include <psp2/kernel/threadmgr.h>
+#endif
 #include <cstdint>
 #include <exception>
 #include <limits>
@@ -1649,14 +1652,31 @@ inline void NativeScenePoolWait(std::condition_variable& condition,std::unique_l
 }
 class NativeSceneWorkerPool final {
 public:
+#if defined(__vita__)
+    // Vita: kernel semaphores count signals, so no wakeup can be lost (the
+    // newlib pthread condition variable dropped ~25 per second under two
+    // concurrent pools). Workers take any job token; slots are not fixed.
+    NativeSceneWorkerPool() {
+        wakeSema_=sceKernelCreateSema("hp2_pool_wake",0,0,1<<20,nullptr);
+        doneSema_=sceKernelCreateSema("hp2_pool_done",0,0,1,nullptr);
+    }
+#else
     NativeSceneWorkerPool()=default;
+#endif
     ~NativeSceneWorkerPool() {
         {
             std::lock_guard<std::mutex> guard(mutex_);
             stopping_=true;
         }
+#if defined(__vita__)
+        if(!workers_.empty())sceKernelSignalSema(wakeSema_,static_cast<int>(workers_.size()));
+#else
         wake_.notify_all();
+#endif
         for(auto& worker:workers_)if(worker.joinable())worker.join();
+#if defined(__vita__)
+        sceKernelDeleteSema(wakeSema_);sceKernelDeleteSema(doneSema_);
+#endif
     }
     NativeSceneWorkerPool(const NativeSceneWorkerPool&)=delete;
     NativeSceneWorkerPool& operator=(const NativeSceneWorkerPool&)=delete;
@@ -1695,8 +1715,14 @@ public:
             remaining_=active_;
             ++generation_;
         }
+#if defined(__vita__)
+        if(active_)sceKernelSignalSema(wakeSema_,static_cast<int>(active_));
+        Execute();
+        if(active_)sceKernelWaitSema(doneSema_,1,nullptr);
+#else
         wake_.notify_all();
         Execute();
+#endif
         std::exception_ptr failure;
         {
             std::unique_lock<std::mutex> guard(mutex_);
@@ -1741,6 +1767,23 @@ private:
     }
     void Worker(unsigned slot) noexcept {
         ConfigureNativeSceneWorker();
+#if defined(__vita__)
+        (void)slot;
+        for(;;) {
+            sceKernelWaitSema(wakeSema_,1,nullptr);
+            {
+                std::lock_guard<std::mutex> guard(mutex_);
+                if(stopping_)return;
+            }
+            Execute();
+            bool last;
+            {
+                std::lock_guard<std::mutex> guard(mutex_);
+                last=--remaining_==0;
+            }
+            if(last)sceKernelSignalSema(doneSema_,1);
+        }
+#endif
         std::size_t seen=0;
         for(;;) {
             bool assigned=false;
@@ -1761,6 +1804,9 @@ private:
     }
     std::mutex mutex_;
     std::condition_variable wake_,completed_;
+#if defined(__vita__)
+    SceUID wakeSema_{-1},doneSema_{-1};
+#endif
     std::vector<std::thread> workers_;
     void (*function_)(void*,std::size_t){};
     void* context_{};
