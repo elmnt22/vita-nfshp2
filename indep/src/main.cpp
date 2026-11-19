@@ -59,7 +59,7 @@
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
-namespace hp2 { extern std::array<double,4> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; }
+namespace hp2 { extern std::array<double,4> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
 extern uint64_t collisionWitnessWarmMismatches;
@@ -1482,6 +1482,13 @@ bool ApplicationRuntime::Tick()
                 std::snprintf(detail,sizeof(detail),"setup=%.3f background=%.3f world=%.3f particles=%.3f solids=%.3f alpha=%.3f effects=%.3f hud=%.3f",
                     d[0]/count,d[1]/count,d[2]/count,d[3]/count,d[4]/count,d[5]/count,d[6]/count,d[7]/count);
                 s.host.RecordSessionEvent("render.discarded_phases",detail);
+                for(int pass=0;pass<2;++pass) {
+                    auto& w=pass ? hp2::ecstasyDiscardWorldSplitMs:hp2::ecstasyWorldSplitMs;
+                    std::snprintf(detail,sizeof(detail),"matrices=%.3f scenery=%.3f nis=%.3f sun=%.3f skids=%.3f movers=%.3f players=%.3f objects=%.3f",
+                        w[0]/count,w[1]/count,w[2]/count,w[3]/count,w[4]/count,w[5]/count,w[6]/count,w[7]/count);
+                    s.host.RecordSessionEvent(pass ? "render.discarded_world_split":"render.world_split",detail);
+                    w={};
+                }
             }
             nativeDiscardedCaptureMs=0;nativeDiscardedCaptures=0;
             const auto& phases=cpu.submitPhaseMilliseconds;
