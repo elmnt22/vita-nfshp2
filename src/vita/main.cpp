@@ -49,6 +49,7 @@ namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; }
 extern int collisionWitnessWarmProbe;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
+namespace hp2 { extern int ecstasySceneryRuns; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -531,6 +532,10 @@ int main(int, char**)
             std::snprintf(detail, sizeof(detail), "collision_speculation mode=%d verify_budget=%llu", collisionSpeculationMode,
                 static_cast<unsigned long long>(collisionSpeculationVerifyBudget));
             log.Line("vita.diag", detail);
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_runs_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasySceneryRuns = 0;
+            log.Line("vita.diag", "scenery strip runs off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/witness_probe.txt").c_str(), &probe) >= 0) {
             collisionWitnessWarmProbe = 1;

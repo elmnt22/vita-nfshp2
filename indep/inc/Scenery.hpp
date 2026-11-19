@@ -180,9 +180,7 @@ private:
         std::size_t visited{};
     };
     std::vector<RenderDraw> drawScratch_;
-#if defined(__SWITCH__) || defined(__vita__)
     std::unordered_map<const EditorMarkerSolid*,OpaqueSceneryBatch> opaqueBatches_;
-#endif
     std::vector<RenderNode> nodeScratch_;
     std::vector<RenderSectionCapture> sectionCaptureScratch_;
     std::vector<std::optional<SceneLightContext>> lightContextScratch_;

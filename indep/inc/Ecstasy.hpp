@@ -832,6 +832,11 @@ struct EcstasyDrawCommand {
     // source-alpha additive equation; only the frontend body map sets this.
     bool showcaseEnvironmentBlend{};
     bool cachedOpaqueScenery{};
+    // Cached opaque scenery only: nonzero when this command stands for
+    // sceneryRunCount consecutive strips (SceneryRunStrips()[first..]) that
+    // share every other field. strip is the first of them.
+    std::uint16_t sceneryRunCount{};
+    std::uint32_t sceneryRunFirst{};
     EcstasyCarShadow carShadow{};
     std::array<std::uint32_t,4> rasterState{};
     std::int32_t layer{};
@@ -933,6 +938,7 @@ public:
     EcstasyFrame(const EcstasyFrame&)=delete;
     EcstasyFrame& operator=(const EcstasyFrame&)=delete;
     const std::vector<EcstasyDrawCommand>& Commands() const noexcept {return commands_;}
+    const std::vector<const EditorMarkerSolidGeometry::Strip*>& SceneryRunStrips() const noexcept {return sceneryRunStrips_;}
     Phase State() const noexcept {return phase_;}
     std::size_t CapturedInstanceCount() const noexcept {return liveInstances_;}
     std::size_t CapturedProjectionCount() const noexcept {return liveProjections_;}
@@ -1078,6 +1084,7 @@ private:
     std::uint32_t nextFeedbackGroup_{};
     std::vector<EcstasyDrawCommand> pendingAlphaCommands_;
     std::vector<std::uint64_t> attachPermuteScratch_; // raw command bytes (AttachSolidPolys)
+    std::vector<const EditorMarkerSolidGeometry::Strip*> sceneryRunStrips_;
     // Native temporary capacity only. Neither scratch list survives a call
     // with live elements, so it cannot retain a track/texture borrower.
     std::vector<EcstasyDrawCommand> orderingScratch_;

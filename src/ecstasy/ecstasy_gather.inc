@@ -40,7 +40,10 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     profile.shadowGatherMilliseconds={};
     const auto nativeWorkers=NativeSceneEffectiveHardwareConcurrency();
     const auto validateStarted=Clock::now();
-    residentGeometry.ValidateSources(frame.Commands(),nativeWorkers);
+    residentGeometry.ValidateSources(frame.Commands(),frame.SceneryRunStrips(),nativeWorkers);
+    // Per-strip copies of run commands that leave the cached scenery path.
+    // Stable addresses: generic jobs keep pointers until this Gather ends.
+    sceneryRunFallbacks.clear();
     profile.gatherValidationMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-validateStarted).count();
     const bool directSourcePreparation=nativeWorkers<=1;
     std::size_t nativePendingWork=0;
@@ -207,8 +210,8 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         batch.viewport.minDepth=lastDepthRange[0];batch.viewport.maxDepth=lastDepthRange[1];
     };
     std::array<const EcstasyDrawInstance*,1024> validatedSceneryInstances{};
-    const auto prepareSceneryPacket=[&](const EcstasyDrawCommand& draw) {
-        if(draw.kind!=EcstasyDrawKind::SolidStrip || !draw.instance || !draw.strip ||
+    const auto prepareSceneryPacket=[&](const EcstasyDrawCommand& draw,const EditorMarkerSolidGeometry::Strip* runStrip) {
+        if(draw.kind!=EcstasyDrawKind::SolidStrip || !draw.instance || !runStrip ||
             !draw.texture || draw.sampledTarget || draw.orderingTexture ||
             draw.carShadow!=EcstasyCarShadow::None || !draw.target ||
             draw.target->id<0 || draw.target->id>14 ||
@@ -221,7 +224,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         const auto destination=draw.target->id>=7 ? draw.target->id:0;
         const auto& raster=rasterFor(*draw.target,destination);
         if(!raster.scissor.extent.width || !raster.scissor.extent.height)return false;
-        const auto& strip=*draw.strip;
+        const auto& strip=*runStrip;
         const auto count=strip.positions.size();
         Require(strip.textureCoordinates.size()==count && strip.colors.size()==count,
             "Original strip vertex/color/UV extents differ");
@@ -238,7 +241,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
                 [](float value){return std::isfinite(value);}),"Native solid projection matrix is nonfinite");
             validated=draw.instance;
         }
-        VkSolidStripJob job;job.draw=&draw;
+        VkSolidStripJob job;job.draw=&draw;job.strip=runStrip;
         job.lod={{draw.textureQScale,static_cast<std::uint8_t>(strip.autoK)*0.0625f}};
         job.lineTopology=(draw.nativeRenderEggState&EcstasyRenderEggWireframe)!=0;
         bool prepare=false;
@@ -306,7 +309,35 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         nativeGatherStepMilliseconds[index]+=std::chrono::duration<double,std::milli>(now-stepMark).count();
         stepMark=now;
     };
-    for (const auto& draw:frame.Commands()) {
+    const auto& sourceCommands=frame.Commands();
+    const auto& runStrips=frame.SceneryRunStrips();
+    std::uint32_t runResume=0; // next unexpanded strip of sourceCommands[commandAt]
+    for (std::size_t commandAt=0;commandAt<sourceCommands.size();) {
+        const EcstasyDrawCommand* current=&sourceCommands[commandAt];
+        if(current->sceneryRunCount) {
+            // Each strip of the run is the per-strip command it replaced.
+            // Cached strips need no copy; a strip that leaves the cached
+            // path continues below as its own stable per-strip command.
+            const auto& run=*current;
+            const EcstasyDrawCommand* fallback=nullptr;
+            categoryTimer.Enter(run);
+            while(runResume<run.sceneryRunCount) {
+                const auto* strip=runStrips[run.sceneryRunFirst+runResume++];
+#if defined(HP2_ENABLE_VITAGL) && !defined(HP2_VITA_ENVIRONMENT_MAP)
+                if(run.target && run.target->id==14)continue;
+#endif
+                if(prepareSceneryPacket(run,strip))continue;
+                ++statistics.sceneryPacketFallbacks;
+                sceneryRunFallbacks.push_back(run);
+                auto& single=sceneryRunFallbacks.back();
+                single.strip=strip;single.sceneryRunCount=0;single.sceneryRunFirst=0;single.cachedOpaqueScenery=false;
+                fallback=&single;break;
+            }
+            if(runResume>=run.sceneryRunCount) {runResume=0;++commandAt;}
+            if(!fallback)continue;
+            current=fallback;
+        } else ++commandAt;
+        const auto& draw=*current;
         categoryTimer.Enter(draw);
         timeDraw=sampleCategories && (stepDrawIndex++&7u)==0;
         if(timeDraw)stepMark=Clock::now();
@@ -325,7 +356,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             continue;
         }
         if(draw.cachedOpaqueScenery) {
-            if(prepareSceneryPacket(draw))continue;
+            if(prepareSceneryPacket(draw,draw.strip))continue;
             ++statistics.sceneryPacketFallbacks;
         }
         const auto shadowStarted=sampleShadowGather && draw.carShadow!=EcstasyCarShadow::None ?
