@@ -27,12 +27,12 @@ endif()
 
 # kubridge crash handler: weak imports, so the eboot loads without kubridge.skprx.
 enable_language(ASM)
-add_executable(NFSHP2 src/vita/main.cpp src/vita/crash.cpp src/vita/kubridge/kubridge_stub.S)
+add_executable(NFSHP2 src/vita/main.cpp src/vita/audio.cpp src/vita/crash.cpp src/vita/kubridge/kubridge_stub.S)
 target_compile_options(NFSHP2 PRIVATE -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard)
 target_link_libraries(NFSHP2 PRIVATE
     -Wl,--start-group NFSHP2Engine NFSHP2Core ${HP2_VITA_GL_LIBS} -Wl,--end-group
     SceCtrl_stub ScePower_stub SceAppUtil_stub SceSysmodule_stub
-    SceKernelThreadMgr_stub SceRtc_stub
+    SceKernelThreadMgr_stub SceRtc_stub SceAudio_stub
     -Wl,--whole-archive pthread -Wl,--no-whole-archive m)
 
 vita_create_self(eboot.bin NFSHP2 UNSAFE)
