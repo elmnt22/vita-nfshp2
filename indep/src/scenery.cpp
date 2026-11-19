@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstdlib>
 #include "indep/inc/Scenery.hpp"
 #include "indep/inc/NativeRenderSettings.hpp"
 #include "indep/inc/Ecstasy.hpp"
@@ -976,7 +977,12 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 }
             }
         }
-#if defined(__SWITCH__) || defined(__vita__)
+#if !defined(__SWITCH__) && !defined(__vita__)
+        // PC diagnostics only: HP2_CACHED_SCENERY=1 exercises the console path.
+        static const bool cachedScenery=[] {const char* value=std::getenv("HP2_CACHED_SCENERY");return value && *value=='1';}();
+        if(cachedScenery)
+#endif
+        {
         // Small opaque models can use the GPU clipper at the frustum edge.
         // Bound the extra submitted geometry before using the cached path.
         const auto* solid=draw.model->solid;
@@ -986,7 +992,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             auto& batch=opaqueBatches_[draw.model->solid];
             if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context)) {++splitBatched;continue;}
         }
-#endif
+        }
         const auto modelStart=std::chrono::steady_clock::now();
         frame.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context);
         splitModelMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-modelStart).count();

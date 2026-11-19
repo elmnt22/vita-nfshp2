@@ -327,6 +327,7 @@ struct EcstasyVulkanDevice::Storage {
     };
     std::array<NativeDepthPalette,8> depthPaletteCache{};
     std::vector<VkSolidStripJob> nativeStripJobs;
+    std::deque<EcstasyDrawCommand> sceneryRunFallbacks;
     VkNativeFrameShading nativeFrameShading;
     std::vector<VkNativeStripWorkRange> nativeWorkRanges;
 
