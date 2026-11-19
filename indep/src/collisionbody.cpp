@@ -1,3 +1,4 @@
+#include <vector>
 #include "indep/inc/AnimatedDriver.hpp"
 #include "indep/inc/CarDamage.hpp"
 #include "indep/inc/Pursuit.hpp"
@@ -888,6 +889,16 @@ void collisionSystemFindTerrainPairs(CollisionSystem* system, CollisionParticipa
     size_t count=0;
     TerrainSurface* surface=participant->terrain;
     CollisionShape* shape=participant->shape;
+    // The terrain-shape pool is not modified until candidates are created
+    // below, so its occupied polygons are gathered once into a compact list
+    // (same membership answer as scanning every slot per polygon).
+    const TerrainPolygon* occupied[160];
+    size_t occupiedCount=0;
+    const TerrainPolygon** occupiedList=occupied;
+    std::vector<const TerrainPolygon*> occupiedOverflow;
+    if (system->terrainCapacity>160) {occupiedOverflow.resize(system->terrainCapacity);occupiedList=occupiedOverflow.data();}
+    for (size_t current=0;current<system->terrainCapacity;++current)
+        if (system->terrainShapes[current].occupied) occupiedList[occupiedCount++]=system->terrainShapes[current].polygon;
     for (size_t index=0;index<surface->polygonCount;++index) {
         TerrainPolygon* polygon=surface->polygons[index];
         // The original candidate predicate is (not resident && XY overlap &&
@@ -897,8 +908,8 @@ void collisionSystemFindTerrainPairs(CollisionSystem* system, CollisionParticipa
         // preserving the source's polygon order, 48-entry limit and contacts.
         if (!vectorBoundsOverlaps2(shape->minimum,shape->maximum,polygon->minimum,polygon->maximum)) continue;
         int exists=0;
-        for (size_t current=0;current<system->terrainCapacity;++current)
-            if (system->terrainShapes[current].occupied && system->terrainShapes[current].polygon==polygon) exists=1;
+        for (size_t current=0;current<occupiedCount;++current)
+            if (occupiedList[current]==polygon) {exists=1;break;}
         if (exists) continue;
         if (!collisionShapeCrossesPlane(shape,polygon->plane,polygon->plane[3])) continue;
         if (count<48) candidates[count++]=polygon;
