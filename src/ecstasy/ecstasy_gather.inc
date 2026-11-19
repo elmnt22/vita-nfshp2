@@ -286,6 +286,11 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     for (const auto& draw:frame.Commands()) {
         categoryTimer.Enter(draw);
         if(sampleCategories)stepMark=Clock::now();
+#if defined(HP2_ENABLE_VITAGL) && !defined(HP2_VITA_ENVIRONMENT_MAP)
+        // The vitaGL passes drop environment-map (target 14) draws and their
+        // readers; do not gather what would be discarded.
+        if((draw.target && draw.target->id==14) || (draw.sampledTarget && draw.sampledTarget->id==14))continue;
+#endif
         if(draw.kind==EcstasyDrawKind::SceneHistoryBoundary || draw.kind==EcstasyDrawKind::SceneHistorySource) {
             // Ordinary racing retains its single pass and does no history copy.
             if(preparedFrame.historyReaders.display) {

@@ -2848,6 +2848,10 @@ void EcstasyFrame::CaptureStrip(std::vector<EcstasyDrawCommand>& output,
             reflection.texture=state.frontendEnvironmentTexture;
             reflection.showcaseEnvironmentBlend=true;
         } else {
+#if defined(__vita__) && !defined(HP2_VITA_ENVIRONMENT_MAP)
+            // vitaGL drops environment-map readers (see the gather skip).
+            return;
+#endif
             Require(state.environment,"Reflected strip has no original environment-map owner");
             reflection.texture=nullptr;reflection.sampledTarget=&state.environment->MappedTarget();
             reflection.sampledPreviousFrame=!state.environmentUpdated;
@@ -3857,6 +3861,8 @@ void graphicsNotifyPresentationComplete() noexcept {
 #if !defined(HP2_ENABLE_VULKAN)
 #include "src/ecstasy/vk_pod.hpp"
 #include <vitaGL.h>
+#include <pthread.h>
+#include <exception>
 #else
 #ifdef _WIN32
 #ifndef NOMINMAX
