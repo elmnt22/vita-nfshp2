@@ -224,7 +224,9 @@ void main()
 #if ATEST==1
     if(r.a==0.0)discard;
 #elif ATEST==2
-    if(floor(clamp(r.a*128.0,0.0,255.0))<=48.0)discard;
+    // floor(clamp(a*128,0,255))<=48 <=> a*128<49 <=> a<49/128 (power-of-two
+    // scale is exact in any float precision).
+    if(r.a<0.3828125)discard;
 #endif
 #if SHOWCASE
     vec3 source=floor(clamp(r.rgb*255.0,vec3(0.0),vec3(255.0)))/255.0;
