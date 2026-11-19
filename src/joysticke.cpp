@@ -1,3 +1,6 @@
+#include <atomic>
+#include "indep/inc/Flags.hpp"
+namespace hp2 {extern int debugDemoTrack;extern std::atomic<int> debugDemoStarted;}
 #include "indep/inc/CarDriver.hpp"
 #include "indep/inc/EasterEggs.hpp"
 #include "indep/inc/Flags.hpp"
@@ -1264,7 +1267,16 @@ int32_t WindowsInputDevice::ReadInput(int32_t port,JoystickControls& destination
             if(std::sscanf(text,"%u %u %u",&value[0],&value[1],&value[2])!=3)value={};
         return value;
     }();
-    if(port==0 && autoPad[0]) {
+    // HP2_DEMO_BENCH=<track>: retail AI attract demo (live pursuit) on that
+    // track; taps reach the menu, then stop once the demo starts.
+    static const bool demoBench=[] {
+        const char* text=std::getenv("HP2_DEMO_BENCH");int track=text ? std::atoi(text):0;
+        if(track<=0)return false;
+        hp2::debugDemoTrack=track;
+        applicationLaunchOptions.beginDemoSeconds=1.0f;applicationLaunchOptions.demoDurationSeconds=3600.0f;
+        return true;
+    }();
+    if(port==0 && autoPad[0] && !(demoBench && hp2::debugDemoStarted.load(std::memory_order_relaxed))) {
         static unsigned steps=0;++steps;
         state.connected=true;
         if(steps<autoPad[2] && steps%autoPad[0]<autoPad[1])SetButton(state,Ps2Button::Cross,true);
