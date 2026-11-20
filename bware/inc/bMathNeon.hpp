@@ -27,6 +27,28 @@ static inline float32x4_t bNeonPoint3(const float unit[4], const float p[3])
     const float32x4_t sum = vaddq_f32(vld1q_f32(unit), vcombine_f32(vld1_f32(p), vld1_dup_f32(p + 2)));
     return vld1q_lane_f32(unit + 3, sum, 3);
 }
+// Exact inline floorf/truncf (newlib's are software bit routines):
+// |x|<2^23 converts through int32 (round toward zero, exact), larger
+// magnitudes, NaN and inf are already integral; the sign of a zero result
+// follows x as in IEEE floor/trunc. Enabled by the boot self-test.
+extern int bFastRoundEnabled;
+static inline float bSignedLike(float value, float sign)
+{
+    unsigned v, s;__builtin_memcpy(&v, &value, 4);__builtin_memcpy(&s, &sign, 4);
+    v = (v & 0x7fffffffu) | (s & 0x80000000u);__builtin_memcpy(&value, &v, 4);return value;
+}
+static inline float bFastTrunc(float x)
+{
+    if (!(__builtin_fabsf(x) < 8388608.0f)) return x != x ? x + x : x; // NaN as newlib (x+x)
+    return bSignedLike(static_cast<float>(static_cast<int>(x)), x);
+}
+static inline float bFastFloor(float x)
+{
+    if (!(__builtin_fabsf(x) < 8388608.0f)) return x != x ? x + x : x;
+    float t = static_cast<float>(static_cast<int>(x));
+    if (t > x) t -= 1.0f;
+    return t == 0.0f ? bSignedLike(t, x) : t;
+}
 #define NFSHP2_BMATH_NEON 1
 #else
 #define NFSHP2_BMATH_NEON 0

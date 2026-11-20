@@ -3,6 +3,7 @@
 #include "indep/inc/Car.hpp"
 #include "bware/inc/bMath.hpp"
 #include "indep/inc/eMath.hpp"
+#include "bware/inc/bMathNeon.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -511,6 +512,15 @@ void worldParticleHermiteEvaluate(float output[4], const float coefficients[16],
 {
     const float square = parameter * parameter;
     const float cube = square * parameter;
+#if NFSHP2_BMATH_NEON
+    // ((c0*t^3 + c1*t^2) + c2*t) + c3*1: c3*1 is exact, so the lane-wise
+    // transform of {t^3, t^2, t, 1} rounds identically (non-fused VMLA).
+    if (bMatrixNeonEnabled) {
+        const float powers[4] = {cube, square, parameter, 1.0f};
+        vst1q_f32(output, bNeonTransformMatrix(coefficients, vld1q_f32(powers)));
+        return;
+    }
+#endif
     float result[4];
     for (size_t lane = 0; lane < 4; ++lane) {
         const float first = coefficients[lane] * cube;
@@ -1495,11 +1505,27 @@ int ecstasyParallelParticles=[] {
 #endif
     return 1;
 }();
+} // namespace hp2
+extern uint32_t (*collisionWitnessClockMicros)();
+namespace hp2 {
+// Diagnostic split per view kind (main, mirror): walk, build, attach us; calls, particles.
+static std::array<std::array<std::uint64_t,8>,2> particleSplitMicros{}; // +drawn, center, size/distance
+// Vita: the particle quad build (pure reads, own output slots) uses the
+// scene pool on cores 1/2 even while other scene jobs run inline
+// (particles_jobs_serial.txt turns this off).
+int ecstasyParticleJobsPooled=1;
 WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& system,
     const ChopperEffectData& catalogue,const CarCinematicScreen& view,EcstasyFrame& frame)
 {
     WorldParticleRenderSummary result;
     if(!system.firstGroup)return result;
+    const bool splitTimed=collisionWitnessClockMicros!=nullptr;
+    auto& split=particleSplitMicros[view.id==3 ? 1:0];
+    std::uint32_t splitMark=splitTimed ? collisionWitnessClockMicros():0u;
+    const auto splitAt=[&](std::size_t part) {
+        if(!splitTimed)return;
+        const auto now=collisionWitnessClockMicros();split[part]+=now-splitMark;splitMark=now;
+    };
     Require(view.id>=0 && view.id<32 && view.view && view.target && view.matricesCalculated,
         "Particle rendering lacks the current calculated source view");
     // RenderEffects128EB8 obtains its focal input from CalculateH104448;
@@ -1571,17 +1597,33 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
         plans.push_back(plan);
     }
     if(slots.size()<particles.size())slots.resize(particles.size());
+    splitAt(0);
+#if NFSHP2_BMATH_NEON
+    const bool fastRound=bFastRoundEnabled!=0;
+    const auto floorOf=[fastRound](float x) {return fastRound ? bFastFloor(x):std::floor(x);};
+    const auto truncOf=[fastRound](float x) {return fastRound ? bFastTrunc(x):std::trunc(x);};
+#else
+    const auto floorOf=[](float x) {return std::floor(x);};
+    const auto truncOf=[](float x) {return std::trunc(x);};
+#endif
     const auto buildQuad=[&](std::size_t index) {
         const auto& plan=plans[owners[index]];
         const auto& definition=*plan.definition;
         const auto* particle=particles[index];
+        if(index+4<particles.size())__builtin_prefetch(particles[index+4]);
         auto& slot=slots[index];
         const float age=1.0f-(static_cast<float>(particle->remainingTicks)*0.0009765625f)*plan.inverseLifetime;
         const float point[4]={particle->position[0],particle->position[1],particle->position[2],1.0f};
-        if(eGetClipFlags(point,view.matrices.worldToClip)) {slot.status=CenterClipped;return;}
+        // eGetClipFlags transforms the same {x,y,z,1} by the same matrix:
+        // test the one clip result instead of transforming it twice.
         float camera[4],clip[4],size[4];
-        eMulVector4(camera,view.matrices.worldToView,point);
         eMulVector4(clip,view.matrices.worldToClip,point);
+        {
+            const float limit=std::fabs(clip[3]);bool outside=false;
+            for(std::size_t axis=0;axis<3;++axis)outside|=clip[axis]>limit || clip[axis]< -limit;
+            if(outside) {slot.status=CenterClipped;return;}
+        }
+        eMulVector4(camera,view.matrices.worldToView,point);
         worldParticleHermiteEvaluate(size,definition.sizeRotationCurve,age);
         float pixels=size[0]>0.0f ? (size[0]*view.pixelScale)/camera[2]:0.0f;
         if(plan.maximum<pixels)pixels=plan.maximum;
@@ -1599,12 +1641,12 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
         // Pixel-centre snapping is an authored visual convention. Work
         // around the native viewport centre, without the GS2048 bias,
         // unsigned12.4 wrapping, or integer bits carried in float Z.
-        const float centerX=std::floor((clip[0]/clip[3])*scaleX);
-        const float centerY=std::floor((clip[1]/clip[3])*scaleY);
+        const float centerX=floorOf((clip[0]/clip[3])*scaleX);
+        const float centerY=floorOf((clip[1]/clip[3])*scaleY);
         quad.depth=depthRange[0]+(depthRange[1]-depthRange[0])*(z+1.0f)*0.5f;
         if(rotation==0) {
-            const float halfX=std::trunc(pixels*8.0f)*(1.0f/16.0f);
-            const float halfY=std::trunc(pixels*7.0f)*(1.0f/16.0f);
+            const float halfX=truncOf(pixels*8.0f)*(1.0f/16.0f);
+            const float halfY=truncOf(pixels*7.0f)*(1.0f/16.0f);
             for(std::size_t i=0;i<4;++i) {
                 quad.clipXY[i][0]=(centerX+((i&1u) ? halfX:-halfX))/scaleX;
                 quad.clipXY[i][1]=(centerY+((i&2u) ? halfY:-halfY))/scaleY;
@@ -1617,8 +1659,8 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
                 // proportions, then retain its sixteenth-pixel grid.
                 const float rotatedX=(cosine*px)+((-sine)*py);
                 const float rotatedY=(sine*px)+(cosine*py);
-                quad.clipXY[i][0]=(std::floor(rotatedX*8.0f+centerX*16.0f)*(1.0f/16.0f))/scaleX;
-                quad.clipXY[i][1]=(std::floor(rotatedY*7.0f+centerY*16.0f)*(1.0f/16.0f))/scaleY;
+                quad.clipXY[i][0]=(floorOf(rotatedX*8.0f+centerX*16.0f)*(1.0f/16.0f))/scaleX;
+                quad.clipXY[i][1]=(floorOf(rotatedY*7.0f+centerY*16.0f)*(1.0f/16.0f))/scaleY;
             }
         }
         float color[4];worldParticleHermiteEvaluate(color,definition.colorCurve,age);
@@ -1637,7 +1679,7 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
     RunNativeSceneJobs(chunkCount,[&](std::size_t chunk) {
         const auto first=chunk*particleChunk,last=std::min(first+particleChunk,particles.size());
         for(auto index=first;index<last;++index)buildQuad(index);
-    },ecstasyParallelParticles ? 3:std::numeric_limits<std::size_t>::max(),2);
+    },ecstasyParallelParticles ? 3:std::numeric_limits<std::size_t>::max(),2,ecstasyParticleJobsPooled!=0);
 #if !defined(__SWITCH__) && !defined(__vita__)
     // PC HP2_VERIFY_PARTICLES=1: rebuild every slot serially and compare.
     static const bool verifyParticles=[] {const char* value=std::getenv("HP2_VERIFY_PARTICLES");return value && *value=='1';}();
@@ -1664,6 +1706,7 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
         }
     }
 #endif
+    splitAt(1);
     // Reuse one producer buffer across groups. AttachParticleGroup copies
     // directly into the frame's contiguous native storage before it clears.
     std::vector<EcstasyParticleQuad> quads;
@@ -1684,6 +1727,21 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
         if(!quads.empty()) {
             frame.AttachParticleGroup(quads,*plan.descriptor,view,depthSum/static_cast<float>(quads.size()));
             ++result.drawnGroups;
+        }
+    }
+    splitAt(2);
+    if(splitTimed) {
+        ++split[3];split[4]+=particles.size();split[5]+=result.drawnParticles;split[6]+=result.centerClipped;
+        split[7]+=result.sizeClipped+result.distanceClipped;
+        if(split[3]>=512) {
+            const auto& m=particleSplitMicros[0];const auto& r=particleSplitMicros[1];
+            const double mn=m[3] ? static_cast<double>(m[3]):1.0,rn=r[3] ? static_cast<double>(r[3]):1.0;
+            char text[384];
+            std::snprintf(text,sizeof(text),"main calls=%llu walk_us=%.1f build_us=%.1f attach_us=%.1f particles=%.1f drawn=%.1f center=%.1f size=%.1f mirror calls=%llu walk_us=%.1f build_us=%.1f attach_us=%.1f particles=%.1f drawn=%.1f center=%.1f size=%.1f",
+                (unsigned long long)m[3],m[0]/mn,m[1]/mn,m[2]/mn,m[4]/mn,m[5]/mn,m[6]/mn,m[7]/mn,
+                (unsigned long long)r[3],r[0]/rn,r[1]/rn,r[2]/rn,r[4]/rn,r[5]/rn,r[6]/rn,r[7]/rn);
+            platform::RecordSessionEvent("render.particle_split",text);
+            particleSplitMicros={};
         }
     }
     // eAttachDirectData submits each group in source list order. Its single

@@ -14,7 +14,7 @@ void vectorMatrixTransformScalar(float output[4], const float matrix[16], const 
 extern "C" void vectorMatrixMultiply(float output[16], const float left[16], const float right[16]);
 extern "C" void eMulVector3(float output[4], const float matrix[16], const float input[3]);
 extern "C" float eUnitVector4[4];
-extern int bMatrixNeonEnabled;
+#include "bware/inc/bMathNeon.hpp"
 
 namespace vita_selftest {
 namespace {
@@ -158,5 +158,35 @@ void Run(void (*log)(const char* event, const char* detail))
     std::snprintf(detail, sizeof(detail), "fpscr=0x%08x flush_to_zero=%d cases=400000 mismatches=%u ms=%.1f neon_enabled=%d",
         static_cast<unsigned>(fpscr), flushToZero ? 1 : 0, transformMismatches, transformMs, bMatrixNeonEnabled);
     log("vita.selftest.matrix_transform", detail);
+    {
+        // Inline floor/trunc vs newlib. Denormal inputs are excluded: in
+        // flush-to-zero mode every arithmetic result feeding them is already
+        // flushed, so the callers never pass one.
+        unsigned roundMismatches = 0, roundCases = 0;std::uint32_t firstBad[3]{};
+        const auto check = [&](float x) {
+            std::uint32_t xb;std::memcpy(&xb, &x, 4);
+            if ((xb & 0x7f800000u) == 0 && (xb & 0x007fffffu) != 0) return; // denormal (bit test: FZ compares see 0)
+            ++roundCases;
+            const float a = bFastFloor(x), b = std::floor(x), c = bFastTrunc(x), d = std::trunc(x);
+            if (std::memcmp(&a, &b, 4) != 0 || std::memcmp(&c, &d, 4) != 0) {
+                if (roundMismatches < 3) std::memcpy(&firstBad[roundMismatches], &x, 4);
+                ++roundMismatches;
+            }
+        };
+        const float edges[] = {0.0f, -0.0f, 0.5f, -0.5f, 1.0f, -1.0f, 1.5f, -1.5f, 8388607.5f, -8388607.5f,
+            8388608.0f, -8388608.0f, 16777216.0f, -16777217.0f, 1e30f, -1e30f, 2147483648.0f, -2147483904.0f,
+            0.99999994f, -0.99999994f, 1e-30f, -1e-30f, __builtin_inff(), -__builtin_inff(), __builtin_nanf("")};
+        for (float x : edges) check(x);
+        for (int test = 0; test < 400000; ++test) {
+            const float scale = test % 4 == 0 ? 1.0f : test % 4 == 1 ? 1000.0f : test % 4 == 2 ? 1.0e7f : 1.0e-3f;
+            check(Random(scale));
+            std::uint32_t bits = static_cast<std::uint32_t>(test) * 2654435761u;float raw;std::memcpy(&raw, &bits, 4);
+            check(raw);
+        }
+        bFastRoundEnabled = roundMismatches == 0;
+        std::snprintf(detail, sizeof(detail), "cases=%u mismatches=%u enabled=%d first=%08x,%08x,%08x", roundCases, roundMismatches, bFastRoundEnabled,
+            static_cast<unsigned>(firstBad[0]), static_cast<unsigned>(firstBad[1]), static_cast<unsigned>(firstBad[2]));
+        log("vita.selftest.fast_round", detail);
+    }
 }
 }
