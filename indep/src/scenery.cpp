@@ -1,5 +1,3 @@
-#include <chrono>
-#include <cstdlib>
 #include "indep/inc/Scenery.hpp"
 #include "indep/inc/NativeRenderSettings.hpp"
 #include "indep/inc/Ecstasy.hpp"
@@ -17,8 +15,6 @@
 #include <set>
 
 namespace { int32_t currentZoneNumber=-1; } // PAL3302B0.
-extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelSceneryPrepare; }
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
 
 SceneryInstance* sceneryFindInstanceByIndex(const Scenery* scenery,int32_t section,int32_t instance)
@@ -621,15 +617,12 @@ std::size_t sceneryNativeSelectDetailLod(const SceneryModel& model,
 }
 
 void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame,
-    std::uint32_t viewMask,std::int32_t worldFrames,bool emitGeometry,AsyncCapture* async)
+    std::uint32_t viewMask,std::int32_t worldFrames,bool emitGeometry)
 {
-    auto& S=scratch_[view.id==3 ? 1:0];
-    if(hp2::ecstasyDiagSkipScenery)emitGeometry=false;
     // PAL150D98/150B10/150378/14FE18/150EB8. Native vectors replace only the
     // original temporary cull-list allocation; their entries still borrow
     // the same models, placements, source trees and viewport camera.
     Require(view.view && view.matricesCalculated,"Scenery rendering requires current view matrices");
-    const auto splitStarted=std::chrono::steady_clock::now();
     Require(std::isfinite(view.sourcePixelScale) && view.sourcePixelScale>0.0f,
         "Scenery thresholds require the calculated source focal scale");
     // Copy the issuing camera/projection values once. Loaded section/model
@@ -640,10 +633,10 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     std::array<float,16> worldToScreenClip;
     std::copy_n(view.matrices.worldToScreenClip,16,worldToScreenClip.begin());
     const float distanceScale=nativeViewDistanceScale(view.id);
-    S.nativeRenderStatistics_={};
+    nativeRenderStatistics_={};
     const bool extendedRange=distanceScale>1.0f;
     if(extendedRange) {
-        if(S.renderIdentityScratch_.empty()) {
+        if(renderIdentityScratch_.empty()) {
             Require(nativeInstanceCapacity_<=std::numeric_limits<std::size_t>::max()/2,
                 "Native scenery identity capacity overflow");
             std::size_t capacity=2;
@@ -652,15 +645,15 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                     "Native scenery identity table overflow");
                 capacity*=2;
             }
-            S.renderIdentityScratch_.resize(capacity);
+            renderIdentityScratch_.resize(capacity);
         }
-        if(++S.renderGeneration_==0) {
-            for(auto& bucket:S.renderIdentityScratch_)bucket.generation=0;
-            S.renderGeneration_=1;
+        if(++renderGeneration_==0) {
+            for(auto& bucket:renderIdentityScratch_)bucket.generation=0;
+            renderGeneration_=1;
         }
     }
     bool journalSample=false;
-    if(!async && view.id>=0 && view.id<static_cast<std::int32_t>(journalTicks_.size())) {
+    if(view.id>=0 && view.id<static_cast<std::int32_t>(journalTicks_.size())) {
         const auto index=static_cast<std::size_t>(view.id);
         const auto bit=std::uint32_t(1)<<index;
         const auto ticks=platform::TicksNow();
@@ -673,9 +666,9 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     std::array<std::size_t,3> journalLods{};
     std::size_t journalInstances=0,journalNodes=0;
     const auto commandBegin=journalSample ? frame.Commands().size():0;
-    auto& draws=S.drawScratch_;
-    auto& chunks=S.sectionCaptureScratch_;
-    auto& preparedLights=S.lightContextScratch_;
+    auto& draws=drawScratch_;
+    auto& chunks=sectionCaptureScratch_;
+    auto& preparedLights=lightContextScratch_;
     draws.clear();preparedLights.clear();
     struct ClearPreparation {
         std::vector<RenderSectionCapture>& chunks;
@@ -701,21 +694,17 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     // PVS list and publishes currentZoneNumber. Workers never visit that list.
     const auto sectionCapacity=distanceScale>1.0f ?
         std::max<std::size_t>(128,loadedSections_.size()+74u):128u;
-    if(async && async->collectReady)while(!async->collectReady->load(std::memory_order_acquire)) {}
-    if(async)hp2::ecstasyAsyncMirrorPhase.fetch_add(1);
-    const auto* selectedZone=CollectSections(view,S.sectionScratch_,sectionCapacity,&S.nativeRenderStatistics_.sourceSections);
-    if(!async && collectSignal_)collectSignal_->store(1,std::memory_order_release);
-    const auto splitCollected=std::chrono::steady_clock::now();
-    const auto sourceSections=S.nativeRenderStatistics_.sourceSections;
-    S.nativeRenderStatistics_.extendedSections=S.sectionScratch_.size()-sourceSections;
+    const auto* selectedZone=CollectSections(view,sectionScratch_,sectionCapacity,&nativeRenderStatistics_.sourceSections);
+    const auto sourceSections=nativeRenderStatistics_.sourceSections;
+    nativeRenderStatistics_.extendedSections=sectionScratch_.size()-sourceSections;
     std::size_t preparationWork=0,validSections=0;
     // A loaded section can contain thousands of instances while its root is
     // outside this view. Classify that same root once before deciding whether
     // useful visible work warrants waking the pool; the tree walk reuses the
     // exact result. No PVS list, admission, LOD or near-state rule changes.
-    std::vector<std::int32_t> rootClips(S.sectionScratch_.size(),0);
-    for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal) {
-        const auto number=S.sectionScratch_[ordinal];
+    std::vector<std::int32_t> rootClips(sectionScratch_.size(),0);
+    for(std::size_t ordinal=0;ordinal<sectionScratch_.size();++ordinal) {
+        const auto number=sectionScratch_[ordinal];
         const auto& section=*native_.sections[number];
         if(journalSample)journalInstances+=section.instanceCount;
         if(!section.records34104 || !section.record34104Count)continue;
@@ -731,7 +720,6 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             preparationWork+=std::min<std::size_t>(512-preparationWork,section.instanceCount);
         }
     }
-    const auto splitRooted=std::chrono::steady_clock::now();
     const auto prepareSection=[&](const SectionStorage& storage,std::size_t ordinal,std::int32_t rootClip,
         std::vector<RenderDraw>& output,std::vector<RenderNode>& stack,
         std::vector<std::uint8_t>& nearState,std::size_t& visited,
@@ -761,10 +749,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             // Original pixels still choose existing near/medium model detail.
             // Extended visibility admits distant geometry at its coarsest actual
             // authored LOD; it does not multiply every nearby high-detail mesh.
-            // The rear-view mirror (view3) keeps the PS2's pure pixel-size LOD:
-            // the native near-detail guard applies to the other views only.
-            const bool nearGuard=viewId!=3;
-            const float squaredXY=!nearGuard ? std::numeric_limits<float>::infinity():std::min(
+            const float squaredXY=std::min(
                 hp2::sceneryNativeDistanceSquaredXY(instance,camera.eye),
                 hp2::sceneryNativeDistanceSquaredFootprintXY(
                     storage.staticFineFootprints[index].data(),camera.eye));
@@ -824,29 +809,29 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             }
         }
     };
-    if(async || !hp2::ecstasyParallelSceneryPrepare || preparationWork<512 || validSections<2 || NativeSceneEffectiveHardwareConcurrency()<2) {
+    if(preparationWork<512 || validSections<2 || NativeSceneEffectiveHardwareConcurrency()<2) {
         // Preserve direct owner execution for a small workload or one CPU:
         // no chunk copies, thread wakeups or temporary hysteresis arrays.
-        for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal) {
-            const auto number=S.sectionScratch_[ordinal];
+        for(std::size_t ordinal=0;ordinal<sectionScratch_.size();++ordinal) {
+            const auto number=sectionScratch_[ordinal];
             const auto& section=*native_.sections[number];
             if(!section.records34104 || !section.record34104Count)continue;
             auto& storage=*sectionStorageByNumber_[number];std::size_t visited=0;
-            prepareSection(storage,ordinal,rootClips[ordinal],draws,S.nodeScratch_,storage.nearDetailState,visited,journalLods);
+            prepareSection(storage,ordinal,rootClips[ordinal],draws,nodeScratch_,storage.nearDetailState,visited,journalLods);
             if(journalSample)journalNodes+=visited;
         }
     } else {
-        if(chunks.size()<S.sectionScratch_.size())chunks.resize(S.sectionScratch_.size());
-        clear.chunksUsed=S.sectionScratch_.size();
+        if(chunks.size()<sectionScratch_.size())chunks.resize(sectionScratch_.size());
+        clear.chunksUsed=sectionScratch_.size();
         struct SectionGroup {
             SectionStorage* storage{};
             std::vector<std::size_t> ordinals;
             std::vector<std::uint8_t> nearState;
         };
         std::vector<SectionGroup> groups;
-        groups.reserve(S.sectionScratch_.size());
-        for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal) {
-            const auto number=S.sectionScratch_[ordinal];
+        groups.reserve(sectionScratch_.size());
+        for(std::size_t ordinal=0;ordinal<sectionScratch_.size();++ordinal) {
+            const auto number=sectionScratch_[ordinal];
             const auto& section=*native_.sections[number];
             if(!section.records34104 || !section.record34104Count)continue;
             if(!rootClips[ordinal]) {
@@ -877,7 +862,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         // section has one hysteresis writer even for repeated PVS entries.
         if(viewId==1)for(auto& group:groups)
             std::copy(group.nearState.begin(),group.nearState.end(),group.storage->nearDetailState.begin());
-        for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal) {
+        for(std::size_t ordinal=0;ordinal<sectionScratch_.size();++ordinal) {
             auto& chunk=chunks[ordinal];
             if(journalSample) {
                 journalNodes+=chunk.visited;
@@ -886,8 +871,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             draws.insert(draws.end(),chunk.draws.begin(),chunk.draws.end());
         }
     }
-    S.nativeRenderStatistics_.drawnInstances=draws.size();
-    const auto splitTraversed=std::chrono::steady_clock::now();
+    nativeRenderStatistics_.drawnInstances=draws.size();
     // The view still publishes culling/LOD hysteresis on discarded frames.
     // Lighting and GPU packet capture have no consumer on those frames.
     if(!emitGeometry)return;
@@ -909,13 +893,13 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 std::uint32_t bits;std::memcpy(&bits,&draw.matrix[lane],sizeof(bits));key[lane+6]=bits;
             }
             for(const auto word:key) {hash^=static_cast<std::size_t>(word);hash*=static_cast<std::size_t>(1099511628211ull);}
-            const auto mask=S.renderIdentityScratch_.size()-1;
+            const auto mask=renderIdentityScratch_.size()-1;
             auto slot=hash&mask;
-            while(S.renderIdentityScratch_[slot].generation==S.renderGeneration_ &&
-                S.renderIdentityScratch_[slot].key!=key)slot=(slot+1)&mask;
-            auto& bucket=S.renderIdentityScratch_[slot];
-            const bool present=bucket.generation==S.renderGeneration_;
-            if(!present) {bucket.key=key;bucket.generation=S.renderGeneration_;}
+            while(renderIdentityScratch_[slot].generation==renderGeneration_ &&
+                renderIdentityScratch_[slot].key!=key)slot=(slot+1)&mask;
+            auto& bucket=renderIdentityScratch_[slot];
+            const bool present=bucket.generation==renderGeneration_;
+            if(!present) {bucket.key=key;bucket.generation=renderGeneration_;}
             return present;
         };
         // Reserve every already-visible authored draw before admitting any
@@ -926,8 +910,8 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         for(std::size_t index=0;index<draws.size();++index) {
             const auto& draw=draws[index];
             if(draw.nativeExtended && alreadyPresent(draw)) {
-                ++S.nativeRenderStatistics_.duplicateExtendedInstances;
-                --S.nativeRenderStatistics_.drawnInstances;
+                ++nativeRenderStatistics_.duplicateExtendedInstances;
+                --nativeRenderStatistics_.drawnInstances;
                 if(journalSample)--journalLods[draw.nativeLod];
                 continue;
             }
@@ -938,20 +922,16 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     }
     // StuffScenery publishes in the exact leaf traversal order. Fully inside
     // entries set eModel flag4; intersecting entries use strip-level culling.
-    const auto splitPrepared=std::chrono::steady_clock::now();
     auto* resources=models_->resourceRegistry;
     std::optional<SceneLightContext> worldContext;
-    std::uint64_t worldContextKey=0; // frame light key of *worldContext
     std::vector<std::size_t> lightJobs;
-    // Lighting is per-draw pure owner input (no shared writes), so the pool
-    // takes it once there is enough work to amortize the wakeup.
-    if(!async && resources && draws.size()>=32 && NativeSceneEffectiveHardwareConcurrency()>1) {
+    if(resources && draws.size()>=128 && NativeSceneEffectiveHardwareConcurrency()>1) {
         for(std::size_t index=0;index<draws.size();++index) {
             const auto& draw=draws[index];
             if(!draw.identity && draw.model->solid && (draw.model->solid->renderFlags&0x1c0u))
                 lightJobs.push_back(index);
         }
-        if(lightJobs.size()>=24) {
+        if(lightJobs.size()>=128) {
             preparedLights.resize(draws.size());
             const auto applicationState=frame.ApplicationState();
             const auto* environment=frame.EnvironmentMatrix();
@@ -959,392 +939,63 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 const auto index=lightJobs[job];
                 preparedLights[index]=SetupLightContext(resources->Lights(),draws[index].matrix.data(),
                     environment,camera.eye,view,applicationState);
-            },24);
+            },128);
         }
-    }
-    const auto splitLit=std::chrono::steady_clock::now();
-    std::size_t splitBatched=0,splitInlineLights=0;double splitInlineLightMs=0,splitModelMs=0;
-    std::size_t splitRejected=0,splitRejectedStrips=0,splitOverLimit=0,splitOverLimitStrips=0,splitModelCommands=0;
-#if !defined(__SWITCH__) && !defined(__vita__)
-    // PC diagnostics only: HP2_CACHED_SCENERY=1 exercises the console path.
-    static const bool cachedScenery=[] {const char* value=std::getenv("HP2_CACHED_SCENERY");return value && *value=='1';}();
-    // PC HP2_VERIFY_SCENERY_EMIT=1: build the parallel emit unmerged, take
-    // the serial path and compare every cached draw's commands with it.
-    static const bool verifyParallelEmit=[] {const char* value=std::getenv("HP2_VERIFY_SCENERY_EMIT");return value && *value=='1';}();
-#else
-    constexpr bool cachedScenery=true,verifyParallelEmit=false;
-#endif
-    const auto lightContextFor=[&](std::size_t drawIndex,std::optional<SceneLightContext>& localContext)->const SceneLightContext* {
-        auto& draw=draws[drawIndex];
-        if(!(draw.identity || (draw.model->solid && (draw.model->solid->renderFlags&0x1c0u))))return nullptr;
-        Require(resources,"Scenery light context lost its canonical resource registry");
-        if(draw.identity) {
-            if(!worldContext) {worldContext=frame.SetupWorldLightContext(*resources,view);worldContextKey=frame.NewLightKey();}
-            return &*worldContext;
-        }
-        // PAL150F9C calls elSetupLightContext for IsLit models;
-        // the instance matrix and actual environment orientation are
-        // consumed together before the frame copies this context.
-        if(drawIndex<preparedLights.size() && preparedLights[drawIndex])
-            return &*preparedLights[drawIndex];
-        // A preceding draw can select a new vertex-animation
-        // solid on this same live model. Re-evaluate the original
-        // predicate above and retain its owner-side fallback.
-        const auto lightStart=std::chrono::steady_clock::now();
-        localContext=SetupLightContext(resources->Lights(),draw.matrix.data(),
-            frame.EnvironmentMatrix(),camera.eye,view,frame.ApplicationState());
-        ++splitInlineLights;
-        splitInlineLightMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lightStart).count();
-        return &*localContext;
-    };
-    const auto renderRejected=[&](std::size_t drawIndex,const SceneLightContext* context) {
-        auto& draw=draws[drawIndex];
-        if(async) {
-            // The owner renders it at the merge. Same rule as the parallel
-            // emit: such a model must not change a table later draws read.
-            const auto* solid=draw.model->solid;
-            // Rigid animation only changes this model's own start (read
-            // later just by its deferred RenderModel and the extended-range
-            // dedup key), so it is deferred like any other rejected model.
-            if(draw.model->replacement || !solid || (solid->rigidAnimation && extendedRange) || solid->vertexAnimation) {
-                async->abort=true;
-                async->abortReason=draw.model->replacement ? 1:!solid ? 2:solid->rigidAnimation ? 3:4;
-                return;
-            }
-            AsyncCapture::Rejected entry;
-            entry.command=frame.Commands().size();entry.model=draw.model;entry.matrix=draw.matrix;entry.clip=draw.clip;
-            if(context)entry.context=*context;
-            async->rejected.push_back(std::move(entry));
-            return;
-        }
-        const auto commandsBefore=frame.Commands().size();
-        const auto modelStart=std::chrono::steady_clock::now();
-        frame.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context);
-        splitModelMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-modelStart).count();
-        splitModelCommands+=frame.Commands().size()-commandsBefore;
-    };
-    // Parallel cached-scenery emit, exact: the owner prepares every batch
-    // cache, light context and instance slot in draw order; workers build
-    // each cached draw's commands (pure reads); the owner then appends them
-    // and renders the rejected models in the original draw order. Returns
-    // false (nothing emitted) when one batch would need two lit states, or a
-    // rejected model could change a solid/texture table read by later draws.
-    constexpr std::size_t emitChunkDraws=48;
-    // Diagnostic: emit phases (plan+lights, instances, build, merge).
-    static std::array<double,4> emitPhases{};static std::array<double,3> emitCounts{};
-    const auto parallelEmit=[&](bool merge)->bool {
-        auto phaseMark=std::chrono::steady_clock::now();
-        const auto phase=[&](std::size_t index) {
-            const auto now=std::chrono::steady_clock::now();
-            emitPhases[index]+=std::chrono::duration<double,std::milli>(now-phaseMark).count();phaseMark=now;
-        };
-        const auto pass=++S.emitPass_;
-        auto& plan=S.emitPlanScratch_;
-        plan.assign(draws.size(),EmitPlan{});
-        if(preparedLights.size()<draws.size())preparedLights.resize(draws.size());
-        for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
-            auto& draw=draws[drawIndex];
-            std::optional<SceneLightContext> localContext;
-            auto* context=lightContextFor(drawIndex,localContext);
-            if(localContext) {preparedLights[drawIndex]=std::move(localContext);context=&*preparedLights[drawIndex];}
-            plan[drawIndex].context=context;
-            const auto* solid=draw.model->solid;
-            const bool stripCull=draw.clip==1 && hp2::ecstasySceneryStripCull && hp2::ecstasySceneryRuns;
-            const bool gpuClip=draw.clip==1 && solid && solid->geometry &&
-                (stripCull || solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips);
-            if(solid && (draw.clip==2 || gpuClip)) {
-                auto& batch=S.opaqueBatches_[draw.model->solid];
-                const bool lit=context!=nullptr;
-                if(batch.emitPass==pass && batch.emitPassLit!=lit)return false;
-                if(frame.PrepareOpaqueSceneryBatch(batch,*draw.model,lit)) {
-                    batch.emitPass=pass;batch.emitPassLit=lit;
-                    plan[drawIndex].batch=&batch;plan[drawIndex].stripCull=stripCull;
-                    continue;
-                }
-                if(merge) {++splitRejected;splitRejectedStrips+=solid->geometry->strips.size();}
-            } else if(merge && solid && solid->geometry) {++splitOverLimit;splitOverLimitStrips+=solid->geometry->strips.size();}
-            if(draw.model->replacement || !solid || solid->rigidAnimation || solid->vertexAnimation)return false;
-        }
-        Require(view.target && view.target->enabled && view.matricesCalculated,"Opaque scenery batch lost its live view");
-        phase(0);
-        const auto& projection=frame.SceneryProjection(view);
-        for(auto& entry:plan)if(entry.batch)entry.instance=&frame.AllocateInstance();
-        phase(1);
-        const auto chunkCount=(draws.size()+emitChunkDraws-1)/emitChunkDraws;
-        auto& chunks=S.emitChunkScratch_;
-        if(chunks.size()<chunkCount)chunks.resize(chunkCount);
-        RunNativeSceneJobs(chunkCount,[&](std::size_t chunkIndex) {
-            auto& chunk=chunks[chunkIndex];
-            chunk.commands.clear();chunk.runStrips.clear();
-            const auto first=chunkIndex*emitChunkDraws,last=std::min(first+emitChunkDraws,draws.size());
-            for(auto drawIndex=first;drawIndex<last;++drawIndex) {
-                auto& entry=plan[drawIndex];
-                if(!entry.batch)continue;
-                const auto& draw=draws[drawIndex];
-                EcstasyFrame::FillInstance(*entry.instance,draw.matrix.data(),view,entry.context);
-                entry.begin=static_cast<std::uint32_t>(chunk.commands.size());
-                frame.EmitOpaqueSceneryRuns(*entry.batch,*draw.model,draw.matrix.data(),view,*entry.instance,
-                    projection,entry.stripCull,chunk.commands,chunk.runStrips);
-                entry.end=static_cast<std::uint32_t>(chunk.commands.size());
-            }
-        },2);
-        phase(2);
-        if(!merge)return true;
-        double rejectedBefore=splitModelMs;
-        for(std::size_t chunkIndex=0;chunkIndex<chunkCount;++chunkIndex) {
-            emitCounts[0]+=static_cast<double>(chunks[chunkIndex].commands.size());
-            emitCounts[1]+=static_cast<double>(chunks[chunkIndex].runStrips.size());
-            auto& chunk=chunks[chunkIndex];
-            const auto runBase=frame.AppendSceneryRunStrips(chunk.runStrips);
-            const auto first=chunkIndex*emitChunkDraws,last=std::min(first+emitChunkDraws,draws.size());
-            for(auto drawIndex=first;drawIndex<last;++drawIndex) {
-                const auto& entry=plan[drawIndex];
-                if(entry.batch) {
-                    frame.AppendOpaqueSceneryCommands(chunk.commands.data()+entry.begin,entry.end-entry.begin,runBase);
-                    ++splitBatched;
-                } else renderRejected(drawIndex,entry.context);
-            }
-        }
-        phase(3);
-        emitPhases[3]-=splitModelMs-rejectedBefore; // rejected models are model_ms
-        emitCounts[2]+=1.0;
-        return true;
-    };
-    const bool parallelCandidate=!async && cachedScenery && hp2::ecstasyParallelSceneryEmit && hp2::ecstasySceneryRuns &&
-        draws.size()>=2*emitChunkDraws && NativeSceneEffectiveHardwareConcurrency()>1 &&
-        // Serial jobs (Vita default): chunk buffers + merge are only extra
-        // command copies; the direct serial path is the reference.
-        !hp2::ecstasySceneJobsSerial;
-    const bool parallelDone=parallelCandidate && !verifyParallelEmit && parallelEmit(true);
-    if(parallelDone) {
-        ++S.parallelEmitViews_;
-    } else {
-    const bool verifying=parallelCandidate && verifyParallelEmit && parallelEmit(false);
-    std::vector<std::pair<std::size_t,std::size_t>> serialRanges;
-    if(verifying)serialRanges.assign(draws.size(),{0,0});
-    // Sampled split of the serial emit: 1 main view in 16.
-    // Separate accumulators for the main view (t1) and the mirror (t3).
-    const std::size_t sampleView=view.id==3 ? 1:0;
-    static std::array<unsigned,2> emitSampleTicks{};
-    static std::array<std::array<double,6>,2> emitSamples{}; // light, prepare, capture, emit, rejected, views
-    static std::array<double,2> emitSampleDrawsAll{},emitSampleBatchedAll{};
-    auto& emitSample=emitSamples[sampleView];
-    auto& emitSampleDraws=emitSampleDrawsAll[sampleView];auto& emitSampleBatched=emitSampleBatchedAll[sampleView];
-    const bool sampleEmit=!async && (view.id==1 || view.id==3) && (++emitSampleTicks[sampleView]&15u)==0;
-    const auto sampleBatchedBefore=splitBatched;
-    const auto sampleRejectedMsBefore=splitModelMs;
-    if(!async)hp2::ecstasyEmitSampling=sampleEmit;
-    static std::array<std::array<std::uint64_t,5>,2> emitCounterViews{};
-    if(sampleEmit)hp2::ecstasyEmitCounters={};
-    if(!async)hp2::ecstasyEmitSampleMs={};
-    const bool emitTwice=!async && hp2::ecstasyDiagEmitTwice && view.id==1 && !sampleEmit && collisionWitnessClockMicros && !verifying;
-    const auto twiceCommands=frame.Commands().size(),twiceInstances=frame.CapturedInstanceCount(),twiceRuns=frame.SceneryRunStrips().size();
-    const auto twiceSplit=splitBatched,twiceRejected=splitRejected,twiceRejectedStrips=splitRejectedStrips,
-        twiceOver=splitOverLimit,twiceOverStrips=splitOverLimitStrips,twiceModelCommands=splitModelCommands;
-    const auto twiceModelMs=splitModelMs;
-    static unsigned twiceViewCounter=0;
-    const unsigned ablation=emitTwice ? (twiceViewCounter++)%5u:0u;
-    const EcstasyDrawProjection* viewProjection=nullptr;
-    const bool fastSceneryCapture=hp2::ecstasyFastSceneryCapture!=0;
-    for(int twicePass=emitTwice ? 0:1;twicePass<2;++twicePass) {
-    const std::uint32_t twiceStart=emitTwice ? collisionWitnessClockMicros():0u;
-    if(emitTwice && twicePass==0) {
-        // Diagnostic ablation pass (discarded): 0 full batched path,
-        // 1 prepare+capture (no emit), 2 prepare+allocate/fill, 3 full
-        // without strip culling, 4 lookup+prepare.
-        const auto& projection=frame.SceneryProjection(view);(void)projection;
-        for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
-            auto& draw=draws[drawIndex];
-            std::optional<SceneLightContext> localContext;
-            const SceneLightContext* context=lightContextFor(drawIndex,localContext);
-            const auto* solid=draw.model->solid;
-            const bool stripCull=draw.clip==1 && hp2::ecstasySceneryStripCull && hp2::ecstasySceneryRuns;
-            const bool gpuClip=draw.clip==1 && solid && solid->geometry &&
-                (stripCull || solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips);
-            if(!(solid && (draw.clip==2 || gpuClip)))continue;
-            auto& batch=S.opaqueBatches_[draw.model->solid];
-            if(ablation==0 || ablation==3) {(void)frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context,ablation==0 && stripCull);continue;}
-            if(!frame.PrepareOpaqueSceneryBatch(batch,*draw.model,context!=nullptr) || ablation==4)continue;
-            if(ablation==1) {frame.DiagCaptureOnly(draw.matrix.data(),view,context);continue;}
-            auto& instance=frame.AllocateInstance();
-            EcstasyFrame::FillInstance(instance,draw.matrix.data(),view,context);
-        }
-        hp2::ecstasyDiagEmitAblation[ablation]+=collisionWitnessClockMicros()-twiceStart;
-        ++hp2::ecstasyDiagEmitAblation[5+ablation];
-        frame.DiagTruncateCapture(twiceCommands,twiceInstances,twiceRuns);
-        continue;
     }
     for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
-        if(async && async->abort)break;
         auto& draw=draws[drawIndex];
         std::optional<SceneLightContext> localContext;
-        std::chrono::steady_clock::time_point lightMark{};
-        if(sampleEmit)lightMark=std::chrono::steady_clock::now();
-        const SceneLightContext* context=lightContextFor(drawIndex,localContext);
-        if(sampleEmit)emitSample[0]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lightMark).count();
-        if(cachedScenery)
-        {
+        const SceneLightContext* context=nullptr;
+        if(draw.identity || (draw.model->solid && (draw.model->solid->renderFlags&0x1c0u))) {
+            Require(resources,"Scenery light context lost its canonical resource registry");
+            if(draw.identity) {
+                if(!worldContext)worldContext=frame.SetupWorldLightContext(*resources,view);
+                context=&*worldContext;
+            } else {
+                // PAL150F9C calls elSetupLightContext for IsLit models;
+                // the instance matrix and actual environment orientation are
+                // consumed together before the frame copies this context.
+                if(drawIndex<preparedLights.size() && preparedLights[drawIndex])
+                    context=&*preparedLights[drawIndex];
+                else {
+                    // A preceding draw can select a new vertex-animation
+                    // solid on this same live model. Re-evaluate the original
+                    // predicate above and retain its owner-side fallback.
+                    localContext=SetupLightContext(resources->Lights(),draw.matrix.data(),
+                        frame.EnvironmentMatrix(),camera.eye,view,frame.ApplicationState());context=&*localContext;
+                }
+            }
+        }
+#ifdef __SWITCH__
         // Small opaque models can use the GPU clipper at the frustum edge.
         // Bound the extra submitted geometry before using the cached path.
         const auto* solid=draw.model->solid;
-        const bool stripCull=draw.clip==1 && hp2::ecstasySceneryStripCull && hp2::ecstasySceneryRuns;
         const bool gpuClip=draw.clip==1 && solid && solid->geometry &&
-            (stripCull || solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips);
+            solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips;
         if(solid && (draw.clip==2 || gpuClip)) {
-            auto& batch=S.OpaqueBatchFor(draw.model->solid);
-            const auto commandsBefore=frame.Commands().size();
-            // The view projection is captured once per view (the serial
-            // draws capture the same snapshot); the world context has a key.
-            if(!viewProjection)viewProjection=&frame.SceneryProjection(view);
-            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context,stripCull,
-                fastSceneryCapture ? viewProjection:nullptr,
-                fastSceneryCapture && worldContext && context==&*worldContext ? worldContextKey:0)) {
-                if(verifying)serialRanges[drawIndex]={commandsBefore,frame.Commands().size()};
-                ++splitBatched;continue;
-            }
-            ++splitRejected;splitRejectedStrips+=solid->geometry->strips.size();
-        } else if(solid && solid->geometry) {++splitOverLimit;splitOverLimitStrips+=solid->geometry->strips.size();}
+            auto& batch=opaqueBatches_[draw.model->solid];
+            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context))continue;
         }
-        renderRejected(drawIndex,context);
-    }
-    if(emitTwice) {
-        hp2::ecstasyDiagEmitTwiceMicros[static_cast<std::size_t>(twicePass)]+=collisionWitnessClockMicros()-twiceStart;
-        (void)twiceSplit;(void)twiceRejected;(void)twiceRejectedStrips;(void)twiceOver;(void)twiceOverStrips;(void)twiceModelCommands;(void)twiceModelMs;
-        if(false) {
-        } else if(++hp2::ecstasyDiagEmitTwiceMicros[2]>=150) {
-            auto& t=hp2::ecstasyDiagEmitTwiceMicros;auto& a=hp2::ecstasyDiagEmitAblation;
-            const auto per=[&](int m) {return a[5+m] ? a[m]/1000.0/a[5+m]:0.0;};
-            char text[200];std::snprintf(text,sizeof(text),"views=%llu real_ms=%.3f full=%.3f capture=%.3f alloc_fill=%.3f no_cull=%.3f prepare=%.3f",
-                static_cast<unsigned long long>(t[2]),t[1]/1000.0/t[2],per(0),per(1),per(2),per(3),per(4));
-            platform::RecordSessionEvent("render.emit_ablation",text);t={};a={};
-        }
-    }
-    }
-    if(!async)hp2::ecstasyEmitSampling=false;
-    if(sampleEmit) {
-        for(std::size_t index=0;index<3;++index)emitSample[1+index]+=hp2::ecstasyEmitSampleMs[index];
-        for(std::size_t index=0;index<5;++index)emitCounterViews[sampleView][index]+=hp2::ecstasyEmitCounters[index];
-        emitSample[4]+=splitModelMs-sampleRejectedMsBefore;emitSample[5]+=1;
-        emitSampleDraws+=static_cast<double>(draws.size());emitSampleBatched+=static_cast<double>(splitBatched-sampleBatchedBefore);
-        if(emitSample[5]>=16) {
-            const double n=emitSample[5];
-            char text[256];
-            auto& c=emitCounterViews[sampleView];
-            std::snprintf(text,sizeof(text),"view=%d views=%.0f draws=%.1f batched=%.1f light_ms=%.3f prepare_ms=%.3f capture_ms=%.3f emit_ms=%.3f rejected_ms=%.3f runs=%.1f box_tests=%.1f strip_tests=%.1f commands=%.1f culled_models=%.1f",
-                static_cast<int>(view.id),n,emitSampleDraws/n,emitSampleBatched/n,emitSample[0]/n,emitSample[1]/n,emitSample[2]/n,emitSample[3]/n,emitSample[4]/n,
-                c[0]/n,c[1]/n,c[2]/n,c[3]/n,c[4]/n);
-            c={};
-            platform::RecordSessionEvent("render.scenery_emit_sample",text);
-            emitSample={};emitSampleDraws=emitSampleBatched=0;
-        }
-    }
-#if !defined(__SWITCH__) && !defined(__vita__)
-    if(verifying) {
-        // Compare each cached draw's unmerged parallel commands with the
-        // serial ones: every field the gather reads, run strips by value and
-        // the instance by value (instance slots differ by design).
-        static std::uint64_t checks=0,mismatches=0;
-        const auto& commands=frame.Commands();const auto& runStrips=frame.SceneryRunStrips();
-        for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
-            const auto& entry=S.emitPlanScratch_[drawIndex];
-            if(!entry.batch)continue;
-            ++checks;
-            const auto& chunk=S.emitChunkScratch_[drawIndex/emitChunkDraws];
-            const auto [serialFirst,serialLast]=serialRanges[drawIndex];
-            bool same=serialLast-serialFirst==entry.end-entry.begin;
-            for(std::size_t at=0;same && at<entry.end-entry.begin;++at) {
-                const auto& a=chunk.commands[entry.begin+at];const auto& b=commands[serialFirst+at];
-                same=a.kind==b.kind && a.strip==b.strip && a.model==b.model && a.texture==b.texture &&
-                    a.clipToScreen==b.clipToScreen && a.view==b.view && a.target==b.target &&
-                    a.drawFlags==b.drawFlags && a.lightMaterial==b.lightMaterial && a.clipClass==b.clipClass &&
-                    a.textureQScale==b.textureQScale && a.cachedOpaqueScenery==b.cachedOpaqueScenery &&
-                    a.nativeRenderEggState==b.nativeRenderEggState && a.sceneryRunCount==b.sceneryRunCount &&
-                    a.instance && b.instance && a.instance->localToClip==b.instance->localToClip &&
-                    (a.LightContext()!=nullptr)==(b.LightContext()!=nullptr) &&
-                    (!a.LightContext() || std::memcmp(a.LightContext(),b.LightContext(),
-                        sizeof(SceneLightContext))==0);
-                for(std::uint32_t strip=0;same && strip<a.sceneryRunCount;++strip)
-                    same=chunk.runStrips[a.sceneryRunFirst+strip]==runStrips[b.sceneryRunFirst+strip];
-            }
-            if(!same)++mismatches;
-        }
-        if((++S.verifyParallelEmitViews_&255u)==0) {
-            char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
-                (unsigned long long)checks,(unsigned long long)mismatches);
-            platform::RecordSessionEvent("render.scenery_emit_verify",text);
-        }
-    }
 #endif
-    }
-    if(!async) {
-        // Diagnostic: prepare / light / emit split per view (logged every 300 renders).
-        const auto ms=[](auto a,auto b){return std::chrono::duration<double,std::milli>(b-a).count();};
-        static std::array<double,5> split{};static std::array<double,9> counts{};static unsigned renders=0;
-        static std::array<double,4> stages{};static double parallelViews=0,candidateViews=0;
-        stages[0]+=ms(splitStarted,splitCollected);stages[1]+=ms(splitCollected,splitRooted);
-        stages[2]+=ms(splitRooted,splitTraversed);stages[3]+=ms(splitTraversed,splitPrepared);
-        parallelViews+=parallelDone;candidateViews+=parallelCandidate;
-        const auto now=std::chrono::steady_clock::now();
-        split[0]+=ms(splitStarted,splitPrepared);split[1]+=ms(splitPrepared,splitLit);split[2]+=ms(splitLit,now);
-        counts[0]+=draws.size();counts[1]+=splitBatched;counts[2]+=lightJobs.size();counts[3]+=splitInlineLights;
-        split[3]+=splitInlineLightMs;split[4]+=splitModelMs;
-        counts[4]+=splitRejected;counts[5]+=splitRejectedStrips;counts[6]+=splitOverLimit;counts[7]+=splitOverLimitStrips;
-        counts[8]+=splitModelCommands;
-        // Per render target (main view vs mirror etc.): renders, ms, draws, batched.
-        static std::array<std::array<double,4>,16> perTarget{};
-        {
-            const auto id=view.target ? static_cast<std::size_t>(view.target->id)&15u:15u;
-            perTarget[id][0]+=1;perTarget[id][1]+=ms(splitStarted,now);perTarget[id][2]+=draws.size();perTarget[id][3]+=splitBatched;
-        }
-        if(++renders==300) {
-            char text[420];
-            std::snprintf(text,sizeof(text),"renders=300 prepare_ms=%.3f light_ms=%.3f emit_ms=%.3f inline_light_ms=%.3f model_ms=%.3f draws=%.1f batched=%.1f light_jobs=%.1f inline_lights=%.1f rejected=%.1f rejected_strips=%.1f over_limit=%.1f over_limit_strips=%.1f model_commands=%.1f",
-                split[0]/300,split[1]/300,split[2]/300,split[3]/300,split[4]/300,counts[0]/300,counts[1]/300,counts[2]/300,counts[3]/300,
-                counts[4]/300,counts[5]/300,counts[6]/300,counts[7]/300,counts[8]/300);
-            platform::RecordSessionEvent("render.scenery_split",text);
-            std::snprintf(text,sizeof(text),"collect_ms=%.3f roots_ms=%.3f traverse_ms=%.3f dedupe_ms=%.3f parallel_emit=%.2f candidates=%.2f",
-                stages[0]/300,stages[1]/300,stages[2]/300,stages[3]/300,parallelViews/300,candidateViews/300);
-            platform::RecordSessionEvent("render.scenery_prepare",text);
-            {
-                std::size_t length=0;text[0]=0;
-                for(std::size_t id=0;id<perTarget.size();++id) {
-                    const auto& t=perTarget[id];
-                    if(!t[0])continue;
-                    length+=std::snprintf(text+length,sizeof(text)-length," t%u:n=%.0f,ms=%.3f,draws=%.1f,batched=%.1f",
-                        static_cast<unsigned>(id),t[0],t[1]/t[0],t[2]/t[0],t[3]/t[0]);
-                    if(length>=sizeof(text))break;
-                }
-                perTarget={};
-                platform::RecordSessionEvent("render.scenery_targets",text);
-            }
-            if(emitCounts[2]>0) {
-                const double n=emitCounts[2];
-                std::snprintf(text,sizeof(text),"views=%.0f plan_ms=%.3f instances_ms=%.3f build_ms=%.3f merge_ms=%.3f commands=%.1f run_strips=%.1f",
-                    n,emitPhases[0]/n,emitPhases[1]/n,emitPhases[2]/n,emitPhases[3]/n,emitCounts[0]/n,emitCounts[1]/n);
-                platform::RecordSessionEvent("render.scenery_emit",text);
-                emitPhases={};emitCounts={};
-            }
-            stages={};parallelViews=candidateViews=0;
-            split={};counts={};renders=0;
-        }
+        frame.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context);
     }
     if(journalSample) {
         char detail[1536]{};
         const auto written=std::snprintf(detail,sizeof(detail),
             "view=%d world_frame=%d eye=(%.3f,%.3f,%.3f) forward=(%.4f,%.4f,%.4f) "
             "fov=%.3f source_focal=%.3f output_focal=%.3f pvs_zone=%d pvs_fallback=%d "
-            "loaded_sections=%" HP2_ZU " selected_sections=%" HP2_ZU " candidate_instances=%" HP2_ZU " tree_nodes=%" HP2_ZU " "
-            "visible_instances=%" HP2_ZU " lod=(%" HP2_ZU ",%" HP2_ZU ",%" HP2_ZU ") commands=%" HP2_ZU " sections=",
+            "loaded_sections=%zu selected_sections=%zu candidate_instances=%zu tree_nodes=%zu "
+            "visible_instances=%zu lod=(%zu,%zu,%zu) commands=%zu sections=",
             view.id,worldFrames,static_cast<double>(camera.eye[0]),static_cast<double>(camera.eye[1]),
             static_cast<double>(camera.eye[2]),static_cast<double>(camera.forward[0]),
             static_cast<double>(camera.forward[1]),static_cast<double>(camera.forward[2]),
             static_cast<double>(view.fieldOfViewDegrees),static_cast<double>(view.sourcePixelScale),
             static_cast<double>(view.pixelScale),
             selectedZone?static_cast<std::int32_t>(selectedZone->authoredParameters[0]):-1,
-            selectedZone?0:1,native_.loadedSectionCount,S.sectionScratch_.size(),journalInstances,journalNodes,
+            selectedZone?0:1,native_.loadedSectionCount,sectionScratch_.size(),journalInstances,journalNodes,
             draws.size(),journalLods[0],journalLods[1],journalLods[2],frame.Commands().size()-commandBegin);
         auto used=written>0 ? std::min(static_cast<std::size_t>(written),sizeof(detail)-1):0;
-        for(const auto number:S.sectionScratch_) {
+        for(const auto number:sectionScratch_) {
             const auto count=std::snprintf(detail+used,sizeof(detail)-used,"%d,",static_cast<int>(number));
             if(count<0 || static_cast<std::size_t>(count)>=sizeof(detail)-used)break;
             used+=static_cast<std::size_t>(count);

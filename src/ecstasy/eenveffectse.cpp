@@ -35,7 +35,7 @@ void EcstasyFrame::AttachBlackAndWhite(const CarCinematicServices& views)
         command.feedbackGroup=group;commands_.push_back(command);
     }
     // Keep image passes outside all later texture-priority/alpha sorting.
-    MarkCommandBoundary();
+    pendingAlphaBegin_=commands_.size();
 }
 
 namespace {
@@ -167,7 +167,7 @@ void EcstasyFrame::AttachFog(const CarCinematicServices& views)
         command.view=&view;command.target=view.target;command.depthPalette=&fog;command.zWriteEnabled=false;
         commands_.push_back(command);
     }
-    MarkCommandBoundary();
+    pendingAlphaBegin_=commands_.size();
 }
 
 void EcstasyFrame::AttachDepthOfField(const CarCinematicServices& views)
@@ -210,7 +210,7 @@ void EcstasyFrame::AttachDepthOfField(const CarCinematicServices& views)
     command.view=firstView;command.target=firstView->target;command.focus=&focusSettings_;
     command.rasterState[0]=blend(focusSettings_.compositeBlend);
     command.zWriteEnabled=false;commands_.push_back(command);
-    MarkCommandBoundary();
+    pendingAlphaBegin_=commands_.size();
 }
 
 

@@ -265,11 +265,6 @@ private:
 #ifdef _WIN32
 int runNativeWindowsApplication(int argc,const wchar_t* const* argv);
 #endif
-// Application-thread drain for a host-pipelined frame: waits for the host
-// render thread and retires the in-flight capture. Called where the source
-// waits for rendering (eWaitUntilRenderingDone) and before resource changes.
-inline void (*nativeRenderDrainHook)()=nullptr;
-inline void NativeDrainRendering() {if(nativeRenderDrainHook)nativeRenderDrainHook();}
 class NativeApplicationHost {
 public:
     virtual ~NativeApplicationHost()=default;
@@ -303,13 +298,6 @@ public:
     // the frame budget. Simulation remains independent of this deadline.
     virtual void BeginSceneCapture() {}
     virtual void SubmitFrame(EcstasyFrame& frame)=0;
-    // Optional pipelined presentation (Vita). When enabled, SubmitFrame may
-    // return with the frame still being rendered by a host thread; the
-    // application then captures into its spare frame. FinishFrames waits and
-    // retires the in-flight frame on the calling (application) thread.
-    virtual void SetFramePipelining(bool) {}
-    virtual bool FrameInFlight() const noexcept {return false;}
-    virtual void FinishFrames() {}
     // An unchanged source scene may reuse owned native preparation. Success
     // means a new complete GPU render/submission, not reuse of a final image.
     // Hosts without this capability retain the ordinary capture path.

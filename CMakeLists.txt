@@ -27,12 +27,6 @@ target_sources(NFSHP2Core PRIVATE
     src/ecstasy/eenvmape.cpp
 )
 
-# printf size_t length: VitaSDK newlib lacks C99 %zu (size_t is unsigned int there).
-if(CMAKE_CXX_COMPILER MATCHES "arm-vita-eabi")
-    target_compile_definitions(NFSHP2Core PUBLIC [=[HP2_ZU="u"]=])
-else()
-    target_compile_definitions(NFSHP2Core PUBLIC [=[HP2_ZU="zu"]=])
-endif()
 target_include_directories(NFSHP2Core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/indep/inc")
 
 # Game logic and native runtime services.
@@ -349,8 +343,6 @@ endif()
 # Standalone resource utility: no renderer, audio runtime or Python dependency.
 if(NINTENDO_SWITCH)
     include(cmake/Switch.cmake)
-elseif(CMAKE_CXX_COMPILER MATCHES "arm-vita-eabi")
-    include(cmake/Vita.cmake)
 else()
     add_subdirectory(tools/archive)
 endif()

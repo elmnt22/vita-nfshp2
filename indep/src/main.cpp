@@ -1,4 +1,3 @@
-#include <atomic>
 #include <exception>
 #include "Flags.hpp"
 #ifdef __SWITCH__
@@ -58,30 +57,7 @@
 // Native terminal lifetime API in the proven weatherman.cpp definition path.
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
-extern std::array<std::uint64_t,8> mellowSplitMicros;
-static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
-namespace hp2 { extern std::uint64_t ecstasyAsyncMirrorStats[12]; }
-namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
-extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
-extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
-extern uint64_t collisionWitnessWarmMismatches;
-extern int collisionSpeculationMode;
-#include <atomic>
-extern std::atomic<uint64_t> collisionPoolHelperTasks,collisionPoolHelperMicros;
-extern uint64_t collisionPoolMainMicros;
-extern uint64_t collisionSpecSeparations,collisionSpecAccepted,collisionSpecWasted,collisionSpecMispredicts,
-    collisionPoolMainTasks,collisionPoolRuns,collisionPoolRunMicros,collisionPoolWaitMicros,
-    collisionSpecRounds,collisionSpecVerified,collisionSpecMismatches,collisionFindQueries,collisionSeparateQueries,collisionSeparateCalls;
-extern uint64_t collisionQueuePredicted,collisionQueueFallbacks,collisionQueueChecks,collisionQueueMismatches;
-extern uint32_t (*collisionWitnessProbeClock)();
-extern uint64_t collisionWitnessKindMicros[9],collisionWitnessKindSteps[9];
-static double soundUpdatePeakMs=0;
-extern std::array<double,8> carMoverModeMs;
-extern std::array<std::uint32_t,8> carMoverModeCalls;
-extern std::atomic<uint64_t> collisionWitnessCacheChecks,collisionWitnessCacheMismatches;
 namespace hp2 { void InitDisplaySystem(const GameResources& files,GameTime& clock); }
-extern std::array<double,4> worldCollisionSubPhaseMs; // indep/src/world.cpp diagnostic
-extern std::array<double,4> worldCollisionSolveMs;
 
 ApplicationBootState applicationBootState={-1};
 ApplicationFrameTiming applicationFrameTiming{};
@@ -89,12 +65,6 @@ float applicationPreviousCpuFrameRate=0.0f;
 float applicationPreviousGpuFrameRate=0.0f;
 bool applicationGpuTimingAvailable=false;
 
-namespace hp2 {int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};int debugBenchMirror=[] {
-#if !defined(__vita__)
-    if(const char* value=std::getenv("HP2_BENCH_MIRROR"))return std::atoi(value)!=0 ? 1:0;
-#endif
-    return 0;
-}();}
 // PAL12EE30..12EE94; same process vector RNG. vectorRandomSeed performs
 // its actual initial bound1 draw; assigning a seed directly would differ.
 void applicationSeedRandomNumber(ReplayIntegerLog& log)
@@ -105,12 +75,6 @@ void applicationSeedRandomNumber(ReplayIntegerLog& log)
     if (log.replaying)seed=replayIntegerLogRead(&log,32,0);
     else {
         seed=hp2NativeTickerSource()+UINT32_C(0x12345678);
-        // Benchmark hosts only (demo bench): repeatable runs.
-        bool bench=hp2::debugDemoTrack>=0;
-#if !defined(__vita__) && !defined(__SWITCH__)
-        if (const char* text=std::getenv("HP2_DEMO_BENCH"))bench=bench || std::atoi(text)>0;
-#endif
-        if (bench)seed=UINT32_C(0x12345678);
         replayIntegerLogWrite(&log,seed,32,0);
     }
     (void)vectorRandomSeed(seed,&vectorDefaultRandomState);
@@ -230,10 +194,6 @@ ResourceFileBindings ApplicationResourceRuntime::GlobalFileBindings() const
 } // namespace hp2
 
 namespace hp2 {
-#if defined(__vita__)
-// Logical steps per presentation before excess debt is dropped (see Tick).
-constexpr std::uint32_t kVitaCatchUpSteps=2u;
-#endif
 namespace {
 // The released process owns one input service. This C-ABI trampoline keeps
 // a lifetime borrow only; no second controller packet or game state exists.
@@ -347,8 +307,6 @@ struct ApplicationRuntime::Storage {
     std::unique_ptr<frontend::MemcardScreens> memcards;
     frontend::GameFlowBindings flowBindings{};
     std::unique_ptr<EcstasyFrame> frame{std::make_unique<EcstasyFrame>()};
-    // Pipelined hosts render one frame while the next is captured here.
-    std::unique_ptr<EcstasyFrame> spareFrame{std::make_unique<EcstasyFrame>()};
     int32_t skipStartSequence{},alternateSkin{};
     // PAL1BE910 requests the same bStartGlare consumed by StuffSunGlare.
     // The application's Sun owner retains its original textures and clock.
@@ -495,7 +453,6 @@ struct ApplicationRuntime::Storage {
         Require(width>0 && height>0,"Native render extent is unavailable");
         cameras.projection.nativeSourceVideoMode=gameTimeGetVideoMode(&clock);
         if(targets[0].width==width && targets[0].height==height && cameras.projection.horizontalResolution==width)return;
-        NativeDrainRendering(); // a pipelined frame may still read these extents
         for(std::size_t index=0;index<8;++index) {targets[index].width=width;targets[index].height=height;}
         cameras.projection.horizontalResolution=width;
         // The source view switch sets player/split/rear subrectangles. The
@@ -1138,9 +1095,7 @@ bool ApplicationRuntime::Tick()
                 Require(carCinematicAdvanceOwned(screen.last)==CAR_CINEMATIC_OK,"Active camera mover update failed");
             {
                 platform::ScopedNativeDuration measure(s.audioTiming,&s.slowFrame.audio);
-                const auto soundStarted=std::chrono::steady_clock::now();
                 s.AudioResult(soundUpdate(s.soundBindings,s.trackPhase->Simulation(),s.speechStream,s.profilesOwner,s.parameters,s.flow,&s.joylog),"Original sound frame");
-                soundUpdatePeakMs=std::max(soundUpdatePeakMs,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-soundStarted).count());
                 if(s.audioOpened)s.AudioResult(s.host.PumpAudio(s.sound),"Physical audio frame");
             }
             joystickUpdatePortRumblers(s.input,s.clock);
@@ -1173,14 +1128,7 @@ bool ApplicationRuntime::Tick()
             s.simulationClock.CompleteStep(s.scheduledStepQuanta);
             ++updates;
         }
-#if defined(__vita__)
-        // Vita: catch-up steps skip race geometry like the Switch; the final
-        // step of a bounded batch always captures so a frame is presented.
-        if(s.flow.inGameFlag && ((advancedPresentation && updates<kVitaCatchUpSteps &&
-            s.simulationClock.UpdateDue(observed)) || !s.host.PresentationDue(s.host.FrameTime())))
-            scene.emitRaceGeometry=false;
-        sceneGeometryEmitted=scene.emitRaceGeometry;
-#elif defined(__SWITCH__)
+#ifdef __SWITCH__
         if(s.flow.inGameFlag && ((advancedPresentation && s.simulationClock.UpdateDue(observed)) ||
             !s.host.PresentationDue(s.host.FrameTime())))scene.emitRaceGeometry=false;
         sceneGeometryEmitted=scene.emitRaceGeometry;
@@ -1200,22 +1148,13 @@ bool ApplicationRuntime::Tick()
         s.frame->Seal();
         const auto sealCompleted=std::chrono::steady_clock::now();
         captureMilliseconds+=std::chrono::duration<double,std::milli>(sealStarted-captureStarted).count();
-        if(!sceneGeometryEmitted) {
-            // Diagnostic: catch-up captures that publish no geometry.
-            nativeDiscardedCaptureMs+=std::chrono::duration<double,std::milli>(sealStarted-captureStarted).count();
-            ++nativeDiscardedCaptures;
-        }
         sealMilliseconds+=std::chrono::duration<double,std::milli>(sealCompleted-sealStarted).count();
         ++captures;
         if(advancedPresentation) {
             s.pendingClockAdvance=true;
             // Catch up complete logical updates before one presentation. Bound
             // work per host call, but retain all outstanding time for later calls.
-#if defined(__vita__)
-            if(updates<kVitaCatchUpSteps && s.simulationClock.UpdateDue(observed)) {
-#else
             if(updates<8u && s.simulationClock.UpdateDue(observed)) {
-#endif
                 s.InvalidatePreparedScene();
                 s.frame->CancelBeforeSubmit();
                 s.ServiceFrameResources();
@@ -1226,13 +1165,6 @@ bool ApplicationRuntime::Tick()
     }
     sourceMeasure.Finish();
     const auto capturedUpdateMs=static_cast<double>(s.sourceUpdateTiming.totalNanoseconds-sourceBefore)*1.0e-6;
-#if defined(__vita__)
-    // A Cortex-A9 cannot always repay logical-step debt; retaining it forever
-    // means never presenting. Drop the excess after a bounded batch (the game
-    // slows down instead of freezing). Logical steps themselves are unchanged.
-    if(updates>=kVitaCatchUpSteps && s.simulationClock.UpdateDue(observed))
-        s.simulationClock.Reset(observed+std::chrono::nanoseconds(1));
-#endif
     const bool simulationBehind=s.simulationClock.UpdateDue(observed);
     if(!reusedPreparation && (simulationBehind || !sceneGeometryEmitted || !s.host.PresentationDue(s.host.FrameTime()))) {
         // A logical frame still executes the source capture/post-draw contract,
@@ -1253,10 +1185,7 @@ bool ApplicationRuntime::Tick()
         return !s.demo.ExitRequested();
     }
     if(!reusedPreparation) {
-        platform::ScopedNativeDuration measure(s.presentationTiming);
-        s.host.SetFramePipelining(s.flow.inGameFlag!=0);
-        s.host.SubmitFrame(*s.frame);
-        if(s.host.FrameInFlight())std::swap(s.frame,s.spareFrame);
+        platform::ScopedNativeDuration measure(s.presentationTiming);s.host.SubmitFrame(*s.frame);
     }
     // Native timings have separate clock domains. CPU work includes capture,
     // Gather and recording/submission; waiting and presentation are reported
@@ -1385,95 +1314,6 @@ bool ApplicationRuntime::Tick()
                 s.longestPresentIntervalMs,static_cast<unsigned long long>(s.presentsOver33ms),
                 static_cast<unsigned long long>(s.presentsOver50ms));
             s.host.RecordSessionEvent("render.phase_window",detail);
-            std::snprintf(detail,sizeof(detail),"sound_update_peak_ms=%.3f",soundUpdatePeakMs);
-            s.host.RecordSessionEvent("render.sound_update",detail);
-            soundUpdatePeakMs=0;
-            {
-                auto& sub=worldCollisionSubPhaseMs;
-                std::snprintf(detail,sizeof(detail),"pre_step_ms=%.3f participants_ms=%.3f solve_ms=%.3f post_step_ms=%.3f",
-                    sub[0]/count,sub[1]/count,sub[2]/count,sub[3]/count);
-                s.host.RecordSessionEvent("render.collision_window",detail);
-                sub={};
-                {
-                    auto& ms=::carMoverModeMs;auto& calls=::carMoverModeCalls;
-                    std::snprintf(detail,sizeof(detail),
-                        "per_frame_ms null=%.3f physics=%.3f traffic=%.3f delivery=%.3f mellow=%.3f cop=%.3f belt=%.3f calls=%u/%u/%u/%u/%u/%u/%u",
-                        ms[0]/count,ms[1]/count,ms[2]/count,ms[3]/count,ms[4]/count,ms[5]/count,ms[6]/count,
-                        calls[0],calls[1],calls[2],calls[3],calls[4],calls[5],calls[6]);
-                    s.host.RecordSessionEvent("render.mover_window",detail);
-                    ms={};calls={};
-                    if(auto& t=mellowSplitMicros;t[7]) {
-                        const double n=static_cast<double>(t[7]);
-                        std::snprintf(detail,sizeof(detail),"substeps=%llu per_substep_us setup=%.1f integrate=%.1f prepare=%.1f forces=%.1f ortho=%.1f publish=%.1f terrain=%.1f",
-                            static_cast<unsigned long long>(t[7]),t[0]/n,t[1]/n,t[2]/n,t[3]/n,t[4]/n,t[5]/n,t[6]/n);
-                        s.host.RecordSessionEvent("render.mellow_split",detail);t={};
-                    }
-                }
-                auto& solve=worldCollisionSolveMs;
-                std::snprintf(detail,sizeof(detail),"find_ms=%.3f queue_ms=%.3f resolve_ms=%.3f tail_ms=%.3f "
-                    "find_queries=%.1f separate_calls=%.1f separate_queries=%.1f spec_mode=%d spec_separations=%.1f spec_rounds=%.1f "
-                    "spec_accepted=%.1f spec_wasted=%.1f spec_mispredicts=%.1f spec_verified=%llu spec_mismatches=%llu",
-                    solve[0]/count,solve[1]/count,solve[2]/count,solve[3]/count,
-                    ::collisionFindQueries/count,::collisionSeparateCalls/count,::collisionSeparateQueries/count,::collisionSpeculationMode,
-                    ::collisionSpecSeparations/count,::collisionSpecRounds/count,::collisionSpecAccepted/count,::collisionSpecWasted/count,
-                    ::collisionSpecMispredicts/count,static_cast<unsigned long long>(::collisionSpecVerified),
-                    static_cast<unsigned long long>(::collisionSpecMismatches));
-                ::collisionFindQueries=::collisionSeparateCalls=::collisionSeparateQueries=0;
-                ::collisionSpecSeparations=::collisionSpecRounds=::collisionSpecAccepted=::collisionSpecWasted=::collisionSpecMispredicts=0;
-                s.host.RecordSessionEvent("render.collision_solve",detail);
-                if(auto& a=hp2::ecstasyAsyncMirrorStats;a[0]) {
-                    const double n=static_cast<double>(a[0]);
-                    std::snprintf(detail,sizeof(detail),"views=%llu merged=%llu fallbacks=%llu aborts=%llu inline=%llu wait_us=%.1f job_us=%.1f verify_mismatches=%llu abort_replacement=%llu abort_nosolid=%llu abort_rigid=%llu abort_vertex=%llu",
-                        (unsigned long long)a[0],(unsigned long long)a[1],(unsigned long long)a[2],(unsigned long long)a[3],
-                        (unsigned long long)a[4],a[5]/n,a[6]/n,(unsigned long long)a[7],(unsigned long long)a[8],(unsigned long long)a[9],
-                        (unsigned long long)a[10],(unsigned long long)a[11]);
-                    s.host.RecordSessionEvent("render.async_mirror",detail);
-                    const auto mismatches=a[7];std::fill(std::begin(a),std::end(a),0);a[7]=mismatches;
-                }
-                {
-                    if(const auto checks=::collisionWitnessCacheChecks.load()) {
-                        std::snprintf(detail,sizeof(detail),"checks=%llu mismatches=%llu",static_cast<unsigned long long>(checks),
-                            static_cast<unsigned long long>(::collisionWitnessCacheMismatches.load()));
-                        s.host.RecordSessionEvent("render.witness_cache_verify",detail);
-                    }
-                }
-                {
-                    const double runs=::collisionPoolRuns ? static_cast<double>(::collisionPoolRuns):1.0;
-                    std::snprintf(detail,sizeof(detail),"runs_per_frame=%.1f main_tasks=%.1f helper_tasks=%.1f run_us=%.1f wait_us=%.1f main_task_us=%.1f helper_task_us=%.1f",
-                        ::collisionPoolRuns/count,::collisionPoolMainTasks/count,::collisionPoolHelperTasks.load()/count,
-                        ::collisionPoolRunMicros/runs,::collisionPoolWaitMicros/runs,
-                        ::collisionPoolMainTasks ? double(::collisionPoolMainMicros)/::collisionPoolMainTasks:0.0,
-                        ::collisionPoolHelperTasks.load() ? double(::collisionPoolHelperMicros.load())/::collisionPoolHelperTasks.load():0.0);
-                    ::collisionPoolMainMicros=0;::collisionPoolHelperMicros=0;
-                    s.host.RecordSessionEvent("render.collision_pool",detail);
-                    ::collisionPoolRuns=::collisionPoolMainTasks=::collisionPoolRunMicros=::collisionPoolWaitMicros=0;::collisionPoolHelperTasks=0;
-                }
-                std::snprintf(detail,sizeof(detail),"predicted_per_frame=%.1f fallbacks_per_frame=%.1f checks=%llu mismatches=%llu",
-                    ::collisionQueuePredicted/count,::collisionQueueFallbacks/count,
-                    static_cast<unsigned long long>(::collisionQueueChecks),static_cast<unsigned long long>(::collisionQueueMismatches));
-                ::collisionQueuePredicted=::collisionQueueFallbacks=0;
-                s.host.RecordSessionEvent("render.queue_pred",detail);
-                {
-                    std::snprintf(detail,sizeof(detail),"queries_per_frame=%.1f iterations_per_query=%.2f restarts_per_frame=%.2f exhausted_per_frame=%.2f witness_ms=%.3f warm_ms=%.3f warm_mismatches=%llu",
-                        ::collisionWitnessQueries/count,::collisionWitnessQueries?double(::collisionWitnessIterations)/::collisionWitnessQueries:0.0,
-                        ::collisionWitnessRestarts/count,::collisionWitnessExhausted/count,::collisionWitnessMilliseconds/count,
-                        ::collisionWitnessWarmMilliseconds/count,static_cast<unsigned long long>(::collisionWitnessWarmMismatches));
-                    ::collisionWitnessMilliseconds=::collisionWitnessWarmMilliseconds=0;
-                    s.host.RecordSessionEvent("render.witness_window",detail);
-                    if(::collisionWitnessProbeClock) {
-                        // kinds: 0 vertex, 1 edge, 2 face; pairs are first*3+second.
-                        int used=0;
-                        for(int pair=0;pair<9;++pair)
-                            used+=std::snprintf(detail+used,sizeof(detail)-used,"k%d%d_steps=%.1f k%d%d_us=%.2f ",pair/3,pair%3,
-                                ::collisionWitnessKindSteps[pair]/count,pair/3,pair%3,
-                                ::collisionWitnessKindSteps[pair]?double(::collisionWitnessKindMicros[pair])/::collisionWitnessKindSteps[pair]:0.0);
-                        s.host.RecordSessionEvent("render.witness_kinds",detail);
-                        for(int pair=0;pair<9;++pair)::collisionWitnessKindMicros[pair]=::collisionWitnessKindSteps[pair]=0;
-                    }
-                    ::collisionWitnessQueries=::collisionWitnessIterations=::collisionWitnessRestarts=::collisionWitnessExhausted=0;
-                }
-                solve={};
-            }
             const auto effectSteps=static_cast<double>(std::max<std::uint64_t>(1,s.worldProfile.sampledSteps));
             std::snprintf(detail,sizeof(detail),
                 "scenario=%d fps=%.2f interactions_ms=%.3f feedback_ms=%.3f particles_ms=%.3f surface_effects_ms=%.3f "
@@ -1515,64 +1355,6 @@ bool ApplicationRuntime::Tick()
                 static_cast<unsigned long long>(capture.emittedCaptures),
                 static_cast<unsigned long long>(capture.discardedCaptures));
             s.host.RecordSessionEvent("render.capture_detail",detail);
-            {
-                const auto& parts=hp2::ecstasyAttachSolidPartMs;
-                std::snprintf(detail,sizeof(detail),"attach_solid_ms=%.3f calls_per_frame=%.2f commands_per_frame=%.1f command_bytes=%u partition_ms=%.3f chains_ms=%.3f priority_ms=%.3f order_ms=%.3f permute_ms=%.3f",
-                    hp2::ecstasyAttachSolidMs/count,hp2::ecstasyAttachSolidCalls/count,hp2::ecstasyAttachSolidCommands/count,
-                    static_cast<unsigned>(sizeof(EcstasyDrawCommand)),parts[0]/count,parts[1]/count,parts[2]/count,parts[3]/count,parts[4]/count);
-                hp2::ecstasyAttachSolidPartMs={};
-                s.host.RecordSessionEvent("render.attach_solid",detail);
-                hp2::ecstasyAttachSolidMs=0;hp2::ecstasyAttachSolidCalls=0;hp2::ecstasyAttachSolidCommands=0;
-            }
-            std::snprintf(detail,sizeof(detail),"discarded=%llu discarded_ms_per_capture=%.3f discarded_ms_per_frame=%.3f",
-                static_cast<unsigned long long>(nativeDiscardedCaptures),
-                nativeDiscardedCaptures ? nativeDiscardedCaptureMs/nativeDiscardedCaptures:0.0,nativeDiscardedCaptureMs/count);
-            s.host.RecordSessionEvent("render.discarded_capture",detail);
-            {
-                const auto& d=capture.discardedMilliseconds;
-                std::snprintf(detail,sizeof(detail),"setup=%.3f background=%.3f world=%.3f particles=%.3f solids=%.3f alpha=%.3f effects=%.3f hud=%.3f",
-                    d[0]/count,d[1]/count,d[2]/count,d[3]/count,d[4]/count,d[5]/count,d[6]/count,d[7]/count);
-                s.host.RecordSessionEvent("render.discarded_phases",detail);
-                for(int pass=0;pass<2;++pass) {
-                    auto& w=pass ? hp2::ecstasyDiscardWorldSplitMs:hp2::ecstasyWorldSplitMs;
-                    std::snprintf(detail,sizeof(detail),"matrices=%.3f scenery=%.3f nis=%.3f sun=%.3f skids=%.3f movers=%.3f players=%.3f objects=%.3f",
-                        w[0]/count,w[1]/count,w[2]/count,w[3]/count,w[4]/count,w[5]/count,w[6]/count,w[7]/count);
-                    s.host.RecordSessionEvent(pass ? "render.discarded_world_split":"render.world_split",detail);
-                    w={};
-                }
-                if(auto& e=hp2::nisRenderSplitMicros;e[5]) {
-                    std::snprintf(detail,sizeof(detail),"playbacks=%llu setup_us=%.1f ground_us=%.1f rotations_us=%.1f pose_us=%.1f props_us=%.1f",
-                        static_cast<unsigned long long>(e[5]),e[0]/(double)e[5],e[1]/(double)e[5],e[2]/(double)e[5],e[3]/(double)e[5],e[4]/(double)e[5]);
-                    s.host.RecordSessionEvent("render.nis_split",detail);
-                    e={};
-                }
-                if(auto& e=hp2::carRenderSplitMicros;e[7]) {
-                    const double n=static_cast<double>(e[7]);
-                    std::snprintf(detail,sizeof(detail),"cars=%llu setup_us=%.1f flares_us=%.1f driver_us=%.1f shadows_us=%.1f body_us=%.1f wheels_us=%.1f wipers_us=%.1f",
-                        static_cast<unsigned long long>(e[7]),e[0]/n,e[1]/n,e[2]/n,e[3]/n,e[4]/n,e[5]/n,e[6]/n);
-                    s.host.RecordSessionEvent("render.car_split",detail);
-                    auto& t=hp2::carSetupSplitMicros;
-                    std::snprintf(detail,sizeof(detail),"pre=%.1f textures=%.1f culler=%.1f lodbias=%.1f lighting=%.1f changed=%llu unchanged=%llu",
-                        t[5]/n,t[0]/n,t[1]/n,t[2]/n,t[3]/n,(unsigned long long)t[4],(unsigned long long)t[6]);
-                    s.host.RecordSessionEvent("render.car_setup_split",detail);t={};
-                    e={};
-                }
-                if(auto& e=hp2::ecstasyModelSplitMicros;e[3]) {
-                    const double n=static_cast<double>(e[3]);
-                    std::snprintf(detail,sizeof(detail),"calls=%llu visible_us=%.1f instance_us=%.1f strips_us=%.1f strips_per=%.1f commands_per=%.1f",
-                        static_cast<unsigned long long>(e[3]),e[0]/n,e[1]/n,e[2]/n,e[4]/n,e[5]/n);
-                    s.host.RecordSessionEvent("render.car_model_split",detail);
-                    e={};
-                }
-                if(auto& e=hp2::ecstasySkinSplitMicros;e[3]) {
-                    const double n=static_cast<double>(e[3]);
-                    std::snprintf(detail,sizeof(detail),"strips=%llu verts_per=%.1f copy_us=%.2f skin_us=%.2f capture_us=%.2f",
-                        static_cast<unsigned long long>(e[3]),e[4]/n,e[0]/n,e[1]/n,e[2]/n);
-                    s.host.RecordSessionEvent("render.skin_split",detail);
-                    e={};
-                }
-            }
-            nativeDiscardedCaptureMs=0;nativeDiscardedCaptures=0;
             const auto& phases=cpu.submitPhaseMilliseconds;
             double accounted=cpu.pipelineLookupMilliseconds+cpu.recordSceneMilliseconds+cpu.queueSubmitMilliseconds;
             for(const auto phase:phases)accounted+=phase;
@@ -1635,9 +1417,7 @@ bool ApplicationRuntime::Tick()
     s.slowFrame.diagnostics.Observe(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         s.host.FrameTime()-diagnosticsStarted).count()));
     const auto tailStarted=s.host.FrameTime();
-    Require(s.frame->State()==EcstasyFrame::Phase::Complete ||
-        (s.frame->State()==EcstasyFrame::Phase::Building && s.frame->Commands().empty()),
-        "Physical presenter did not retire the CPU frame capture");
+    Require(s.frame->State()==EcstasyFrame::Phase::Complete,"Physical presenter did not retire the CPU frame capture");
     if(advancedPresentation) {
         s.ServiceFrameResources();
     }
@@ -1740,7 +1520,6 @@ std::exception_ptr ApplicationRuntime::ShutdownNoThrow() noexcept
         return s.sound.CancelDeviceRequestsAfterClose();
     });
     s.Retire("CPU frame cancellation",[&] {
-        s.host.FinishFrames();
         Require(s.frame->State()!=EcstasyFrame::Phase::Submitted,
             "Shutdown precedes retirement of the submitted CPU frame capture");
         if(s.frame->State()!=EcstasyFrame::Phase::Complete)s.frame->CancelBeforeSubmit();

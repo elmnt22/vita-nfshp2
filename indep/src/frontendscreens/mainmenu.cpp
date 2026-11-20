@@ -1,4 +1,3 @@
-#include <atomic>
 #include "FMenus.hpp"
 #ifdef __SWITCH__
 #include "src/nx/controller_session.hpp"
@@ -18,7 +17,6 @@
 #include <cstring>
 #include <memory>
 
-namespace hp2 {int debugQuickRaceTrack=-1,debugQuickRaceReverse=0;}
 namespace hp2::frontend {
 
 // Final3319F8. The source checks and clears this independent cell after
@@ -398,11 +396,7 @@ void StartQuickRace(MainMenuScreenServices& services,std::int32_t manualTransmis
     const auto cops=frontend.copsEnabled;
     frontend.gameType=2;
     frontend.playerCount=1;
-    auto description=PickTrackNumberForExpressGame(services);
-    // Unattended profiling may pin the quick-race track (Vita autopad.txt).
-    if(debugQuickRaceTrack>=0 && setup.tracks->Find(debugQuickRaceTrack)) {
-        description.trackNumber=debugQuickRaceTrack;description.direction=debugQuickRaceReverse;
-    }
+    const auto description=PickTrackNumberForExpressGame(services);
     const auto* track=setup.tracks->Find(description.trackNumber);
     Require(track,"Quick race selected a missing authored track");
     race.selectedScenario=description.trackNumber;

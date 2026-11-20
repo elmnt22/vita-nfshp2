@@ -1,5 +1,4 @@
 #include "indep/inc/TrackRoute.hpp"
-namespace hp2 {extern int debugBenchMirror;}
 #include "bware/inc/bWare.hpp"
 #include "indep/inc/TrackMap.hpp"
 #include "indep/inc/Player.hpp"
@@ -2050,12 +2049,6 @@ void carFramePlayerUpdateHud(CarFramePlayerState* player)
     auto& own=*player->ownedState;
     PlayerDisplayDebugInfo(*player);
     const uint32_t requested=carFramePlayerDetermineHudFeatures(player);
-    // Benchmark only (demo bench "<track> 1" / HP2_BENCH_MIRROR=1): the AI
-    // attract player (no HUD) gets the rear-view mirror camera a human
-    // player's default display attaches, so its rendering cost is measured.
-    if (hp2::debugBenchMirror && player->cameras && !player->cameras->overlay &&
-        player->cameras->overlayViewNumber && player->car)
-        hp2::Require(carFramePlayerSetAttachedCamera(player,1)==CAR_CINEMATIC_OK,"Bench mirror camera failed");
     if (requested!=own.hudFeatures)
         hp2::Require(carFramePlayerSetHudFeatures(player,requested)!=0,"Original HUD feature dependency is not available");
     carFramePlayerHudDoAnimations(player);PlayerScoreTitleAlpha(*player);
@@ -2798,8 +2791,6 @@ bool hp2::DestroyPlayer(CarFramePlayerState* player)
     if (registry->count<1 || registry->count>2 || registry->players[registry->count-1]!=player ||
         registry->playersByNumber[player->movement.seat]!=player) return false;
     carFramePlayerResetFlailerMovement(player);
-    if (debugBenchMirror && player->cameras && player->cameras->overlay &&
-        carFramePlayerSetAttachedCamera(player,0)!=CAR_CINEMATIC_OK) return false;
     if (!carFramePlayerSetHudFeatures(player,0)) return false;
     // PAL175C3C..175C58: Player owns and destroys its private bSample at
     // +8C even when shutdown interrupts an active cinematic effect.

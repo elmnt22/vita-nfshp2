@@ -148,7 +148,7 @@ void EnvironmentMap::UpdateCameras(const float viewEye[3],const float reflection
     eTransposeMatrix(orientation,baseline);eMulMatrix(orientation,towardOrigin,orientation);
     rotationOnly(orientation);eTransposeMatrix(orientation,orientation);
     const std::size_t bank=applicationState==3 ? 0:1;
-#if (defined(__SWITCH__) && !defined(__SWITCH2__)) || defined(__vita__)
+#if defined(__SWITCH__) && !defined(__SWITCH2__)
     // Use the split-screen round-robin schedule in solo play too: one face
     // per source refresh, keeping the union pending until a frame submits.
     constexpr bool primary=false;
@@ -184,11 +184,6 @@ void EnvironmentMap::UpdateCameras(const float viewEye[3],const float reflection
         cameraElapsed_[face]+=realTimeElapsed;
         auto& view=views_.screens[face+4];
         view.enabled=static_cast<std::uint8_t>((pendingCameraFaces_&(std::uint32_t{1}<<face))!=0);
-#if defined(__vita__) && !defined(HP2_VITA_ENVIRONMENT_MAP)
-        // The vitaGL renderer does not composite the cubemap (target 14) yet:
-        // its faces would be captured and gathered but never displayed.
-        view.enabled=0;
-#endif
         if(!view.view)continue;
         // Face2 additionally supplies the body's current environment matrix;
         // it must follow the car even between texture refresh intervals.

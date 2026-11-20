@@ -27,14 +27,6 @@ extern std::array<std::int16_t, 64> movieIdctQuantizerScale;
 // One mutable projection of PAL331CB0..331CBF. Descriptive native names,
 // not recovered variable symbols: the original reference shift/mode both
 // start at2, while the packed path's persistent extrema start at0.
-#if defined(__GNUC__)
-#define HP2_MOVIE_COLD __attribute__((noinline, cold))
-#define HP2_MOVIE_UNLIKELY(condition) __builtin_expect(!!(condition), 0)
-#else
-#define HP2_MOVIE_COLD __declspec(noinline)
-#define HP2_MOVIE_UNLIKELY(condition) (condition)
-#endif
-
 struct DCTBlockState {
     std::int32_t referenceShift;
     std::int32_t mode;
@@ -98,7 +90,6 @@ public:
     void IDCTAddImageData4(std::uint8_t* output, std::int32_t pitch,
                            const std::int16_t* coded, const std::int16_t* quantizer) const;
     void ToImage32(std::uint8_t* output, std::uint32_t flags) const;
-    void ToImage32Scalar(std::uint8_t* output, std::uint32_t flags) const;
     void ToImage32_5P(std::uint8_t* output, std::uint32_t unusedFlags) const;
     void CopyMotionBlocks(std::uint8_t* planarOutput) const;
     void CopyPreviousFrameBlock(std::int32_t x, std::int32_t y,

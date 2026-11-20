@@ -1,7 +1,4 @@
 #include <exception>
-#include <array>
-#include <cstdint>
-extern uint32_t (*collisionWitnessClockMicros)();
 #include "indep/inc/NIS.hpp"
 #include "indep/inc/Ecstasy.hpp"
 #include "bware/inc/bChunk.hpp"
@@ -819,9 +816,6 @@ static std::size_t nisRenderHandProp(CarLiveReplayContext& context,
     return frame.RenderModel(context.actorModels[(first?0u:2u)+hand],world,view,0,1.0f,0);
 }
 
-// Diagnostic (Vita micro clock): setup, actor ground, rotations, pose+render,
-// hand props, [5] rendered playbacks.
-std::array<std::uint64_t,6> nisRenderSplitMicros{};
 std::size_t RenderNisPlayback(CarFrameLiveReplay& playback,
     const CarCinematicScreen& view,EcstasyFrame& frame)
 {
@@ -834,14 +828,6 @@ std::size_t RenderNisPlayback(CarFrameLiveReplay& playback,
     Require(view.id>=0 && view.id<32,"NIS render view is outside the source bit mask");
     if(!(context.activeViews&(1u<<view.id)))return 0;
     if(!context.first)return 0;
-    const bool timed=collisionWitnessClockMicros!=nullptr;
-    std::uint32_t nisMark=timed ? collisionWitnessClockMicros():0u;
-    const auto nisAt=[&](std::size_t part) {
-        if(!timed)return;
-        const auto now=collisionWitnessClockMicros();
-        nisRenderSplitMicros[part]+=now-nisMark;nisMark=now;
-    };
-    if(timed)++nisRenderSplitMicros[5];
     Require(context.first->bindings.environment && context.first->bindings.environment->contact.terrain,
         "NIS rendering has no actual terrain owner");
     ScopedTerrainSurface terrain(context.first->bindings.environment->contact.terrain);
@@ -864,7 +850,6 @@ std::size_t RenderNisPlayback(CarFrameLiveReplay& playback,
     carCinematicCrossThree(ground+4,up,ground);
     carCinematicCrossThree(ground,ground+4,up);
     std::size_t draws=0;
-    nisAt(0);
     // Both NIS actors are rendered sequentially. Reuse the transient native
     // quaternion and bone arrays between them rather than reallocating two
     // arrays for each actor on every rendered frame.
@@ -883,7 +868,6 @@ std::size_t RenderNisPlayback(CarFrameLiveReplay& playback,
                 position,nullptr,nullptr,nullptr);
             actor[14]+=(height-context.groundHeight)+0.05000000074505806f;
         }
-        nisAt(1);
         const auto count=static_cast<std::size_t>(animation->primary->boneCount);
         const auto* tree=editorMarkerModelAnimationTree(animation->model);
         if(!tree || static_cast<std::size_t>(tree->nodeCount)!=count)return;
@@ -892,12 +876,9 @@ std::size_t RenderNisPlayback(CarFrameLiveReplay& playback,
         Require(carDriverAnimationReadAllRotations(animation->primary,rotations,count,animation->phase)!=0,
             "NIS actor phase is outside its retained authored animation");
         posed.clear();
-        nisAt(2);
         draws+=RenderAnimationPose(*animation,actor,translation,rotations,count,nullptr,view,frame,0,&posed);
-        nisAt(3);
         draws+=nisRenderHandProp(context,*animation,actor,translation,posed,0,first,view,frame);
         draws+=nisRenderHandProp(context,*animation,actor,translation,posed,1,first,view,frame);
-        nisAt(4);
     };
     drawActor(context.firstDriver,context.firstActorOffset,true);
     drawActor(context.secondDriver,context.secondActorOffset,false);

@@ -5,8 +5,6 @@
 #include "indep/inc/WorldObject.hpp"
 #ifdef __cplusplus
 #include <unordered_map>
-#include <atomic>
-#include <optional>
 #endif
 
 #ifdef __cplusplus
@@ -152,31 +150,13 @@ public:
     SceneryResources& operator=(const SceneryResources&)=delete;
     Scenery& Native() noexcept { return native_; }
     EditorMarkerResources& Models() noexcept { return *models_; }
-    const SceneryNativeRenderStatistics& NativeRenderStatistics() const noexcept { return scratch_[0].nativeRenderStatistics_; }
-    // Asynchronous rear-view (view3) capture on a helper thread, concurrent
-    // with the owner's view1 Render and its world tail. The job writes into
-    // an auxiliary frame; rejected models are recorded for the owner, which
-    // renders them in draw order while appending the job's commands. View3
-    // reads no near-detail hysteresis; its zone selection waits for view1's
-    // (collectReady) so the zone LRU order is the serial one.
-    struct AsyncCapture {
-        struct Rejected {
-            std::size_t command{};EditorMarkerModel* model{};std::array<float,16> matrix{};
-            std::int32_t clip{};std::optional<SceneLightContext> context;
-        };
-        std::vector<Rejected> rejected;
-        const std::atomic<int>* collectReady{};
-        bool abort{};
-        int abortReason{}; // 1 replacement, 2 no solid, 3 rigid, 4 vertex animation
-    };
-    // Set while the owner's view1 Render runs: stored 1 after its zone selection.
-    void SetCollectSignal(std::atomic<int>* signal) noexcept {collectSignal_=signal;}
+    const SceneryNativeRenderStatistics& NativeRenderStatistics() const noexcept { return nativeRenderStatistics_; }
     // Source visibility-zone selection, retained34104 tree traversal and
     // DrawAScenery LOD selection feed the actual model strip consumer.
     std::vector<std::int16_t> WhatSectionsShouldWeDraw(const CarCinematicScreen& view,
         std::size_t capacity=128);
     void Render(const CarCinematicScreen& view,EcstasyFrame& frame,std::uint32_t viewMask,
-        std::int32_t worldFrames,bool emitGeometry=true,AsyncCapture* async=nullptr);
+        std::int32_t worldFrames,bool emitGeometry=true);
 private:
     struct SectionStorage;
 
@@ -199,15 +179,14 @@ private:
         std::array<std::size_t,3> lods{};
         std::size_t visited{};
     };
-    // Parallel cached-scenery emit scratch (see SceneryResources::Render).
-    struct EmitPlan {
-        OpaqueSceneryBatch* batch{};const SceneLightContext* context{};EcstasyDrawInstance* instance{};
-        std::uint32_t begin{},end{};bool stripCull{};
-    };
-    struct EmitChunk {
-        std::vector<EcstasyDrawCommand> commands;
-        std::vector<const EditorMarkerSolidGeometry::Strip*> runStrips;
-    };
+    std::vector<RenderDraw> drawScratch_;
+#ifdef __SWITCH__
+    std::unordered_map<const EditorMarkerSolid*,OpaqueSceneryBatch> opaqueBatches_;
+#endif
+    std::vector<RenderNode> nodeScratch_;
+    std::vector<RenderSectionCapture> sectionCaptureScratch_;
+    std::vector<std::optional<SceneLightContext>> lightContextScratch_;
+    std::vector<std::int16_t> sectionScratch_;
     // Exact selected-solid / current native matrix / animation and material
     // bindings. A generation table reuses one allocation between extended
     // views; its capacity is bounded by this track's owned instance count.
@@ -215,35 +194,10 @@ private:
         std::array<std::uintptr_t,22> key{};
         std::uint32_t generation{};
     };
+    std::vector<RenderIdentityBucket> renderIdentityScratch_;
     std::size_t nativeInstanceCapacity_{};
-    // Render() scratch, one set per thread role: [0] owner views, [1] the
-    // rear view (view3), serial or asynchronous, so both forms use the same
-    // batch caches. No emitted command borrows these after its merge.
-    struct RenderScratch {
-        std::vector<RenderDraw> drawScratch_;
-        std::unordered_map<const EditorMarkerSolid*,OpaqueSceneryBatch> opaqueBatches_;
-        // Direct-mapped front of opaqueBatches_ (entries are never erased and
-        // unordered_map references are stable, so cached pointers stay valid).
-        std::array<std::pair<const EditorMarkerSolid*,OpaqueSceneryBatch*>,2048> opaqueBatchCache_{};
-        OpaqueSceneryBatch& OpaqueBatchFor(const EditorMarkerSolid* solid) {
-            const auto bits=reinterpret_cast<std::uintptr_t>(solid);
-            auto& slot=opaqueBatchCache_[((bits>>3)^(bits>>14))&2047u];
-            if(slot.first!=solid || !slot.second) {slot.first=solid;slot.second=&opaqueBatches_[solid];}
-            return *slot.second;
-        }
-        std::vector<RenderNode> nodeScratch_;
-        std::vector<RenderSectionCapture> sectionCaptureScratch_;
-        std::vector<std::optional<SceneLightContext>> lightContextScratch_;
-        std::vector<EmitPlan> emitPlanScratch_;
-        std::vector<EmitChunk> emitChunkScratch_;
-        std::uint64_t emitPass_{},parallelEmitViews_{},verifyParallelEmitViews_{};
-        std::vector<std::int16_t> sectionScratch_;
-        std::vector<RenderIdentityBucket> renderIdentityScratch_;
-        std::uint32_t renderGeneration_{};
-        SceneryNativeRenderStatistics nativeRenderStatistics_{};
-    };
-    std::array<RenderScratch,2> scratch_;
-    std::atomic<int>* collectSignal_{};
+    std::uint32_t renderGeneration_{};
+    SceneryNativeRenderStatistics nativeRenderStatistics_{};
     const SceneryVisibleZone* CollectSections(const CarCinematicScreen& view,
         std::vector<std::int16_t>& output,std::size_t capacity,std::size_t* sourceCount=nullptr);
     // Native journal cadence only; it does not participate in visibility.

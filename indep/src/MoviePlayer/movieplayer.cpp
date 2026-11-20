@@ -9,16 +9,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
-#include <condition_variable>
-#include <mutex>
-#include <thread>
-#include <vector>
-#if defined(__vita__)
-#include <psp2/kernel/threadmgr.h>
-#include <pthread.h>
-#endif
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -62,88 +52,6 @@ void audioResult(WorldAudioResult result) {
 }
 }
 
-// Background MV3 decode for the RGBA path. The worker touches only the codec
-// and the borrowed (unreleased) ring frame; the owner thread keeps the ring,
-// audio, clock and texture publication. Pixels land in a private buffer and
-// are copied to the texture on completion, so no half-decoded frame shows.
-class MovieDecodeWorker {
-public:
-    ~MovieDecodeWorker() {
-        Wait();
-        {std::lock_guard<std::mutex> lock(mutex_);stop_=true;}
-        wake_.notify_all();
-        Join();
-    }
-    bool Busy() const noexcept {return busy_;}
-    bool Done() const noexcept {return done_.load(std::memory_order_acquire);}
-    void Start(MV3Codec& codec,const ICDecompressEx& request,std::size_t readable,std::size_t outputBytes) {
-        Launch();
-        pixels_.resize(outputBytes);
-        codec_=&codec;request_=request;request_.lpDst=pixels_.data();
-        readable_=readable;outputBytes_=outputBytes;error_=nullptr;
-        busy_=true;done_.store(false,std::memory_order_release);
-        {std::lock_guard<std::mutex> lock(mutex_);queued_=true;}
-        wake_.notify_one();
-    }
-    // Owner thread, after Done(): rethrows decode failure, else the pixels.
-    const std::vector<std::uint8_t>& Finish() {
-        busy_=false;
-        if (error_)std::rethrow_exception(error_);
-        return pixels_;
-    }
-    void Wait() noexcept {
-        while (busy_ && !Done())std::this_thread::sleep_for(std::chrono::microseconds(200));
-        busy_=false;
-    }
-private:
-#if defined(__vita__)
-    void Launch() {
-        if (started_)return;
-        pthread_attr_t attributes;pthread_attr_init(&attributes);
-        pthread_attr_setstacksize(&attributes,256*1024);
-        started_=pthread_create(&thread_,&attributes,[](void* self) -> void* {
-            static_cast<MovieDecodeWorker*>(self)->Run();return nullptr;
-        },this)==0;
-        pthread_attr_destroy(&attributes);
-        if (!started_)throw std::runtime_error("Movie decode worker could not start");
-    }
-    void Join() noexcept {if (started_) {pthread_join(thread_,nullptr);started_=false;}}
-    pthread_t thread_{};
-    bool started_{};
-#else
-    void Launch() {if (!thread_.joinable())thread_=std::thread([this] {Run();});}
-    void Join() noexcept {if (thread_.joinable())thread_.join();}
-    std::thread thread_;
-#endif
-    void Run() {
-#if defined(__vita__)
-        // Off the game thread's core; shares the render/GL cores at low priority.
-        sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_1|SCE_KERNEL_CPU_MASK_USER_2);
-#endif
-        for (;;) {
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                // Timed wait: Vita condition variables can drop wakeups.
-                while (!queued_ && !stop_)wake_.wait_for(lock,std::chrono::milliseconds(2));
-                if (stop_)return;
-                queued_=false;
-            }
-            try {codec_->DecompressFrameEx(&request_,readable_,outputBytes_);}
-            catch (...) {error_=std::current_exception();}
-            done_.store(true,std::memory_order_release);
-        }
-    }
-    std::mutex mutex_;
-    std::condition_variable wake_;
-    bool queued_{},stop_{},busy_{};
-    std::atomic<bool> done_{true};
-    MV3Codec* codec_{};
-    ICDecompressEx request_{};
-    std::size_t readable_{},outputBytes_{};
-    std::vector<std::uint8_t> pixels_;
-    std::exception_ptr error_;
-};
-
 struct MoviePlayer::Storage {
     struct StreamHeader {
         std::uint32_t type{},handler{},flags{},priorityAndLanguage{};
@@ -176,8 +84,6 @@ struct MoviePlayer::Storage {
     DCTFrameView planes{};
     std::exception_ptr shutdownFailure;
     bool closing{};
-    // Declared last: destroyed (joined) before the codec and ring it borrows.
-    MovieDecodeWorker decoder;
 
     Storage(const GameResources& files,FileIoRuntime& io,ResourceRegistry& models,
         const GameTime& time,const std::int32_t& enabled,const std::int32_t& pass,
@@ -331,7 +237,6 @@ std::exception_ptr MoviePlayer::Shutdown() noexcept {
     const auto rememberFailure=[&]() noexcept {
         if (!s.shutdownFailure)s.shutdownFailure=std::current_exception();
     };
-    s.decoder.Wait();
     s.closing=true;s.validFrame=false;
     // Retire these independent writable borrows even if audio submission
     // fails. A retained audio source cannot call back into a released ring.
@@ -374,7 +279,7 @@ int MoviePlayer::Update(float elapsed,void* output,std::size_t outputBytes) {
     if (s.closing || !s.file.Valid())return 0;
     for (std::size_t i=0;i<s.textures.size();++i)
         if (s.textures[i] && !textureMetadataPublished(s.textureOwners[i])) {
-            s.decoder.Wait();s.DetachPlanes();s.validFrame=false;
+            s.DetachPlanes();s.validFrame=false;
             throw std::runtime_error("Movie texture metadata retired while the movie was active");
         }
     if (s.firstUpdate)
@@ -414,39 +319,6 @@ int MoviePlayer::Update(float elapsed,void* output,std::size_t outputBytes) {
     }
     s.currentTime=std::max(static_cast<float>(graphicsVBlankCount())/displayRate-s.startTime,0.0f);
     const auto targetFrame=unsignedFloat(s.currentTime/s.frameTime);
-#if defined(__vita__)
-    constexpr bool asyncDecode=true;
-#else
-    constexpr bool asyncDecode=false;
-#endif
-    const auto publishPlanes=[&] {
-        const std::array<std::uint8_t*,5> planes{{s.planes.y,s.planes.u,s.planes.v,s.planes.u,s.planes.v}};
-        for (std::size_t i=0;i<s.textures.size();++i)
-            if (s.textures[i])s.textures[i]->pixels.borrowed=planes[i];
-    };
-    if (s.decoder.Busy()) {
-        // One frame is decoding off-thread; keep presenting the last one.
-        if (!s.decoder.Done() || !output)return 1;
-        const auto& pixels=s.decoder.Finish();
-        std::memcpy(output,pixels.data(),std::min(pixels.size(),outputBytes));
-        ++s.currentFrame;s.lastReadFrame=s.clock.realTimeFrames;
-        s.validFrame=true;s.ring.ReleaseFrame();
-        publishPlanes();
-        if (s.currentFrame>=targetFrame)return 1;
-        s.ring.ReadData(s.file,0x18000);
-    }
-    if (asyncDecode && s.fivePass==0 && output) {
-        if (s.currentFrame>=targetFrame && s.validFrame)return 1;
-        auto* frame=s.ring.GetFrame();
-        while (frame && !frame->videoData) {s.ring.ReleaseFrame();frame=s.ring.GetFrame();}
-        if (!frame)return s.ring.Drained() || s.currentFrame>=s.video.length ? 0:1;
-        s.planes=s.codec.Image().Current();
-        s.input.bmiHeader.biSizeImage=frame->videoBytes;
-        s.request.lpSrc=frame->videoData;s.request.lpDst=static_cast<std::uint8_t*>(output);
-        s.codec.ConvertImageToRGBA=1;
-        s.decoder.Start(s.codec,s.request,s.ring.ReadableBytes(frame->videoData),outputBytes);
-        return 1;
-    }
     if (s.currentFrame>=targetFrame && s.validFrame)return 1;
     // A temporarily absent destination is prefetch, not permission to discard
     // an encoded reference picture. The normal frontend supplies its texture.
@@ -468,23 +340,7 @@ int MoviePlayer::Update(float elapsed,void* output,std::size_t outputBytes) {
         s.input.bmiHeader.biSizeImage=frame->videoBytes;
         s.request.lpSrc=frame->videoData;s.request.lpDst=static_cast<std::uint8_t*>(output);
         s.codec.ConvertImageToRGBA=s.fivePass==0;
-        const auto decodeStarted=std::chrono::steady_clock::now();
         s.codec.DecompressFrameEx(&s.request,s.ring.ReadableBytes(frame->videoData),outputBytes);
-        {
-            // Diagnostic: decode cost and catch-up depth (logged every 100 frames).
-            static double decodeMs=0;static unsigned decodes=0,updates=0,maxBurst=0;
-            decodeMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-decodeStarted).count();
-            ++decodes;maxBurst=std::max(maxBurst,decoded+1);
-            if(decoded==0)++updates;
-            if(decodes>=100) {
-                char text[160];
-                std::snprintf(text,sizeof(text),"decodes=%u updates=%u decode_ms=%.2f max_burst=%u size=%dx%d five_pass=%d",
-                    decodes,updates,decodeMs/decodes,maxBurst,static_cast<int>(s.input.bmiHeader.biWidth),
-                    static_cast<int>(s.input.bmiHeader.biHeight),static_cast<int>(s.fivePass));
-                platform::RecordSessionEvent("movie.decode_window",text);
-                decodeMs=0;decodes=updates=maxBurst=0;
-            }
-        }
         ++s.currentFrame;s.lastReadFrame=s.clock.realTimeFrames;
         s.validFrame=true;s.ring.ReleaseFrame();
         if (s.currentFrame>=targetFrame)break;

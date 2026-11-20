@@ -12,7 +12,7 @@
 #include <cstring>
 #include <new>
 
-#if defined(_WIN32) || defined(__SWITCH__) || defined(__vita__)
+#if defined(_WIN32) || defined(__SWITCH__)
 #include <malloc.h>
 #endif
 
@@ -43,7 +43,7 @@ extern "C" void* bMalloc(int size, const char* name, int, int pool)
     const std::size_t allocatedBytes=prefix+bytes;
 #if defined(_WIN32)
     void* allocation = _aligned_malloc(allocatedBytes, alignment);
-#elif defined(__SWITCH__) || defined(__vita__)
+#elif defined(__SWITCH__)
     void* allocation = memalign(alignment, allocatedBytes);
 #else
     void* allocation = nullptr;

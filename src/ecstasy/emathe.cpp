@@ -1,6 +1,5 @@
 #include "indep/inc/eMath.hpp"
 #include "bware/inc/bMath.hpp"
-#include "bware/inc/bMathNeon.hpp"
 #include "indep/inc/CameraCoordinator.hpp"
 #include "CameraMover.hpp"
 #include "indep/inc/eMath.hpp"
@@ -344,9 +343,6 @@ float eUnitVector4[4]={0.0f,0.0f,0.0f,1.0f};
 
 void eMulVector3(float output[4],const float matrix[16],const float input[3])
 {
-#if NFSHP2_BMATH_NEON
-    if(bMatrixNeonEnabled) {vst1q_f32(output,bNeonTransformMatrix(matrix,bNeonPoint3(eUnitVector4,input)));return;}
-#endif
     const float point[4]={eUnitVector4[0]+input[0],eUnitVector4[1]+input[1],
         eUnitVector4[2]+input[2],eUnitVector4[3]};
     eMulVector4(output,matrix,point);

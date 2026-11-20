@@ -148,7 +148,7 @@ GameFileSystem::GameFileSystem(const std::filesystem::path& index,
             "Archive index is not a regular file: " + index.u8string());
     Require(std::filesystem::is_regular_file(data),
             "Archive data is not a regular file: " + data.u8string());
-#if defined(__SWITCH__) || defined(__vita__)
+#ifdef __SWITCH__
     // libnx stat does not expose distinct inode numbers on the SD card.
     const bool sameFile=UpperAscii(index.lexically_normal().u8string())==
                         UpperAscii(data.lexically_normal().u8string());
@@ -439,12 +439,6 @@ GameResources::GameResources(const fs::path& input, GameResourceSource source) {
     // libnx mounts the SD card with a device prefix; newlib's C++ path parser
     // otherwise treats it as relative and prepends the working directory.
     if(input.native().compare(0,6,"sdmc:/")==0)
-        sourcePath_=input.lexically_normal();
-    else
-#endif
-#ifdef __vita__
-    // Vita device prefixes (ux0:, uma0:, ...) look relative to newlib.
-    if(input.native().find(':')!=std::string::npos)
         sourcePath_=input.lexically_normal();
     else
 #endif

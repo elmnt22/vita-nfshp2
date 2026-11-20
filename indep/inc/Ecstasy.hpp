@@ -10,7 +10,6 @@
 #include <array>
 #include <deque>
 #include <memory>
-#include <unordered_map>
 #include <string>
 struct WeatherQuery;
 namespace hp2 { class ResourceRegistry; class EcstasyFrame; struct TextureInfo; }
@@ -366,9 +365,6 @@ typedef struct EditorMarkerLightMaterial {
     const uint8_t* authoredRecord{};
     std::array<std::array<float,kNativeResponseSamples>,2> nativeSpecularResponse{};
     bool nativeSpecularReady{};
-    // Set with the tables by prepareNativeMaterial: every response sample is
-    // finite (the GPU table copy then needs no per-sample check).
-    bool nativeSpecularFinite{};
     // PAL10A754..10A770 selects the authored FE/IG bank from InGameFlag.
     // Each decoded variant owns its precomputed response; both original
     // coefficient arrays stay intact and no material is rewritten per frame.
@@ -673,11 +669,6 @@ struct EditorMarkerSolidGeometry {
         std::vector<std::uint8_t> nativeTriangleOrder;
         std::size_t nativeTopologyCount{};
         std::uint64_t nativeTopologyMask{};
-        // A frame-owned posed copy records its authored source (pool key).
-        const Strip* nativePoseSource{};
-        // Source revision the posed copy's non-XYZ channels were copied at:
-        // a pooled copy of an unchanged source re-skins XYZ only.
-        std::uint64_t nativePoseSourceRevision{};
         std::uint64_t nativeVertexRevision{}; // Zero retains exact byte validation.
         void PrepareNativeTopology();
         void StampNativeVertexRevision() noexcept;
@@ -804,9 +795,6 @@ enum class EcstasyCarShadow : std::uint8_t { None,Sun,Road };
 struct EcstasyDrawInstance {
     std::array<float,16> localToClip{};
     std::optional<SceneLightContext> lightContext;
-    // Byte-identical to an earlier instance's snapshot in the same frame
-    // (world-lit scenery): borrow it instead of copying 280 bytes again.
-    const SceneLightContext* sharedLightContext{};
 };
 struct EcstasyDrawProjection {
     std::array<std::array<float,16>,3> matrices{};
@@ -844,11 +832,6 @@ struct EcstasyDrawCommand {
     // source-alpha additive equation; only the frontend body map sets this.
     bool showcaseEnvironmentBlend{};
     bool cachedOpaqueScenery{};
-    // Cached opaque scenery only: nonzero when this command stands for
-    // sceneryRunCount consecutive strips (SceneryRunStrips()[first..]) that
-    // share every other field. strip is the first of them.
-    std::uint16_t sceneryRunCount{};
-    std::uint32_t sceneryRunFirst{};
     EcstasyCarShadow carShadow{};
     std::array<std::uint32_t,4> rasterState{};
     std::int32_t layer{};
@@ -867,9 +850,7 @@ struct EcstasyDrawCommand {
     std::uint64_t alphaGroup{};
     std::array<std::uint8_t,4> vertexOrder{{0,1,2,3}};
     const SceneLightContext* LightContext() const noexcept {
-        if(!instance)return nullptr;
-        if(instance->sharedLightContext)return instance->sharedLightContext;
-        return instance->lightContext ? &*instance->lightContext:nullptr;
+        return instance && instance->lightContext ? &*instance->lightContext:nullptr;
     }
     const std::array<float,16>& LocalToClip() const noexcept {
         static constexpr std::array<float,16> empty{};
@@ -942,33 +923,6 @@ struct OpaqueSceneryBatch {
     bool eligible{};
     std::vector<const EditorMarkerTexture*> bindings;
     std::vector<Strip> strips;
-    // Strip runs derived from strips for one (lit, in-game, fallback) state:
-    // consecutive strips with equal texture, drawFlags and light material.
-    struct Run {std::uint32_t first{},count{};};
-    std::vector<Run> runs;
-    std::vector<const EditorMarkerSolidGeometry::Strip*> runStrips;
-    std::vector<const EditorMarkerLightMaterial*> materials;
-    std::vector<std::uint32_t> drawFlags;
-    const EditorMarkerLightMaterial* runFallback{};
-    bool runLit{},runInGame{},runsValid{};
-    // Parallel scenery emit: the render pass that last prepared this batch
-    // and its lit state (one batch state must serve every draw of a pass).
-    std::uint64_t emitPass{};bool emitPassLit{};
-        std::vector<std::array<float,6>> runBounds; // union of each run's strip boxes (min xyz, max xyz)
-        std::vector<const TextureInfo*> uniqueTextures; // distinct strips[].texture (pixel residency check)
-    // Packed per-run emit record (one cache-friendly array instead of six
-    // parallel reads plus the texture descriptor projection selector).
-    struct EmitRun {
-        const TextureInfo* texture{};
-        const EditorMarkerLightMaterial* material{};
-        const EditorMarkerSolidGeometry::Strip* firstStrip{};
-        std::uint32_t drawFlags{},first{};
-        std::uint16_t count{};
-        std::uint8_t projection{};
-        std::array<float,6> box{};
-    };
-    std::vector<EmitRun> emitRuns;
-    std::vector<std::array<float,6>> stripBounds; // parallel to runStrips
 };
 
 class EcstasyFrame final {
@@ -979,17 +933,8 @@ public:
     EcstasyFrame(const EcstasyFrame&)=delete;
     EcstasyFrame& operator=(const EcstasyFrame&)=delete;
     const std::vector<EcstasyDrawCommand>& Commands() const noexcept {return commands_;}
-    const std::vector<const EditorMarkerSolidGeometry::Strip*>& SceneryRunStrips() const noexcept {return sceneryRunStrips_;}
     Phase State() const noexcept {return phase_;}
     std::size_t CapturedInstanceCount() const noexcept {return liveInstances_;}
-    // Diagnostic only (emit_twice): drop commands/instances/run strips
-    // appended after the given marks (a repeated capture pass is discarded).
-    void DiagCaptureOnly(const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* context) {
-        (void)CaptureInstance(localToWorld,view,context);(void)CaptureProjection(view);
-    }
-    void DiagTruncateCapture(std::size_t commands,std::size_t instances,std::size_t runStrips) noexcept {
-        commands_.resize(commands);liveInstances_=instances;sceneryRunStrips_.resize(runStrips);lastLightContext_=nullptr;lastLightKey_=0;
-    }
     std::size_t CapturedProjectionCount() const noexcept {return liveProjections_;}
     // Capture original eSetZWriteState in the native packet stream. The
     // returned state and bool normalization match PAL1033C8.
@@ -1064,9 +1009,6 @@ public:
     void RenderWorldStrip(const std::vector<frontend::FlailerPolyVertex>& vertices,
         const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view,
         EcstasyCarShadow shadow=EcstasyCarShadow::None);
-    void RenderWorldStrip(const frontend::FlailerPolyVertex* vertices,std::size_t count,
-        const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view,
-        EcstasyCarShadow shadow=EcstasyCarShadow::None);
     void RecordCarShadowCapture(double sunMilliseconds,double roadMilliseconds) noexcept {
         carShadowCaptureMilliseconds_[0]+=sunMilliseconds;
         carShadowCaptureMilliseconds_[1]+=roadMilliseconds;
@@ -1080,46 +1022,9 @@ public:
         std::int32_t worldFrames=0,const SceneLightContext* lightContext=nullptr,
         const std::vector<std::array<float,16>>* boneMatrices=nullptr);
     // Static opaque scenery uses ordered bindings and GPU frustum clipping.
-    // projection: this view's CaptureProjection result taken by the caller
-    // (unchanged for the whole call sequence). lightKey: nonzero identifies
-    // lightContext's immutable contents (see CaptureInstance).
     bool RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
-        const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
-        bool cullStrips=false,const EcstasyDrawProjection* projection=nullptr,std::uint64_t lightKey=0);
-    // A fresh nonzero light key for a caller-owned context that stays
-    // unchanged while the key is used in this frame.
-    std::uint64_t NewLightKey() noexcept {return ++lightKeyCounter_;}
-    // RenderOpaqueSceneryBatch in parts (strip runs on). Prepare (owner
-    // thread) refreshes the batch cache and tests eligibility; Emit reads
-    // only the prepared batch, the view and its inputs (any thread) and
-    // writes commands whose sceneryRunFirst indexes the given runStrips.
-    bool PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,bool lit);
-    void EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
-        const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
-        const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,
-        std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips) const;
-    EcstasyDrawInstance& AllocateInstance();
-    static void FillInstance(EcstasyDrawInstance& instance,const float localToWorld[16],
-        const CarCinematicScreen& view,const SceneLightContext* lightContext);
-    const EcstasyDrawProjection& SceneryProjection(const CarCinematicScreen& view) {return CaptureProjection(view);}
-    // Appends a chunk's run strips (returns their base) / its commands with
-    // sceneryRunFirst rebased by runBase.
-    std::uint32_t AppendSceneryRunStrips(const std::vector<const EditorMarkerSolidGeometry::Strip*>& strips);
-    void AppendOpaqueSceneryCommands(const EcstasyDrawCommand* first,std::size_t count,std::uint32_t runBase);
+        const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext);
     std::uint64_t ReusedOpaqueSceneryStrips() const noexcept {return reusedOpaqueSceneryStrips_;}
-    // Asynchronous rear-view scenery capture. The auxiliary frame (owned by
-    // this frame, so it lives until this frame is reused) holds the job's
-    // instances, projections and run strips; the owner appends its commands.
-    EcstasyFrame& AsyncSceneryFrame(std::size_t index=0);
-    // Reset the auxiliary arenas and copy the capture state the scenery
-    // batch path reads (Z write, dashboard projection, in-game materials,
-    // environment); the state test repeats the comparison at the merge.
-    void PrepareAsyncScenery(EcstasyFrame& aux) const;
-    bool AsyncSceneryStateMatches(const EcstasyFrame& aux) const noexcept;
-#if !defined(__vita__) && !defined(__SWITCH__)
-    // PC verify: every command field the gather reads, by value.
-    static bool AsyncSceneryCommandsEqual(const EcstasyFrame& a,const EcstasyFrame& b);
-#endif
     void RenderStrip(const EditorMarkerModel& model,const EditorMarkerSolidGeometry::Strip& strip,
         const TextureInfo& texture,const EditorMarkerLightMaterial* material,
         const float localToWorld[16],const CarCinematicScreen& view,
@@ -1143,10 +1048,9 @@ private:
     // borrows immutable geometry and projection inputs until its synchronous
     // join, and writes commands/posed strips into a separate ordered chunk.
     std::uint64_t reusedOpaqueSceneryStrips_{};
-    std::array<std::unique_ptr<EcstasyFrame>,2> asyncScenery_;
     std::array<double,2> carShadowCaptureMilliseconds_{};
     const EcstasyDrawInstance& CaptureInstance(const float localToWorld[16],
-        const CarCinematicScreen& view,const SceneLightContext* lightContext=nullptr,std::uint64_t lightKey=0);
+        const CarCinematicScreen& view,const SceneLightContext* lightContext=nullptr);
     const EcstasyDrawProjection& CaptureProjection(const CarCinematicScreen& view);
     struct StripCaptureState;
     StripCaptureState CaptureStripState() const;
@@ -1170,66 +1074,25 @@ private:
     std::deque<EcstasyDrawInstance> capturedInstances_;
     std::deque<EcstasyDrawProjection> capturedProjections_;
     std::size_t liveInstances_{},liveProjections_{};
-    const SceneLightContext* lastLightContext_{}; // most recent owned instance snapshot
-    // Key of the source whose contents equal *lastLightContext_ (0 none).
-    std::uint64_t lastLightKey_{},lightKeyCounter_{};
     const EcstasyDrawProjection* lastProjection_{};
     std::uint32_t nextFeedbackGroup_{};
-    // Building: commands_ is append-only storage. The logical command
-    // sequence is order_ (store indices) followed by the unflushed tail
-    // commands_[orderTail_..]. Solid/alpha ordering permutes 4-byte indices;
-    // Seal() copies each command once into the final order (Vita memory
-    // bandwidth made per-flush 168-byte moves the dominant cost).
-    std::vector<std::uint32_t> order_;
-    std::size_t orderTail_{};
-    std::vector<std::uint32_t> pendingAlphaIndices_;
-    std::vector<std::uint32_t> orderScratch_;
-    std::vector<EcstasyDrawCommand> attachSwap_; // materialization buffer (Seal swap)
-    void SyncOrder();
-    void MarkCommandBoundary();
-    void MaterializeOrder();
-#if !defined(__vita__) && !defined(__SWITCH__)
-    std::vector<EcstasyDrawCommand> LogicalCommands() const;
-    std::vector<EcstasyDrawCommand> PendingAlphaValues() const;
-#endif
-    // AttachSolidPolys chain lookup, generation-tagged (no per-flush clear).
-    struct AttachChainSlot {const TextureInfo* texture{};const EcstasyRenderTarget* sampled{};std::size_t chain{};std::uint32_t generation{};};
-    std::array<AttachChainSlot,1024> attachChainTable_{};
-    std::uint32_t attachChainGeneration_{};
-    std::vector<const EditorMarkerSolidGeometry::Strip*> sceneryRunStrips_;
+    std::vector<EcstasyDrawCommand> pendingAlphaCommands_;
     // Native temporary capacity only. Neither scratch list survives a call
     // with live elements, so it cannot retain a track/texture borrower.
+    std::vector<EcstasyDrawCommand> orderingScratch_;
     std::vector<EcstasyVisibleStrip> visibleScratch_;
     std::vector<ModelStripSource> modelStripScratch_;
     std::vector<const TextureInfo*> modelTextureScratch_;
     std::vector<ModelCaptureChunk> modelCaptureScratch_;
     std::vector<EcstasyDepthTransfer> depthTransfers_;
     std::vector<frontend::FlailerStrip*> retainedStrips_;
-    // Pooled like worldStrips_ (capacity survives completion).
     std::vector<std::unique_ptr<frontend::FlailerPoly>> worldPolygons_;
-    std::size_t liveWorldPolygons_{};
-    frontend::FlailerPoly* TakeWorldPolygon(const frontend::FlailerPoly& polygon);
     // Capacity only survives completion. The next frame overwrites each used
     // group before publication, and no resource borrower lives in these quads.
     std::vector<std::unique_ptr<std::vector<EcstasyParticleQuad>>> particleGroups_;
     std::size_t liveParticleGroups_{};
-    // Capacity survives completion like particleGroups_: each used strip is
-    // overwritten before publication (no per-strip heap churn).
     std::vector<std::unique_ptr<std::vector<frontend::FlailerPolyVertex>>> worldStrips_;
-    std::size_t liveWorldStrips_{};
-    std::vector<frontend::FlailerPolyVertex>* TakeWorldStrip(const frontend::FlailerPolyVertex* vertices,std::size_t count);
     std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>> animatedStrips_;
-    // Released posed strips of this frame object, reused (vector capacity
-    // kept) by the next capture's owner-thread skinning path.
-    std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>> animatedStripPool_;
-    // Released posed strips keyed by their authored source: a reused copy
-    // has matching vector capacities, so reposing never reallocates.
-    std::unordered_map<const EditorMarkerSolidGeometry::Strip*,
-        std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>>> posedStripPool_;
-    std::size_t posedStripPooled_{};
-    std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>> preposedScratch_;
-    std::unique_ptr<EditorMarkerSolidGeometry::Strip> TakePosedStrip(const EditorMarkerSolidGeometry::Strip& source);
-    void ReturnPosedStrip(std::unique_ptr<EditorMarkerSolidGeometry::Strip>& strip) noexcept;
     std::array<EcstasyDepthPalettePass,2> fogPasses_{},focusPasses_{};
     EcstasyFocusSettings focusSettings_{};
     Phase phase_{Phase::Building};
@@ -1316,7 +1179,6 @@ struct FlailerRenderManager;
 struct EcstasySceneCaptureProfile {
     // Setup, background, world, particles, solids, alpha/mirrors, effects, HUD.
     std::array<double,8> milliseconds{};
-    std::array<double,8> discardedMilliseconds{}; // same phases, catch-up captures only
     std::uint64_t emittedCaptures{},discardedCaptures{};
 };
 
@@ -1387,10 +1249,10 @@ struct EcstasyVulkanFrameStatistics {
     EcstasyVulkanRenderProfile renderProfile;
     EcstasyVulkanGpuProfile gpuProfile;
     std::uint64_t submittedFrame{},completedGpuFrame{};
-    std::uint64_t textureVariantHits{},textureValidations{},textureUploads{},textureUploadBytes{},textureStagingAllocations{};
+    std::uint64_t textureValidations{},textureUploads{},textureUploadBytes{},textureStagingAllocations{};
     std::uint64_t pipelineCreations{},pendingPipelineDraws{},drawBatches{},particles{},gpuWorldVertices{};
     std::uint64_t sceneryPipelineHits{};
-    std::uint64_t sceneryPacketHits{},sceneryPacketMisses{},sceneryPacketFallbacks{},solidTemplateHits{};
+    std::uint64_t sceneryPacketHits{},sceneryPacketMisses{},sceneryPacketFallbacks{};
     // Actual CPU budget and distinct threads that recorded draw commands.
     // These are work diagnostics, not an estimate of physical GPU speed.
     std::uint32_t availableCpuThreads{},commandRecordingThreads{},commandRecordingChunks{};
@@ -1404,7 +1266,7 @@ struct EcstasyVulkanFrameStatistics {
     bool reusedPreparation{};
 };
 
-#if defined(HP2_ENABLE_VULKAN) || defined(HP2_ENABLE_VITAGL)
+#ifdef HP2_ENABLE_VULKAN
 // Physical graphics transport in the individually proven EcstasyE.cpp owner.
 // Handles and upload allocations belong to this device; authored resources
 // and gameplay state remain in their existing owners. Zero ELF-body credit.
@@ -1452,14 +1314,6 @@ public:
     EcstasyVulkanDevice(const EcstasyVulkanDevice&)=delete;
     EcstasyVulkanDevice& operator=(const EcstasyVulkanDevice&)=delete;
     void Render(EcstasyFrame& frame);
-#if defined(HP2_ENABLE_VITAGL)
-    // Diagnostic: 0 idle, 1 setup, 2 gather, 3 upload, 100+id pass, 4 swap.
-    static int RenderStage() noexcept;
-#endif
-#if defined(HP2_ENABLE_VITAGL)
-    // Leave the rendered frame Submitted; the host retires it with Complete().
-    void SetDeferredRetire(bool defer) noexcept;
-#endif
     // The host must prove that source/presentation inputs have not advanced.
     // This reuses owned native preparation, then renders and submits a real
     // new GPU frame. It never re-presents an old colour image or advances time.
@@ -1653,14 +1507,10 @@ void graphicsNotifyPresentationComplete() noexcept;
 // source boundary. These are host adaptations, not additional PAL bodies.
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cfenv>
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
-#if defined(__vita__)
-#include <psp2/kernel/threadmgr.h>
-#endif
 #include <cstdint>
 #include <exception>
 #include <limits>
@@ -1740,7 +1590,7 @@ namespace hp2 {
 // affinity restrictions. Work is bounded by this count and the useful jobs,
 // never by a fixed application-wide limit on the number of worker threads.
 unsigned NativeSceneEffectiveHardwareConcurrency() noexcept;
-#if defined(__SWITCH__) || defined(__vita__)
+#ifdef __SWITCH__
 void ConfigureNativeSceneWorker() noexcept;
 #else
 inline void ConfigureNativeSceneWorker() noexcept {}
@@ -1776,49 +1626,16 @@ struct NativeSceneFloatingPointState {
 // drains jobs. A nested dispatch executes inline in its existing worker:
 // it cannot create an oversubscribed per-worker pool or re-enter an active
 // batch. Every worker drains before borrowed scene data can be unwound.
-// Count of condition-variable waits that timed out with their predicate
-// already true (a lost wakeup the timed wait recovered). Diagnostic only.
-inline std::atomic<unsigned> nativeScenePoolRecoveries{0};
-// Timed predicate wait: the Vita pthread condition variable can lose a
-// notification under multi-pool load; re-check every 2 ms instead of hanging.
-template<class Predicate>
-inline void NativeScenePoolWait(std::condition_variable& condition,std::unique_lock<std::mutex>& guard,Predicate predicate) {
-    while(!predicate()) {
-        if(condition.wait_for(guard,std::chrono::milliseconds(2))==std::cv_status::timeout && predicate())
-            nativeScenePoolRecoveries.fetch_add(1,std::memory_order_relaxed);
-    }
-}
-#if defined(__vita__)
-// Vita scene pool claim model (scene_claim_off.txt: 0 = semaphore barrier).
-extern int ecstasySceneClaimPool;
-#endif
 class NativeSceneWorkerPool final {
 public:
-#if defined(__vita__)
-    // Vita: kernel semaphores count signals, so no wakeup can be lost (the
-    // newlib pthread condition variable dropped ~25 per second under two
-    // concurrent pools). Workers take any job token; slots are not fixed.
-    NativeSceneWorkerPool() {
-        wakeSema_=sceKernelCreateSema("hp2_pool_wake",0,0,1<<20,nullptr);
-        doneSema_=sceKernelCreateSema("hp2_pool_done",0,0,1,nullptr);
-    }
-#else
     NativeSceneWorkerPool()=default;
-#endif
     ~NativeSceneWorkerPool() {
         {
             std::lock_guard<std::mutex> guard(mutex_);
             stopping_=true;
         }
-#if defined(__vita__)
-        if(!workers_.empty())sceKernelSignalSema(wakeSema_,static_cast<int>(workers_.size()));
-#else
         wake_.notify_all();
-#endif
         for(auto& worker:workers_)if(worker.joinable())worker.join();
-#if defined(__vita__)
-        sceKernelDeleteSema(wakeSema_);sceKernelDeleteSema(doneSema_);
-#endif
     }
     NativeSceneWorkerPool(const NativeSceneWorkerPool&)=delete;
     NativeSceneWorkerPool& operator=(const NativeSceneWorkerPool&)=delete;
@@ -1840,38 +1657,6 @@ public:
             const auto slot=static_cast<unsigned>(workers_.size());
             workers_.emplace_back([this,slot] { Worker(slot); });
         }
-#if defined(__vita__)
-        if(ecstasySceneClaimPool && count<kClaimClosed) {
-            // Claim model: the caller runs chunks itself and waits only for
-            // chunks already claimed. A worker preempted by the gather/GL
-            // thread before claiming never holds up the batch.
-            function_=[](void* taskContext,std::size_t index) {
-                (*static_cast<Task*>(taskContext))(index);
-            };
-            context_=&task;
-            floatingPoint_.Capture();
-            size_=count;
-            const auto shares=static_cast<std::size_t>(workers)*8;
-            chunk_=std::max<std::size_t>(1,std::min<std::size_t>(32,count/shares+(count%shares!=0)));
-            canceled_.store(false,std::memory_order_relaxed);
-            failure_=nullptr;
-            claimGeneration_=(claimGeneration_+1)&0xfffu;
-            claimState_.store(claimGeneration_<<20);
-            const unsigned wake=std::min<unsigned>(workers-1,static_cast<unsigned>(workers_.size()));
-            if(wake)sceKernelSignalSema(wakeSema_,static_cast<int>(wake));
-            ExecuteClaims(claimGeneration_,false);
-            claimState_.store((claimGeneration_<<20)|kClaimClosed);
-            while(claimInFlight_.load()!=0) {}
-            std::exception_ptr failure;
-            {
-                std::lock_guard<std::mutex> guard(mutex_);
-                failure=failure_;
-            }
-            function_=nullptr;context_=nullptr;
-            if(failure)std::rethrow_exception(failure);
-            return;
-        }
-#endif
         {
             std::lock_guard<std::mutex> guard(mutex_);
             function_=[](void* taskContext,std::size_t index) {
@@ -1889,18 +1674,12 @@ public:
             remaining_=active_;
             ++generation_;
         }
-#if defined(__vita__)
-        if(active_)sceKernelSignalSema(wakeSema_,static_cast<int>(active_));
-        Execute();
-        if(active_)sceKernelWaitSema(doneSema_,1,nullptr);
-#else
         wake_.notify_all();
         Execute();
-#endif
         std::exception_ptr failure;
         {
             std::unique_lock<std::mutex> guard(mutex_);
-            NativeScenePoolWait(completed_,guard,[this] {return remaining_==0;});
+            completed_.wait(guard,[this] {return remaining_==0;});
             failure=failure_;
             function_=nullptr;
             context_=nullptr;
@@ -1908,55 +1687,6 @@ public:
         if(failure)std::rethrow_exception(failure);
     }
 private:
-#if defined(__vita__)
-    static constexpr std::uint32_t kClaimClosed=0xfffffu;
-    bool ClaimChunk(std::uint32_t generation,std::size_t& first,std::size_t& last) noexcept {
-        std::uint32_t state=claimState_.load();
-        for(;;) {
-            if((state>>20)!=generation || (state&kClaimClosed)==kClaimClosed)return false;
-            const std::size_t next=state&kClaimClosed;
-            if(next>=size_ || canceled_.load(std::memory_order_relaxed))return false;
-            const std::size_t end=next+std::min(chunk_,size_-next);
-            if(claimState_.compare_exchange_weak(state,(generation<<20)|static_cast<std::uint32_t>(end))) {
-                first=next;last=end;return true;
-            }
-        }
-    }
-    // Runs chunks of the given generation until none are left. Workers
-    // (helper=true) run at a raised priority only while they hold work.
-    void ExecuteClaims(std::uint32_t generation,bool helper) noexcept {
-        std::size_t first,last;
-        if(!ClaimChunk(generation,first,last))return;
-        const int idlePriority=helper ? sceKernelGetThreadCurrentPriority():0;
-        if(helper)(void)sceKernelChangeThreadPriority(0,110);
-        {
-            struct ExecutionScope {
-                bool previous{NativeSceneExecutingJobs()};
-                NativeSceneFloatingPointState previousFloatingPoint;
-                explicit ExecutionScope(const NativeSceneFloatingPointState& floatingPoint) {
-                    NativeSceneExecutingJobs()=true;
-                    floatingPoint.Apply();
-                }
-                ~ExecutionScope() {
-                    previousFloatingPoint.Apply();
-                    NativeSceneExecutingJobs()=previous;
-                }
-            } execution(floatingPoint_);
-            try {
-                do {
-                    for(auto index=first;index<last;++index)function_(context_,index);
-                } while(ClaimChunk(generation,first,last));
-            } catch(...) {
-                {
-                    std::lock_guard<std::mutex> guard(mutex_);
-                    if(!failure_)failure_=std::current_exception();
-                }
-                canceled_.store(true,std::memory_order_release);
-            }
-        }
-        if(helper)(void)sceKernelChangeThreadPriority(0,idlePriority);
-    }
-#endif
     void Execute() noexcept {
         struct ExecutionScope {
             bool previous{NativeSceneExecutingJobs()};
@@ -1990,35 +1720,12 @@ private:
     }
     void Worker(unsigned slot) noexcept {
         ConfigureNativeSceneWorker();
-#if defined(__vita__)
-        (void)slot;
-        for(;;) {
-            sceKernelWaitSema(wakeSema_,1,nullptr);
-            {
-                std::lock_guard<std::mutex> guard(mutex_);
-                if(stopping_)return;
-            }
-            if(ecstasySceneClaimPool) {
-                claimInFlight_.fetch_add(1);
-                ExecuteClaims(claimState_.load()>>20,true);
-                claimInFlight_.fetch_sub(1);
-                continue;
-            }
-            Execute();
-            bool last;
-            {
-                std::lock_guard<std::mutex> guard(mutex_);
-                last=--remaining_==0;
-            }
-            if(last)sceKernelSignalSema(doneSema_,1);
-        }
-#endif
         std::size_t seen=0;
         for(;;) {
             bool assigned=false;
             {
                 std::unique_lock<std::mutex> guard(mutex_);
-                NativeScenePoolWait(wake_,guard,[this,&seen] {return stopping_ || generation_!=seen;});
+                wake_.wait(guard,[this,&seen] {return stopping_ || generation_!=seen;});
                 if(stopping_)return;
                 seen=generation_;
                 assigned=slot<active_;
@@ -2033,12 +1740,6 @@ private:
     }
     std::mutex mutex_;
     std::condition_variable wake_,completed_;
-#if defined(__vita__)
-    SceUID wakeSema_{-1},doneSema_{-1};
-    std::atomic<std::uint32_t> claimState_{kClaimClosed};
-    std::atomic<unsigned> claimInFlight_{0};
-    std::uint32_t claimGeneration_{};
-#endif
     std::vector<std::thread> workers_;
     void (*function_)(void*,std::size_t){};
     void* context_{};
@@ -2060,41 +1761,11 @@ inline NativeSceneWorkerPool& NativeSceneThreadPool() {
 // workers only fill separate output slots; the main thread joins them before
 // it copies shared vertices or uploads. On one core/small scenes, no native
 // thread pool is constructed and there are no locks/condition variables.
-// Vita diagnostic (scene_jobs_serial.txt): run every scene job inline.
-extern int ecstasySceneJobsSerial;
-// Sampled scenery emit split (diagnostic): RenderOpaqueSceneryBatch adds
-// prepare / capture / emit ms here while the caller has sampling enabled.
-inline bool ecstasyEmitSampling=false;
-// Sampled emit census: runs, run-box tests, strip tests, commands, culled models.
-inline std::array<std::uint64_t,5> ecstasyEmitCounters{};
-// Diagnostic-only cost bounds (Vita diag_nocars.txt / diag_noscenery.txt):
-// skip car / scenery rendering entirely. Never set by default.
-inline bool ecstasyDiagSkipCars=false,ecstasyDiagSkipScenery=false;
-// Diagnostic (Vita emit_twice.txt): repeat each main-view scenery emit loop
-// once (discarded) and time both passes: cold vs warm caches.
-inline bool ecstasyDiagEmitTwice=false;
-inline std::array<std::uint64_t,3> ecstasyDiagEmitTwiceMicros{}; // first, second, views
-inline std::array<std::uint64_t,10> ecstasyDiagEmitAblation{}; // micros[5], views[5]
-// Diagnostic census of car-part strips (PC HP2_CAR_CENSUS=1): renders,
-// models, strips, depth-sorted, 0x40 specular, 0x100 reflection, clip1,
-// boned strips, run breaks (state change between consecutive strips).
-inline bool ecstasyCarCensusActive=false;
-// Car-scope RenderModel split (timed builds): visible, instance+projection,
-// strip capture, calls, strips, commands.
-inline bool ecstasyCarScope=false;
-// Model strip runs: consecutive same-state strips of one RenderModel call
-// share one command (sceneryRunCount over SceneryRunStrips) instead of one
-// command per strip. 0 = per-strip commands (Vita model_runs_off.txt).
-extern int ecstasyModelRuns;
-inline std::array<std::uint64_t,6> ecstasyModelSplitMicros{};
-inline std::array<std::uint64_t,9> ecstasyCarCensus{};
-inline std::array<double,3> ecstasyEmitSampleMs{};
 template<class Task>
 void RunNativeSceneJobs(std::size_t count,Task&& task,
-    std::size_t minimumParallelJobs=512,unsigned requestedWorkers=0,bool ignoreSerial=false)
+    std::size_t minimumParallelJobs=512,unsigned requestedWorkers=0)
 {
     if(!count)return;
-    if(ecstasySceneJobsSerial && !ignoreSerial) {for(std::size_t index=0;index<count;++index)task(index);return;}
     const unsigned effective=NativeSceneEffectiveHardwareConcurrency();
     const unsigned budget=requestedWorkers ? std::min(effective,requestedWorkers):effective;
     const unsigned workers=static_cast<unsigned>(std::min<std::size_t>(count,std::max(1u,budget)));

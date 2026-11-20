@@ -1,5 +1,4 @@
 #include "indep/inc/Collision.hpp"
-#include <array>
 #include "indep/inc/Contact.hpp"
 #include "indep/inc/VoronoiClip.hpp"
 #include "indep/inc/Smokeable.hpp"
@@ -9,9 +8,6 @@
 #include "indep/inc/World.hpp"
 #include "indep/inc/CarDriver.hpp"
 #include "indep/inc/Player.hpp"
-std::array<double,4> worldCollisionSubPhaseMs{};
-// Diagnostic split of collisionSystemStep: obsolete+find, queue, resolve loop, tail.
-std::array<double,4> worldCollisionSolveMs{};
 #include "indep/inc/World.hpp"
 #include "indep/inc/RaceCoordinator.hpp"
 #include "indep/inc/Race.hpp"
@@ -353,28 +349,15 @@ WorldSimulationResult worldDoTimestep(WorldSimulation* simulation, float elapsed
         return simulation->result = WORLD_SIMULATION_COLLISION_FAILURE;
 
     finishPhase(&WorldStepProfile::driveMs);
-    // Collision sub-phases (diagnostic): pre-step, participants, solve, post-step.
-    auto subStart=profile?ProfileClock::now():ProfileClock::time_point{};
-    const auto subPhase=[&](int index) {
-        if(!profile)return;
-        const auto now=ProfileClock::now();
-        worldCollisionSubPhaseMs[index]+=std::chrono::duration<double,std::milli>(now-subStart).count();
-        subStart=now;
-    };
     for (int32_t index = 0; index < world->totalCars; ++index)
         if (carFramePreStep(simulation->frames[index], elapsed) != CAR_FRAME_OK)
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
-    subPhase(0);
-    if (worldServicesAdvanceParticipants(collisions, elapsed) != COLLISION_SYSTEM_OK)
+    if (worldServicesAdvanceParticipants(collisions, elapsed) != COLLISION_SYSTEM_OK ||
+        collisionSystemStep(collisions, elapsed) != COLLISION_SYSTEM_OK)
         return simulation->result = WORLD_SIMULATION_COLLISION_FAILURE;
-    subPhase(1);
-    if (collisionSystemStep(collisions, elapsed) != COLLISION_SYSTEM_OK)
-        return simulation->result = WORLD_SIMULATION_COLLISION_FAILURE;
-    subPhase(2);
     for (int32_t index = 0; index < world->totalCars; ++index)
         if (carFramePostStep(simulation->frames[index], elapsed) != CAR_FRAME_OK)
             return worldSimulationFailCar(simulation, index, WORLD_SIMULATION_FRAME_FAILURE);
-    subPhase(3);
     finishPhase(&WorldStepProfile::collisionMs);
 
     const auto effectsStart=phaseStart;
@@ -653,7 +636,6 @@ uint16_t worldCalculateDebugChecksum(World* world, uint32_t seed,
     return (uint16_t)(checksum + (checksum >> 16));
 }
 
-void collisionSpeculationArm(int on);
 CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed)
 {
     (void)elapsed;
@@ -665,29 +647,13 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         if (collisionPairObsolete(system,pair)) collisionPairDestroy(system,pair);
         pair=next;
     }
-    // Speculative witness helpers poll only for the duration of the solve.
-    struct SpeculationScope {
-        SpeculationScope() {collisionSpeculationArm(1);}
-        ~SpeculationScope() {collisionSpeculationArm(0);}
-    } speculationScope;
-    using SolveClock=std::chrono::steady_clock;
-    auto solveMark=SolveClock::now();
-    const auto solvePhase=[&](int index) {
-        const auto now=SolveClock::now();
-        worldCollisionSolveMs[index]+=std::chrono::duration<double,std::milli>(now-solveMark).count();
-        solveMark=now;
-    };
     for (CollisionShape* shape=system->space->root.next;shape!=&system->space->root;shape=shape->next)
         if (shape->active && shape->dirty) collisionSystemFindPairs(system,system->participants[shape->id]);
-    solvePhase(0);
-    collisionPairPredictQueue(system);
     for (pair=system->pairRoot.next;pair!=&system->pairRoot;pair=pair->next) {
         pair->processedCount=0;
         collisionPairQueueContact(system,pair);
-        if (system->result!=COLLISION_SYSTEM_OK) {collisionPairPredictQueueEnd(system);return system->result;}
+        if (system->result!=COLLISION_SYSTEM_OK) return system->result;
     }
-    collisionPairPredictQueueEnd(system);
-    solvePhase(1);
     system->responseIterations=0;
     while (system->contactRoot.next!=&system->contactRoot && system->responseIterations<20) {
         CollisionQueuedContact* contact=system->contactRoot.next;
@@ -710,17 +676,14 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         }
         ++system->responseIterations;
         for (size_t index=0;index<affectedCount;++index) collisionSystemFindPairs(system,affected[index]);
-        if (affectedCount) collisionPairPredictQueue(system,affected,affectedCount);
         for (pair=system->pairRoot.next;pair!=&system->pairRoot;pair=pair->next)
             if (pair->processedCount<2)
                 for (size_t index=0;index<affectedCount;++index)
                     if (pair->first==affected[index] || pair->second==affected[index]) {
                         collisionPairQueueContact(system,pair);
                     }
-        collisionPairPredictQueueEnd(system);
         if (system->result!=COLLISION_SYSTEM_OK) return system->result;
     }
-    solvePhase(2);
     while (system->contactRoot.next!=&system->contactRoot) collisionSystemDetachContact(system->contactRoot.next);
     // PAL14DC58..14DC8C traverses the live collision list, including
     // expanded pool blocks. Save next before the actual destructor unlinks.
@@ -731,7 +694,6 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         if (!((float)ticks*0.0002500000118743628f<0.3f)) collisionSystemRemoveImpact(system,impact->pair);
         impact=next;
     }
-    solvePhase(3);
     return system->result;
 }
 
