@@ -76,9 +76,9 @@ void collisionWitnessBenchRecord(const CollisionWitness* witness,const float fir
     const float secondFrame[16],const float secondPosition[4],uint32_t state);
 int collisionSeparatePipelined=1; // pipelined separation (Vita sep_pipe_off.txt: 0)
 uint64_t collisionSpeculationVerifyBudget=0;
+void collisionWitnessMemoBypass(bool bypass); // voronoiclip.cpp
 #if !defined(__vita__)
 #include <stdlib.h>
-void collisionWitnessMemoBypass(bool bypass); // voronoiclip.cpp
 // PC: HP2_COLLISION_SPEC="<mode> [verify budget]".
 static const int collisionSpeculationEnvironment=[] {
     if (const char* value=getenv("HP2_COLLISION_SPEC")) {
