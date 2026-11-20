@@ -320,9 +320,6 @@ public:
     WorldAudioInstance* SampleAt(size_t index) noexcept;
     const WorldAudioInstance* SampleAt(size_t index) const noexcept;
     bool OwnsSample(const WorldAudioInstance* sample) const noexcept;
-    // True when any stored sample is occupied with this retiring state
-    // (direct block walk; same slots SampleAt(0..SampleCapacity()) yields).
-    bool AnySampleRetiring(int32_t state) const noexcept;
     WorldAudioResult ExpandSampleStorage();
     bVoiceMgr& Voices() noexcept { return voices_; }
     const bVoiceMgr& Voices() const noexcept { return voices_; }

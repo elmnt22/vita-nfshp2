@@ -286,6 +286,10 @@ typedef struct WorldAudioRequestQueue {
      * host to steady_clock preserves elapsed time through this translation. */
     uint64_t nativeClockOrigin;
     uint64_t nativeClockOffset;
+    /* Native scan hint: nonzero once worldAudioRetireVoice parks a sample at
+     * retiring==2 (its only producer); cleared by a completed STOP scan
+     * that leaves none. Zero lets an acknowledgement skip that scan. */
+    int32_t retiringStopPending;
 } WorldAudioRequestQueue;
 
 /* These native registry helpers retain pointer identity across original
