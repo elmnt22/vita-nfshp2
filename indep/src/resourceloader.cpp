@@ -63,7 +63,7 @@ void logResourceEvent(const char* event,const std::string& filename,ResourceFile
     char detail[1792]{};
     char pendingText[32]{};
     if (pending==std::numeric_limits<std::size_t>::max())std::snprintf(pendingText,sizeof(pendingText),"unknown");
-    else std::snprintf(pendingText,sizeof(pendingText),"%" HP2_ZU "",pending);
+    else std::snprintf(pendingText,sizeof(pendingText),"%zu",pending);
     std::snprintf(detail,sizeof(detail),
         "file=\"%.650s\" kind=%s type=%d flags=0x%X request=%d bytes=%llu pending=%s elapsed_ms=%.3f error=\"%.700s\"",
         filename.c_str(),resourceKindName(kind),type,static_cast<unsigned>(flags),request,
@@ -514,7 +514,6 @@ std::size_t ResourceLoader::ServiceResourceLoading()
         if (file.transfersPending)return service.pendingFiles;
         const auto began=std::chrono::steady_clock::now();
         std::size_t decodedBytes=file.data.size();
-        NativeDrainRendering();
         logResourceEvent("resource.decode.begin",file.filename,file.bindings.kind,file.type,file.flags,
             0,decodedBytes,service.pendingFiles);
         try {
@@ -748,7 +747,6 @@ void ResourceLoader::RetireResourceFile(ResourceFile* file,bool terminal)
         service.queued.CancelAndWait(data.queuedId);data.queuedId=0;data.transfersPending=0;
     }
     Require(!data.queuedId && !data.transfersPending,"ResourceFile cannot retire an outstanding physical write");
-    NativeDrainRendering();
     logResourceEvent("resource.unload.begin",data.filename,data.bindings.kind,data.type,data.flags,
         0,data.physical.range.Size(),service.pendingFiles);
     data.animationData.reset();

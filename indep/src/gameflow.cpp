@@ -122,7 +122,6 @@ bool FrontendBound(const GameFlowBindings& bindings)
 }
 bool RenderingPending(const GameFlowBindings& bindings)
 {
-    NativeDrainRendering();
     return bindings.ui->resources->StripPool().HasPendingSubmissions() ||
         (bindings.renderFrame->State()!=EcstasyFrame::Phase::Complete &&
             !bindings.renderFrame->Commands().empty());

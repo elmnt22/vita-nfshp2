@@ -1,5 +1,3 @@
-#include <chrono>
-#include <array>
 #include "indep/inc/PhysicsCar.hpp"
 #include "indep/inc/CopDriver.hpp"
 #include "indep/inc/AICarController.hpp"
@@ -1735,20 +1733,7 @@ static int32_t tickDifference(int32_t now, int32_t start)
     return result;
 }
 
-// Diagnostic: per-mover-mode capture cost (logged with render.collision_window).
-std::array<double,8> carMoverModeMs{};
-std::array<std::uint32_t,8> carMoverModeCalls{};
-static float carMovementCaptureBody(CarMovement* movement, float elapsed);
 float carMovementCapture(CarMovement* movement, float elapsed)
-{
-    const auto started=std::chrono::steady_clock::now();
-    const auto mode=static_cast<std::size_t>(movement->mode)&7u;
-    const float advanced=carMovementCaptureBody(movement,elapsed);
-    carMoverModeMs[mode]+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
-    ++carMoverModeCalls[mode];
-    return advanced;
-}
-static float carMovementCaptureBody(CarMovement* movement, float elapsed)
 {
     if (movement->result != CAR_MOVEMENT_OK) return 0.0f;
     carMovementUpdateRacePerformance(movement);

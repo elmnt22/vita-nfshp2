@@ -5,8 +5,6 @@
 #include "indep/inc/NativePipelineCache.hpp"
 #if defined(_M_X64) || defined(__SSE2__)
 #include <xmmintrin.h>
-#elif defined(__ARM_NEON)
-#include <arm_neon.h>
 #endif
 
 #include "CameraMover.hpp"
@@ -39,9 +37,6 @@
 #include "bware/inc/bMath.hpp"
 #include <cstring>
 #include <algorithm>
-#ifdef __vita__
-#include <psp2/kernel/threadmgr.h>
-#endif
 #ifdef __SWITCH__
 #include <switch.h>
 #include "src/nx/controller_art.hpp"
@@ -51,18 +46,12 @@
 #include <vector>
 #include <atomic>
 #include <exception>
-#include <thread>
 #include <cstdio>
 #include <sstream>
 #include <iterator>
 #include <list>
 #include <memory_resource>
 #include <type_traits>
-#include <cstddef>
-unsigned collisionHelperPoolSize();
-void collisionHelperPublish(unsigned count,void (*function)(void*,unsigned),void* context);
-bool collisionHelperClaim(unsigned& index);
-void collisionHelperClose();
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -91,39 +80,6 @@ EditorMarkerTexture* findModelTexture(EditorMarkerResources* root,uint32_t key)
 }
 }
 
-extern uint32_t (*collisionWitnessClockMicros)();
-// Diagnostic: serial skinned strips copy/skin/capture us, [3] strips, [4] vertices.
-#include "bware/inc/bMathNeon.hpp"
-extern int bMatrixNeonEnabled;
-namespace hp2 {std::array<std::uint64_t,5> ecstasySkinSplitMicros{};
-// RenderModel parallel strip capture threshold (exact either way; PC
-// HP2_PARALLEL_MODEL_STRIPS, Vita model_par<N>.txt).
-int ecstasyParallelModelStrips=[] {
-#if !defined(__vita__)
-    if(const char* value=std::getenv("HP2_PARALLEL_MODEL_STRIPS"))return std::max(1,std::atoi(value));
-#endif
-    return 512;
-}();
-// Posed (skinned) models: parallel from this many strips; 0 = old threshold
-// only (PC HP2_PARALLEL_SKIN_STRIPS, Vita skin_serial.txt).
-// vitaGL (user-approved look change 2026-11-19): draw runs of smoke/dust
-// particle batches on the main screen into a half-resolution buffer with a
-// manual scene-depth test, then composite (default off: costs ~2 fps until the display render target allows 2 scenes; Vita halfres_on.txt).
-int ecstasyHalfResParticles=0;
-int ecstasyHalfResHardwareDepth=1; // Vita halfres_discard.txt: 0 (per-fragment depth-texture discard)
-int ecstasyHalfResSkipAlphaTest=1; // Vita halfres_atest.txt: 0 (keep the redundant discard)
-// Splitting the display scene stores+reloads colour and depth (~4 ms), so the
-// half pass is used only on frames with heavy particle fill (screens covered).
-double ecstasyHalfResMinScreens=6.0;
-double ecstasyQuarterResMinScreens=40.0; // 0 disables (Vita quarterres_off.txt)
-int ecstasyHalfResSync=0,ecstasyHalfResDepthFlip=0,ecstasyHalfResCompositeFlip=0; // orientation (Vita halfres_dflip/_cflip.txt)
-std::vector<std::uint64_t> ecstasyScreenshotFrames,ecstasyDisplayShotFrames; // Vita dshots.txt: on-screen copies         // Vita shots.txt: frame numbers to save
-int ecstasyParallelSkinStrips=[] {
-#if !defined(__vita__)
-    if(const char* value=std::getenv("HP2_PARALLEL_SKIN_STRIPS"))return std::max(0,std::atoi(value));
-#endif
-    return 16;
-}();}
 namespace hp2 {
 unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
 {
@@ -176,10 +132,6 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
         return std::max(1u,std::thread::hardware_concurrency());
     }();
     return cores;
-#elif defined(__vita__)
-    // Cores 0-2 are user cores (core 3 belongs to the system). Main thread
-    // stays on core 0; scene workers float on cores 1-2.
-    return 3u;
 #elif defined(__linux__)
     cpu_set_t allowed;
     CPU_ZERO(&allowed);
@@ -193,17 +145,6 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
     return std::max(1u,std::thread::hardware_concurrency());
 }
 
-#ifdef __vita__
-// Scene jobs are short owner-blocking bursts (the caller waits for them), so
-// they may preempt the long-running gather/GL threads on cores 1-2.
-int ecstasySceneWorkerPriority=0; // 0 keeps the default priority
-int ecstasySceneClaimPool=1;
-void ConfigureNativeSceneWorker() noexcept
-{
-    (void)sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_1|SCE_KERNEL_CPU_MASK_USER_2);
-    if(ecstasySceneWorkerPriority)(void)sceKernelChangeThreadPriority(0,ecstasySceneWorkerPriority);
-}
-#endif
 #ifdef __SWITCH__
 void ConfigureNativeSceneWorker() noexcept
 {
@@ -876,13 +817,7 @@ void ecstasyViewsApplyMode(CarCinematicServices* services)
     auto& firstAux=one.auxiliaryTarget ? *one.auxiliaryTarget:first;
     auto& secondAux=two.auxiliaryTarget ? *two.auxiliaryTarget:second;
     const auto width=services->screens[0].target->width,height=services->screens[0].target->height;
-    // A pipelined host may still be drawing the previous frame from these
-    // targets: drain it before the first rectangle that actually changes.
-    bool drained=false;
-    const auto rectangle=[&drained](EcstasyRenderTarget& target,int32_t left,int32_t top,int32_t w,int32_t h) {
-        if(!drained && (target.left!=left || target.top!=top || target.width!=w || target.height!=h)) {
-            hp2::NativeDrainRendering();drained=true;
-        }
+    const auto rectangle=[](EcstasyRenderTarget& target,int32_t left,int32_t top,int32_t w,int32_t h) {
         target.left=left;target.top=top;target.width=w;target.height=h;
     };
     switch(services->appliedPresentationLayout) {
@@ -1329,48 +1264,6 @@ int32_t ecstasyClassifyBounds(const float minimum[3],const float maximum[3],cons
         if(any && !common)return 1;
     }
     return any==0 ? 2:common==0 ? 1:0;
-#elif defined(__ARM_NEON)
-    // Same lanes and rounding as the x64 path: separate multiply/add (no
-    // fused ops), base + X/Y/Z edge order, |W| limits per corner.
-    const auto mx=vld1q_f32(matrix),my=vld1q_f32(matrix+4),mz=vld1q_f32(matrix+8);
-    // Bounds load straight into NEON lanes: scalar operands would each take
-    // a VFP->ARM->NEON round trip (a pipeline stall on the Cortex-A9). The
-    // NEON subtractions round exactly as the scalar ones (RN, flush-to-zero).
-    const auto lowXY=vld1_f32(minimum),lowZ=vld1_dup_f32(minimum+2);
-    const auto sizeXY=vsub_f32(vld1_f32(maximum),lowXY),sizeZ=vsub_f32(vld1_dup_f32(maximum+2),lowZ);
-    const auto first=vaddq_f32(vmulq_lane_f32(mx,lowXY,0),vmulq_lane_f32(my,lowXY,1));
-    const auto base=vaddq_f32(vaddq_f32(first,vmulq_lane_f32(mz,lowZ,0)),vld1q_f32(matrix+12));
-    const auto xStep=vmulq_lane_f32(mx,sizeXY,0);
-    const auto yStep=vmulq_lane_f32(my,sizeXY,1);
-    const auto zStep=vmulq_lane_f32(mz,sizeZ,0);
-    const float32x4_t corners[4]={base,vaddq_f32(base,xStep),
-        vaddq_f32(vaddq_f32(base,xStep),yStep),vaddq_f32(base,yStep)};
-    static const uint32x4_t positiveBits={1u,4u,16u,0u},negativeBits={2u,8u,32u,0u};
-    // All eight corners stay in NEON registers: per-corner NEON->ARM lane
-    // moves stall the Cortex-A9 pipeline. 'any' only gains bits and
-    // 'common' only loses them, so the source early exit (any && !common)
-    // cannot change the final classification; reduce once at the end.
-    uint32x4_t anyBits=vdupq_n_u32(0),commonBits=vdupq_n_u32(63u);
-    for(int layer=0;layer<2;++layer)for(int corner=0;corner<4;++corner) {
-        const auto point=layer ? vaddq_f32(corners[corner],zStep):corners[corner];
-        const auto limit=vabsq_f32(vdupq_lane_f32(vget_high_f32(point),1));
-        // GCC 15 lowers vcgtq/vcltq_f32 and vnegq_f32 to generic vector
-        // compares, which (without -ffast-math) it scalarizes into eight
-        // vcmpe+vmrs sequences through the stack (~2.9 us per call). Issue
-        // the NEON compares directly; -|W| is the exact sign-bit flip.
-        const auto negativeLimit=vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(limit),vdupq_n_u32(0x80000000u)));
-        uint32x4_t above,below;
-        __asm__("vcgt.f32 %q0, %q1, %q2":"=w"(above):"w"(point),"w"(limit));
-        __asm__("vcgt.f32 %q0, %q1, %q2":"=w"(below):"w"(negativeLimit),"w"(point));
-        const auto bits=vorrq_u32(vandq_u32(above,positiveBits),vandq_u32(below,negativeBits));
-        // Fold the three component lanes into every lane of 'flags'.
-        const auto lanes=vorr_u32(vget_low_u32(bits),vget_high_u32(bits));
-        const auto folded=vorr_u32(lanes,vrev64_u32(lanes));
-        const auto flags=vcombine_u32(folded,folded);
-        anyBits=vorrq_u32(anyBits,flags);commonBits=vandq_u32(commonBits,flags);
-    }
-    const std::uint32_t any=vgetq_lane_u32(anyBits,0),common=vgetq_lane_u32(commonBits,0);
-    return any==0 ? 2:common==0 ? 1:0;
 #else
     float base[4],xStep[4],yStep[4],zStep[4];
     const float x=maximum[0]-minimum[0],y=maximum[1]-minimum[1],z=maximum[2]-minimum[2];
@@ -1454,16 +1347,8 @@ void classifyStrips(std::vector<EcstasyVisibleStrip>& output,const EditorMarkerM
     // The final loop never assigns its previous-class register after
     // resetting it to-1. Preserve every original one-strip run and its
     // index order; only the independent bound/cone calculations run apart.
-    if(strips.size()<512 || hp2::NativeSceneEffectiveHardwareConcurrency()<2 || hp2::ecstasySceneJobsSerial) {
+    if(strips.size()<512 || hp2::NativeSceneEffectiveHardwareConcurrency()<2) {
         for(std::size_t index=0;index<strips.size();++index) {
-#if defined(__GNUC__)
-            // Strip headers are ~200 bytes apart: request the bounds/cone
-            // fields a few strips ahead (Vita RAM is latency bound).
-            if(index+3<strips.size()) {
-                const auto* ahead=reinterpret_cast<const char*>(&strips[index+3]);
-                __builtin_prefetch(ahead);__builtin_prefetch(ahead+32);
-            }
-#endif
             const auto classification=classify(index);
             if(classification)output.push_back({index,1,classification});
         }
@@ -1959,23 +1844,14 @@ void EcstasyFrame::AdvanceTextureAnimationsAfterCompletion(ResourceRegistry& res
 EcstasyFrame::EcstasyFrame()=default;
 
 const EcstasyDrawInstance& EcstasyFrame::CaptureInstance(const float localToWorld[16],
-    const CarCinematicScreen& view,const SceneLightContext* lightContext,std::uint64_t lightKey)
+    const CarCinematicScreen& view,const SceneLightContext* lightContext)
 {
     Require(phase_==Phase::Building && localToWorld && view.matricesCalculated,"Draw instance lost its active capture, transform or projection");
     if(liveInstances_==capturedInstances_.size())capturedInstances_.emplace_back();
     auto& instance=capturedInstances_[liveInstances_];
     eMulMatrix(instance.localToClip.data(),localToWorld,view.matrices.worldToClip);
-    instance.sharedLightContext=nullptr;
-    if(!lightContext)instance.lightContext.reset();
-    else if(lastLightContext_ && ((lightKey && lightKey==lastLightKey_) || lastLightContext_==lightContext ||
-        std::memcmp(lastLightContext_,lightContext,sizeof(SceneLightContext))==0)) {
-        // A matching key: these contents were compared/copied into
-        // *lastLightContext_ and neither has changed (the memcmp is equal).
-        instance.lightContext.reset();instance.sharedLightContext=lastLightContext_;
-        lastLightKey_=lightKey;
-    } else {
-        instance.lightContext=*lightContext;lastLightContext_=&*instance.lightContext;lastLightKey_=lightKey;
-    }
+    if(lightContext)instance.lightContext=*lightContext;
+    else instance.lightContext.reset();
     ++liveInstances_;
     return instance;
 }
@@ -2050,11 +1926,12 @@ void EcstasyFrame::RenderTargetStrip(const std::vector<frontend::FlailerPolyVert
     Require(phase_==Phase::Building && vertices.size()>=4 && vertices.size()<=128 && vertices.size()%2==0 && source.enabled && destination.enabled &&
         source.id>=8 && source.id<=13 && destination.id==14,
         "Environment remap strip has no original source/destination target");
+    auto owned=std::make_unique<std::vector<frontend::FlailerPolyVertex>>(vertices);
     EcstasyDrawCommand command;command.kind=EcstasyDrawKind::RenderTargetStrip;
-    command.target=&destination;command.sampledTarget=&source;
+    command.worldStrip=owned.get();command.target=&destination;command.sampledTarget=&source;
     command.zWriteEnabled=false;command.rasterState={{0x01000100u,0,0,0}};
-    command.worldStrip=TakeWorldStrip(vertices.data(),vertices.size());
-    try {commands_.push_back(command);}catch(...) {--liveWorldStrips_;throw;}
+    worldStrips_.push_back(std::move(owned));
+    try {commands_.push_back(command);}catch(...) {worldStrips_.pop_back();throw;}
     environmentUpdated_=true;
 }
 EcstasyFrame::~EcstasyFrame()
@@ -2195,17 +2072,9 @@ void EcstasyFrame::AddPolygon(const frontend::FlailerPoly& polygon,
     commands_.push_back(command);
 }
 
-// Diagnostic: solid flush cost (logged with render.capture_detail).
-double ecstasyAttachSolidMs=0;
-std::array<double,5> ecstasyAttachSolidPartMs{};
-std::uint64_t ecstasyAttachSolidCalls=0,ecstasyAttachSolidCommands=0;
-#if !defined(__vita__)
-namespace {
-// HP2_VERIFY_ATTACH=1 (PC): rerun the previous two-move implementation on
-// a copy of every flush and require the identical command bytes.
-static void ReferenceAttachSolidPolys(std::vector<EcstasyDrawCommand>& commands_,std::size_t& pendingAlphaBegin_,std::vector<EcstasyDrawCommand>& pendingAlphaCommands_)
+void EcstasyFrame::AttachSolidPolys()
 {
-    const auto attachStarted=std::chrono::steady_clock::now();
+    Require(phase_==Phase::Building,"Cannot attach solid lists in a sealed graphics frame");
     // PAL10BB20 walks only the solid texture chains. The alpha arena/list
     // survives this call, including the two display calls1134A4/1135B8
     // between scenery/particles, environment remap and the later cars.
@@ -2222,13 +2091,6 @@ static void ReferenceAttachSolidPolys(std::vector<EcstasyDrawCommand>& commands_
         }
     }
     commands_.resize(output);
-    auto partMark=attachStarted;
-    const auto part=[&](int index) {
-        const auto now=std::chrono::steady_clock::now();
-        (void)index;
-        partMark=now;
-    };
-    part(0);
     if(output==pendingAlphaBegin_)return;
     // AddTexturesSorted PAL109358..109488 groups the first-use texture
     // list into priorities0..7. Linked textures insert immediately after
@@ -2259,13 +2121,6 @@ static void ReferenceAttachSolidPolys(std::vector<EcstasyDrawCommand>& commands_
     std::pmr::vector<std::size_t> next(output-pendingAlphaBegin_,noCommand,&scratch);
     std::pmr::vector<TextureChain> chains{&scratch};
     std::pmr::map<std::pair<const TextureInfo*,const EcstasyRenderTarget*>,std::size_t> active{&scratch};
-    // Generation-tagged so the table needs no clearing per flush.
-    struct ChainSlot {const TextureInfo* texture{};const EcstasyRenderTarget* sampled{};std::size_t chain{};std::uint32_t generation{};};
-    static thread_local std::array<ChainSlot,1024> chainTable{};
-    static thread_local std::uint32_t chainGeneration=0;
-    if(++chainGeneration==0) {for(auto& slot:chainTable)slot.generation=0;chainGeneration=1;}
-    const auto generation=chainGeneration;
-    std::size_t chainTableUsed=0;
     // Source strips and their material passes frequently keep the same
     // ordering texture. This lookup is local to this exact solid flush;
     // only an already-created chain index is reused, never its draw order.
@@ -2280,33 +2135,13 @@ static void ReferenceAttachSolidPolys(std::vector<EcstasyDrawCommand>& commands_
             "Solid texture chain lost its original image or target");
         std::size_t chainIndex=previousChain;
         if(previousChain==noCommand || texture!=previousTexture || sampled!=previousSampled) {
-            // Open-addressed front (chain creation order is unchanged); the
-            // ordered map only takes over if this flush exceeds the table.
-            const auto identity=reinterpret_cast<std::uintptr_t>(texture)^(reinterpret_cast<std::uintptr_t>(sampled)<<1);
-            std::size_t slot=((identity>>4)^(identity>>13))&(chainTable.size()-1);
-            bool resolved=false;
-            if(chainTableUsed<chainTable.size()/2) {
-                while(chainTable[slot].generation==generation) {
-                    if(chainTable[slot].texture==texture && chainTable[slot].sampled==sampled) {
-                        chainIndex=chainTable[slot].chain;resolved=true;break;
-                    }
-                    slot=(slot+1)&(chainTable.size()-1);
-                }
-                if(!resolved) {
-                    chainTable[slot]={texture,sampled,chains.size(),generation};++chainTableUsed;
-                    chainIndex=chains.size();chains.emplace_back(texture,sampled);resolved=true;
-                    active.emplace(std::make_pair(texture,sampled),chainIndex);
-                }
+            const auto key=std::make_pair(texture,sampled);
+            auto found=active.find(key);
+            if(found==active.end()) {
+                found=active.emplace(key,chains.size()).first;
+                chains.emplace_back(texture,sampled);
             }
-            if(!resolved) {
-                const auto key=std::make_pair(texture,sampled);
-                auto found=active.find(key);
-                if(found==active.end()) {
-                    found=active.emplace(key,chains.size()).first;
-                    chains.emplace_back(texture,sampled);
-                }
-                chainIndex=found->second;
-            }
+            chainIndex=found->second;
             previousTexture=texture;previousSampled=sampled;previousChain=chainIndex;
         }
         auto& chain=chains[chainIndex];
@@ -2315,7 +2150,6 @@ static void ReferenceAttachSolidPolys(std::vector<EcstasyDrawCommand>& commands_
         else next[chain.last[target]-pendingAlphaBegin_]=index;
         chain.last[target]=index;
     }
-    part(1);
     std::array<std::pmr::list<std::size_t>,8> priorities{{
         std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch},
         std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch},
@@ -2353,7 +2187,6 @@ static void ReferenceAttachSolidPolys(std::vector<EcstasyDrawCommand>& commands_
     // value to a second command buffer and back is unnecessary. A cycle
     // moves each nonidentity command once plus one temporary per cycle.
     // No command or borrower can outlive this exact source flush.
-    part(2);
     std::pmr::vector<std::size_t> order{&scratch};
     order.reserve(output-pendingAlphaBegin_);
     for(const auto& bucket:priorities)for(const auto chain:bucket) {
@@ -2380,299 +2213,6 @@ static void ReferenceAttachSolidPolys(std::vector<EcstasyDrawCommand>& commands_
         commands_[pendingAlphaBegin_+destination]=std::move(saved);
         order[destination]=destination;
     }
-    part(3);
-    pendingAlphaBegin_=output;
-}
-const bool verifyAttachSolid=[] {const char* value=std::getenv("HP2_VERIFY_ATTACH");return value && *value=='1';}();
-std::uint64_t verifyAttachCalls=0,verifyAttachMismatches=0;
-}
-#endif
-void EcstasyFrame::SyncOrder()
-{
-    Require(commands_.size()<=UINT32_MAX,"Native command store exceeds 32-bit indices");
-    for(auto index=orderTail_;index<commands_.size();++index)order_.push_back(static_cast<std::uint32_t>(index));
-    orderTail_=commands_.size();
-}
-void EcstasyFrame::MarkCommandBoundary()
-{
-    SyncOrder();pendingAlphaBegin_=order_.size();
-}
-void EcstasyFrame::MaterializeOrder()
-{
-    SyncOrder();
-    Require(pendingAlphaIndices_.empty() && order_.size()==commands_.size(),"Sealed native command order lost a command");
-    bool identity=true;
-    for(std::size_t index=0;identity && index<order_.size();++index)identity=order_[index]==index;
-    if(!identity) {
-        attachSwap_.clear();attachSwap_.reserve(commands_.capacity());
-        const auto count=order_.size();
-        for(std::size_t index=0;index<count;++index) {
-#if defined(__GNUC__)
-            // Main RAM is latency bound on Vita: request upcoming sources.
-            if(index+4<count) {
-                const auto* ahead=reinterpret_cast<const char*>(&commands_[order_[index+4]]);
-                for(std::size_t line=0;line<sizeof(EcstasyDrawCommand);line+=32)__builtin_prefetch(ahead+line);
-            }
-#endif
-            attachSwap_.push_back(commands_[order_[index]]);
-        }
-        commands_.swap(attachSwap_);attachSwap_.clear();
-    }
-    order_.clear();orderTail_=commands_.size();
-}
-#if !defined(__vita__) && !defined(__SWITCH__)
-std::vector<EcstasyDrawCommand> EcstasyFrame::LogicalCommands() const
-{
-    std::vector<EcstasyDrawCommand> result;result.reserve(order_.size()+commands_.size()-orderTail_);
-    for(const auto index:order_)result.push_back(commands_[index]);
-    for(auto index=orderTail_;index<commands_.size();++index)result.push_back(commands_[index]);
-    return result;
-}
-std::vector<EcstasyDrawCommand> EcstasyFrame::PendingAlphaValues() const
-{
-    std::vector<EcstasyDrawCommand> result;result.reserve(pendingAlphaIndices_.size());
-    for(const auto index:pendingAlphaIndices_)result.push_back(commands_[index]);
-    return result;
-}
-#endif
-
-void EcstasyFrame::AttachSolidPolys()
-{
-    const auto attachStarted=std::chrono::steady_clock::now();
-    ++ecstasyAttachSolidCalls;ecstasyAttachSolidCommands+=order_.size()+(commands_.size()-orderTail_)-pendingAlphaBegin_;
-    struct AttachTimer {
-        std::chrono::steady_clock::time_point start;
-        ~AttachTimer() {ecstasyAttachSolidMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();}
-    } attachTimer{attachStarted};
-    Require(phase_==Phase::Building,"Cannot attach solid lists in a sealed graphics frame");
-#if !defined(__vita__)
-    std::vector<EcstasyDrawCommand> verifyCommands,verifyAlpha;std::size_t verifyBegin=0;
-    // Scenery runs are checked against the reference applied to the
-    // per-strip commands they replace (the order they must expand to).
-    const auto expand=[this](const std::vector<EcstasyDrawCommand>& source,std::size_t limit) {
-        std::vector<EcstasyDrawCommand> result;
-        for(std::size_t index=0;index<limit;++index) {
-            const auto& command=source[index];
-            if(!command.sceneryRunCount) {result.push_back(command);continue;}
-            for(std::uint32_t at=0;at<command.sceneryRunCount;++at) {
-                result.push_back(command);auto& single=result.back();
-                single.strip=sceneryRunStrips_[command.sceneryRunFirst+at];single.sceneryRunCount=0;single.sceneryRunFirst=0;
-            }
-        }
-        return result;
-    };
-    SyncOrder();
-    if(verifyAttachSolid) {
-        const auto logical=LogicalCommands();
-        verifyCommands=expand(logical,logical.size());verifyAlpha=PendingAlphaValues();
-        verifyBegin=expand(logical,pendingAlphaBegin_).size();
-    }
-    struct VerifyAttach {
-        EcstasyFrame* frame;std::vector<EcstasyDrawCommand>* commands;std::vector<EcstasyDrawCommand>* alpha;std::size_t* begin;
-        decltype(expand)* expandCommands;
-        ~VerifyAttach() {
-            if(!verifyAttachSolid)return;
-            ReferenceAttachSolidPolys(*commands,*begin,*alpha);
-            const auto logical=frame->LogicalCommands();
-            const auto actual=(*expandCommands)(logical,logical.size());
-            const auto actualBegin=(*expandCommands)(logical,frame->pendingAlphaBegin_).size();
-            ++verifyAttachCalls;
-            const auto same=[](const std::vector<EcstasyDrawCommand>& a,const std::vector<EcstasyDrawCommand>& b) {
-                return a.size()==b.size() && (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(EcstasyDrawCommand))==0);
-            };
-            if(*begin!=actualBegin || !same(*commands,actual) || !same(*alpha,frame->PendingAlphaValues()))
-                ++verifyAttachMismatches;
-            if((verifyAttachCalls&4095u)==0 || verifyAttachMismatches==1) {
-                char text[96];std::snprintf(text,sizeof(text),"calls=%llu mismatches=%llu",
-                    static_cast<unsigned long long>(verifyAttachCalls),static_cast<unsigned long long>(verifyAttachMismatches));
-                platform::RecordSessionEvent("render.attach_verify",text);
-            }
-        }
-    } verifyAttach{this,&verifyCommands,&verifyAlpha,&verifyBegin,&expand};
-#else
-    SyncOrder();
-#endif
-    // PAL10BB20 walks only the solid texture chains. The alpha arena/list
-    // survives this call, including the two display calls1134A4/1135B8
-    // between scenery/particles, environment remap and the later cars.
-    // Alpha commands leave in their original order. Solid commands stay at
-    // their source slots until the single ordered permutation below, so
-    // each is moved once (previously compacted here, then permuted).
-    // Positions below are logical (order_) positions; order_ holds the
-    // store index of each command.
-    const auto rangeBegin=pendingAlphaBegin_,rangeEnd=order_.size();
-    std::size_t alphaCount=0;
-    for(auto index=rangeBegin;index<rangeEnd;++index)alphaCount+=commands_[order_[index]].depthSorted ? 1u:0u;
-    if(alphaCount) {
-        pendingAlphaIndices_.reserve(pendingAlphaIndices_.size()+alphaCount);
-        for(auto index=rangeBegin;index<rangeEnd;++index)
-            if(commands_[order_[index]].depthSorted)pendingAlphaIndices_.push_back(order_[index]);
-    }
-    const auto output=rangeEnd-alphaCount;
-    auto partMark=attachStarted;
-    // Part timers sample every 8th flush (scaled): a Vita clock read costs
-    // ~0.76 us and there are ~85 flushes per frame.
-    const bool sampleParts=(ecstasyAttachSolidCalls&7u)==0;
-    const auto part=[&](int index) {
-        if(!sampleParts)return;
-        const auto now=std::chrono::steady_clock::now();
-        ecstasyAttachSolidPartMs[index]+=8.0*std::chrono::duration<double,std::milli>(now-partMark).count();
-        partMark=now;
-    };
-    part(0);
-    if(output==pendingAlphaBegin_) {order_.resize(output);return;}
-    // AddTexturesSorted PAL109358..109488 groups the first-use texture
-    // list into priorities0..7. Linked textures insert immediately after
-    // their parent's first anchor when both priorities match; later siblings
-    // therefore precede earlier siblings. A stable priority sort alone is
-    // different. These local anchors expire with this source flush, exactly
-    // as DeleteDownloadedTextures109488 clears TextureInfo+9C.
-    // The source uses temporary packet/list storage. Bulk native scratch
-    // avoids allocating one heap node for every texture and list link.
-    // Overflow still uses the ordinary allocator; no packet is truncated.
-    std::array<std::byte,65536> localStorage;
-    std::pmr::monotonic_buffer_resource scratch(localStorage.data(),localStorage.size());
-    struct TextureChain {
-        const TextureInfo* texture{};
-        const EcstasyRenderTarget* sampled{};
-        std::array<std::size_t,15> first,last;
-        TextureChain(const TextureInfo* image,const EcstasyRenderTarget* target)
-            :texture(image),sampled(target)
-        {
-            first.fill(std::numeric_limits<std::size_t>::max());last=first;
-        }
-    };
-    constexpr auto noCommand=std::numeric_limits<std::size_t>::max();
-    // Each command has exactly one target. Link its position once rather
-    // than rescanning every texture's full command list for all15 targets.
-    // These indices are scratch only; original frame/texture owners survive
-    // until the ordered command values have been moved back below.
-    std::pmr::vector<std::size_t> next(rangeEnd-rangeBegin,noCommand,&scratch);
-    std::pmr::vector<TextureChain> chains{&scratch};
-    std::pmr::map<std::pair<const TextureInfo*,const EcstasyRenderTarget*>,std::size_t> active{&scratch};
-    // Generation-tagged so the table needs no clearing per flush.
-    // Frame-owned (one capturing thread): Vita thread_local is emulated
-    // TLS, a library call per access.
-    auto& chainTable=attachChainTable_;
-    auto& chainGeneration=attachChainGeneration_;
-    if(++chainGeneration==0) {for(auto& slot:chainTable)slot.generation=0;chainGeneration=1;}
-    const auto generation=chainGeneration;
-    std::size_t chainTableUsed=0;
-    // Source strips and their material passes frequently keep the same
-    // ordering texture. This lookup is local to this exact solid flush;
-    // only an already-created chain index is reused, never its draw order.
-    const TextureInfo* previousTexture=nullptr;
-    const EcstasyRenderTarget* previousSampled=nullptr;
-    std::size_t previousChain=noCommand;
-    for(auto index=rangeBegin;index<rangeEnd;++index) {
-        const auto& command=commands_[order_[index]];
-        if(alphaCount && command.depthSorted)continue;
-        const auto* texture=command.orderingTexture ? command.orderingTexture:command.texture;
-        const auto* sampled=texture ? nullptr:command.sampledTarget;
-        Require((texture || sampled) && command.target && command.target->id>=0 && command.target->id<15,
-            "Solid texture chain lost its original image or target");
-        std::size_t chainIndex=previousChain;
-        if(previousChain==noCommand || texture!=previousTexture || sampled!=previousSampled) {
-            // Open-addressed front (chain creation order is unchanged); the
-            // ordered map only takes over if this flush exceeds the table.
-            const auto identity=reinterpret_cast<std::uintptr_t>(texture)^(reinterpret_cast<std::uintptr_t>(sampled)<<1);
-            std::size_t slot=((identity>>4)^(identity>>13))&(chainTable.size()-1);
-            bool resolved=false;
-            if(chainTableUsed<chainTable.size()/2) {
-                while(chainTable[slot].generation==generation) {
-                    if(chainTable[slot].texture==texture && chainTable[slot].sampled==sampled) {
-                        chainIndex=chainTable[slot].chain;resolved=true;break;
-                    }
-                    slot=(slot+1)&(chainTable.size()-1);
-                }
-                if(!resolved) {
-                    chainTable[slot]={texture,sampled,chains.size(),generation};++chainTableUsed;
-                    chainIndex=chains.size();chains.emplace_back(texture,sampled);resolved=true;
-                }
-            } else {
-                // Table full: chains it already holds are still found there.
-                while(chainTable[slot].generation==generation) {
-                    if(chainTable[slot].texture==texture && chainTable[slot].sampled==sampled) {
-                        chainIndex=chainTable[slot].chain;resolved=true;break;
-                    }
-                    slot=(slot+1)&(chainTable.size()-1);
-                }
-            }
-            if(!resolved) {
-                const auto key=std::make_pair(texture,sampled);
-                auto found=active.find(key);
-                if(found==active.end()) {
-                    found=active.emplace(key,chains.size()).first;
-                    chains.emplace_back(texture,sampled);
-                }
-                chainIndex=found->second;
-            }
-            previousTexture=texture;previousSampled=sampled;previousChain=chainIndex;
-        }
-        auto& chain=chains[chainIndex];
-        const auto target=static_cast<std::size_t>(command.target->id);
-        if(chain.last[target]==noCommand)chain.first[target]=index;
-        else next[chain.last[target]-rangeBegin]=index;
-        chain.last[target]=index;
-    }
-    part(1);
-    std::array<std::pmr::list<std::size_t>,8> priorities{{
-        std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch},
-        std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch},
-        std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch},
-        std::pmr::list<std::size_t>{&scratch},std::pmr::list<std::size_t>{&scratch}}};
-    struct Anchor {std::uint8_t bucket{};std::pmr::list<std::size_t>::iterator position;};
-    std::pmr::map<const TextureInfo*,Anchor> anchors{&scratch};
-    const auto priority=[](const TextureInfo& texture) {
-        Require(texture.descriptor && texture.descriptor->authoredRecord &&
-            texture.descriptor->authoredRecordSize>=164,"Solid chain lost its TextureInfo priority");
-        const auto value=texture.descriptor->authoredRecord[0x29];
-        Require(value<8,"Solid texture priority exceeds the original eight lists");
-        return value;
-    };
-    for(std::size_t index=0;index<chains.size();++index) {
-        const auto* texture=chains[index].texture;
-        if(!texture) {
-            // UpdateGifTags105F1C builds generated-target TextureInfos from
-            // cleared storage: priority0 and a self-linked download owner.
-            priorities[0].push_back(index);continue;
-        }
-        const auto value=priority(*texture);
-        const auto* parent=texture->linkedTexture;
-        Require(parent,"Solid texture lacks its canonical linked download owner");
-        const auto anchor=anchors.find(parent);
-        if(anchor!=anchors.end() && priority(*parent)==value)
-            priorities[anchor->second.bucket].insert(std::next(anchor->second.position),index);
-        else {
-            priorities[value].push_back(index);
-            anchors[parent]={value,std::prev(priorities[value].end())};
-        }
-    }
-    // Keep the source chain walk, but carry only source indices through
-    // the permutation. Copying every large captured lighting/transform
-    // value to a second command buffer and back is unnecessary. A cycle
-    // moves each nonidentity command once plus one temporary per cycle.
-    // No command or borrower can outlive this exact source flush.
-    part(2);
-    std::pmr::vector<std::size_t> order{&scratch};
-    order.reserve(rangeEnd-rangeBegin);
-    for(const auto& bucket:priorities)for(const auto chain:bucket) {
-        // AttachSolidPolys10BC40..10BCC0 walks all15 target chains for
-        // each texture. Material's base/specular/reflection packets remain
-        // together inside their actual parent chain and original target.
-        for(const auto first:chains[chain].first)
-            for(auto index=first;index!=noCommand;index=next[index-rangeBegin])
-                order.push_back(index-rangeBegin);
-    }
-    Require(order.size()==output-rangeBegin,"Native solid command order lost a source command");
-    part(3);
-    // Permute store indices only; no command moves until Seal().
-    auto& indices=orderScratch_;
-    indices.resize(order.size());
-    for(std::size_t index=0;index<order.size();++index)indices[index]=order_[rangeBegin+order[index]];
-    std::copy(indices.begin(),indices.end(),order_.begin()+static_cast<std::ptrdiff_t>(rangeBegin));
-    order_.resize(output);
-    part(4);
     pendingAlphaBegin_=output;
 }
 
@@ -2685,14 +2225,15 @@ void EcstasyFrame::RenderScreenPolygon(const frontend::FlailerPoly& polygon,
     Require(phase_==Phase::Building && view.target && view.target->enabled &&
         view.matricesCalculated && texture->pixels.Data(),"Screen polygon lost its loaded texture or view");
     if(texture->requiresDepthSort && view.target->opaqueOnly)return;
-    auto* owned=TakeWorldPolygon(polygon);
+    auto owned=std::make_unique<frontend::FlailerPoly>(polygon);
     if(owned->rasterState[1]&0x00ff0000u)owned->rasterState[1]&=~0xff000000u;
     EcstasyDrawCommand command;command.kind=EcstasyDrawKind::ScreenPolygon;
-    command.polygon=owned;command.texture=texture;command.view=&view;command.target=view.target;
+    command.polygon=owned.get();command.texture=texture;command.view=&view;command.target=view.target;
     command.rasterState=owned->rasterState;command.zWriteEnabled=zWriteEnabled_;
     command.depthSorted=texture->requiresDepthSort;command.sortDepth=polygon.vertices[0].position[2];
     command.clipToScreen=&CaptureProjection(view).matrices[0];
-    try {commands_.push_back(command);}catch(...) {--liveWorldPolygons_;throw;}
+    worldPolygons_.push_back(std::move(owned));
+    try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
 }
 
 void EcstasyFrame::TransferZBufferRect(std::shared_ptr<SunDepthSamples> destination,
@@ -2721,40 +2262,6 @@ void EcstasyFrame::TransferZBufferRect(std::shared_ptr<SunDepthSamples> destinat
     depthTransfers_.push_back(request);
 }
 
-#if !defined(__vita__) && !defined(__SWITCH__)
-// PC HP2_VERIFY_ALPHA=1 reference: the previous value-moving alpha ordering.
-static void ReferenceAlphaSort(std::vector<EcstasyDrawCommand>& commands,std::size_t begin)
-{
-    struct Packet {std::size_t begin{},end{};std::int32_t target{};std::uint32_t priority{},key{},bits{};};
-    std::vector<Packet> alpha;
-    for(auto index=begin;index<commands.size();++index) {
-        const auto& command=commands[index];
-        if(!command.depthSorted)continue;
-        const auto* texture=command.orderingTexture ? command.orderingTexture:command.texture;
-        Packet packet;packet.begin=index;packet.end=index+1;packet.target=command.target->id;
-        const auto priority=texture->descriptor->authoredRecord[0x29];
-        packet.priority=priority<8 ? priority:7;
-        std::memcpy(&packet.bits,&command.sortDepth,sizeof(packet.bits));
-        packet.key=(packet.bits&0x80000000u) ? ~packet.bits:packet.bits^0x80000000u;
-        if(command.alphaGroup) {
-            while(packet.end<commands.size() && commands[packet.end].alphaGroup==command.alphaGroup)++packet.end;
-            index=packet.end-1;
-        }
-        alpha.push_back(packet);
-    }
-    if(alpha.empty())return;
-    std::sort(alpha.begin(),alpha.end(),[](const Packet& a,const Packet& b) {
-        if(a.target!=b.target)return a.target<b.target;
-        if(a.priority!=b.priority)return a.priority<b.priority;
-        if(a.key!=b.key)return a.key>b.key;
-        return (a.bits&0x80000000u) ? a.begin<b.begin:a.begin>b.begin;
-    });
-    std::vector<EcstasyDrawCommand> ordered;
-    for(auto index=begin;index<commands.size();++index)if(!commands[index].depthSorted)ordered.push_back(commands[index]);
-    for(const auto& packet:alpha)for(auto index=packet.begin;index<packet.end;++index)ordered.push_back(commands[index]);
-    std::copy(ordered.begin(),ordered.end(),commands.begin()+static_cast<std::ptrdiff_t>(begin));
-}
-#endif
 void EcstasyFrame::AttachAlphaPolys()
 {
     Require(phase_==Phase::Building,"Cannot attach alpha lists in a sealed graphics frame");
@@ -2765,32 +2272,12 @@ void EcstasyFrame::AttachAlphaPolys()
     // Earlier solid-only boundaries may have retained alpha packets. Insert
     // them before newer pending packets to preserve source insertion order,
     // including equal-key and grouped material-pass tie behavior below.
-    SyncOrder();
-    if(!pendingAlphaIndices_.empty()) {
-        order_.insert(order_.begin()+static_cast<std::ptrdiff_t>(pendingAlphaBegin_),
-            pendingAlphaIndices_.begin(),pendingAlphaIndices_.end());
-        pendingAlphaIndices_.clear();
+    if(!pendingAlphaCommands_.empty()) {
+        commands_.insert(commands_.begin()+static_cast<std::ptrdiff_t>(pendingAlphaBegin_),
+            std::make_move_iterator(pendingAlphaCommands_.begin()),
+            std::make_move_iterator(pendingAlphaCommands_.end()));
+        pendingAlphaCommands_.clear();
     }
-#if !defined(__vita__) && !defined(__SWITCH__)
-    static const bool verifyAlpha=[] {const char* value=std::getenv("HP2_VERIFY_ALPHA");return value && *value=='1';}();
-    std::vector<EcstasyDrawCommand> referenceAlpha;
-    if(verifyAlpha) {referenceAlpha=LogicalCommands();ReferenceAlphaSort(referenceAlpha,pendingAlphaBegin_);}
-    struct VerifyAlpha {
-        EcstasyFrame* frame;std::vector<EcstasyDrawCommand>* reference;
-        ~VerifyAlpha() {
-            if(!verifyAlpha)return;
-            static std::uint64_t checks=0,mismatches=0;
-            const auto actual=frame->LogicalCommands();++checks;
-            if(actual.size()!=reference->size() || (!actual.empty() &&
-                std::memcmp(actual.data(),reference->data(),actual.size()*sizeof(EcstasyDrawCommand))!=0))++mismatches;
-            if((checks&1023u)==0 || mismatches==1) {
-                char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
-                    static_cast<unsigned long long>(checks),static_cast<unsigned long long>(mismatches));
-                platform::RecordSessionEvent("render.alpha_verify",text);
-            }
-        }
-    } verifyAlphaGuard{this,&referenceAlpha};
-#endif
     // PAL10B838 flushes one list per target after the solid lists. Its
     // SortAlphaKeys1055B0/RadixSortAlphaKeys1051D8 use integer float keys:
     // priority0..7, then far-to-near; the final reverse walk reverses equal
@@ -2805,9 +2292,9 @@ void EcstasyFrame::AttachAlphaPolys()
     std::array<std::byte,16384> localStorage;
     std::pmr::monotonic_buffer_resource scratch(localStorage.data(),localStorage.size());
     std::pmr::vector<Packet> alpha{&scratch};
-    alpha.reserve(order_.size()-pendingAlphaBegin_);
-    for(auto index=pendingAlphaBegin_;index<order_.size();++index) {
-        const auto& command=commands_[order_[index]];
+    alpha.reserve(commands_.size()-pendingAlphaBegin_);
+    for(auto index=pendingAlphaBegin_;index<commands_.size();++index) {
+        const auto& command=commands_[index];
         if(!command.depthSorted)continue;
         const auto* texture=command.orderingTexture ? command.orderingTexture:command.texture;
         Require(texture && texture->descriptor && command.target &&
@@ -2819,8 +2306,8 @@ void EcstasyFrame::AttachAlphaPolys()
         std::memcpy(&packet.bits,&command.sortDepth,sizeof(packet.bits));
         packet.key=(packet.bits&0x80000000u) ? ~packet.bits:packet.bits^0x80000000u;
         if(command.alphaGroup) {
-            while(packet.end<order_.size() && commands_[order_[packet.end]].alphaGroup==command.alphaGroup) {
-                const auto& member=commands_[order_[packet.end]];
+            while(packet.end<commands_.size() && commands_[packet.end].alphaGroup==command.alphaGroup) {
+                const auto& member=commands_[packet.end];
                 const auto* memberTexture=member.orderingTexture ? member.orderingTexture:member.texture;
                 Require(member.depthSorted && memberTexture==texture && member.target==command.target,
                     "Alpha group no longer represents one original direct packet");
@@ -2837,17 +2324,18 @@ void EcstasyFrame::AttachAlphaPolys()
             if(a.key!=b.key)return a.key>b.key;
             return (a.bits&0x80000000u) ? a.begin<b.begin:a.begin>b.begin;
         });
-        auto& ordered=orderScratch_;
+        auto& ordered=orderingScratch_;
+        struct ClearScratch {std::vector<EcstasyDrawCommand>& value;~ClearScratch(){value.clear();}} clear{ordered};
         ordered.clear();
-        ordered.reserve(order_.size()-pendingAlphaBegin_);
-        for(auto index=pendingAlphaBegin_;index<order_.size();++index)
-            if(!commands_[order_[index]].depthSorted)ordered.push_back(order_[index]);
+        ordered.reserve(commands_.size()-pendingAlphaBegin_);
+        for(auto index=pendingAlphaBegin_;index<commands_.size();++index)
+            if(!commands_[index].depthSorted)ordered.push_back(std::move(commands_[index]));
         for(const auto& packet:alpha)
             for(auto index=packet.begin;index<packet.end;++index)
-                ordered.push_back(order_[index]);
-        std::copy(ordered.begin(),ordered.end(),order_.begin()+static_cast<std::ptrdiff_t>(pendingAlphaBegin_));
+                ordered.push_back(std::move(commands_[index]));
+        std::move(ordered.begin(),ordered.end(),commands_.begin()+static_cast<std::ptrdiff_t>(pendingAlphaBegin_));
     }
-    pendingAlphaBegin_=order_.size();
+    pendingAlphaBegin_=commands_.size();
 }
 
 void EcstasyFrame::OverlayRVMImages(const CarCinematicServices& views,ResourceRegistry& resources)
@@ -2874,7 +2362,7 @@ void EcstasyFrame::OverlayRVMImages(const CarCinematicServices& views,ResourceRe
     for(const auto* descriptor:{info,mask}) {
         const auto* texture=textureInfoForDescriptor(descriptor);
         Require(texture && texture->pixels.Data(),"Rear-view overlay texture pixels are not loaded");
-        auto* polygon=TakeWorldPolygon(frontend::FlailerPoly{});
+        auto polygon=std::make_unique<frontend::FlailerPoly>();
         polygon->rasterState={{0x01000100u,0x80u,0,0}};
         for(std::size_t index=0;index<4;++index) {
             auto& vertex=polygon->vertices[index];
@@ -2883,11 +2371,12 @@ void EcstasyFrame::OverlayRVMImages(const CarCinematicServices& views,ResourceRe
             vertex.color=0x80808080u;
         }
         EcstasyDrawCommand command;command.kind=EcstasyDrawKind::MirrorOverlayPolygon;
-        command.polygon=polygon;command.texture=texture;command.view=&rear;command.target=rear.target;
+        command.polygon=polygon.get();command.texture=texture;command.view=&rear;command.target=rear.target;
         command.clipToScreen=&CaptureProjection(rear).matrices[0];
         command.rasterState=polygon->rasterState;command.zWriteEnabled=zWriteEnabled_;
         command.depthSorted=texture->requiresDepthSort;command.sortDepth=maximum;
-        try {commands_.push_back(command);}catch(...) {--liveWorldPolygons_;throw;}
+        worldPolygons_.push_back(std::move(polygon));
+        try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
     }
 }
 
@@ -2987,7 +2476,7 @@ void EcstasyFrame::DisplayRVMs(const CarCinematicServices& views,const CarCinema
         rear.target->id==7 && rear.target->width==256 && rear.target->height==64 &&
         sourceDisplayExtent_[0]==512 && (sourceDisplayExtent_[1]==448 || sourceDisplayExtent_[1]==512),
         "Rear-view composition lacks its original source/destination target or captured display extent");
-    auto* polygon=TakeWorldPolygon(frontend::FlailerPoly{});
+    auto polygon=std::make_unique<frontend::FlailerPoly>();
     // Original ePoly constructor: neutral128-unit color and source alpha
     // equation. DisplayRVMs alone clears ScaleCoordinates (byte97).
     polygon->rasterState={{0x01000100u,0x00000080u,0,0}};
@@ -3004,11 +2493,12 @@ void EcstasyFrame::DisplayRVMs(const CarCinematicServices& views,const CarCinema
         vertex.color=0x80808080u;
     }
     EcstasyDrawCommand command;command.kind=EcstasyDrawKind::RenderTargetPolygon;
-    command.polygon=polygon;command.view=&destination;command.target=destination.target;
+    command.polygon=polygon.get();command.view=&destination;command.target=destination.target;
     command.clipToScreen=&CaptureProjection(destination).matrices[0];
     command.sampledTarget=rear.target;command.zWriteEnabled=zWriteEnabled_;
     command.rasterState=polygon->rasterState;
-    try {commands_.push_back(command);}catch(...) {--liveWorldPolygons_;throw;}
+    worldPolygons_.push_back(std::move(polygon));
+    try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
 }
 
 static std::array<hp2::frontend::FlailerPoly,4> radialBlurPolygons(
@@ -3092,7 +2582,7 @@ void EcstasyFrame::DisplayFilter(const CarCinematicServices& views,ResourceRegis
         command.screenFilter=filter;command.feedbackGroup=group;command.zWriteEnabled=false;
         commands_.push_back(command);
     }
-    MarkCommandBoundary();
+    pendingAlphaBegin_=commands_.size();
 }
 
 void EcstasyFrame::DisplayRadialBlur(const CarCinematicServices& views)
@@ -3107,13 +2597,14 @@ void EcstasyFrame::DisplayRadialBlur(const CarCinematicServices& views)
         const auto polygons=radialBlurPolygons(*view.target,views.radialBlur->firstAmount[index-1],
             views.radialBlur->secondAmount[index-1]);
         for(const auto& polygon:polygons) {
-            auto* owned=TakeWorldPolygon(polygon);
+            auto owned=std::make_unique<frontend::FlailerPoly>(polygon);
             EcstasyDrawCommand command;command.kind=EcstasyDrawKind::ScreenFilterPolygon;
-            command.polygon=owned;command.texture=view.radialBlurTexture;
+            command.polygon=owned.get();command.texture=view.radialBlurTexture;
             command.view=&view;command.target=view.target;command.rasterState=polygon.rasterState;
             command.zWriteEnabled=zWriteEnabled_;
             command.clipToScreen=&CaptureProjection(view).matrices[0];
-            try {commands_.push_back(command);}catch(...) {--liveWorldPolygons_;throw;}
+            worldPolygons_.push_back(std::move(owned));
+            try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
         }
         AttachSolidPolys(); // PAL10F4A0 calls10BB20: mask solid chain only.
     }
@@ -3130,7 +2621,7 @@ void EcstasyFrame::DisplayBlendPrevious(const CarCinematicServices& views)
         Require(view.matricesCalculated && previous->width>0 && previous->height>0 &&
             sourceDisplayExtent_[0] && sourceDisplayExtent_[1],"History blend lacks its display projection");
         const auto& target=*view.target;
-        auto* polygon=TakeWorldPolygon(frontend::FlailerPoly{});
+        auto polygon=std::make_unique<frontend::FlailerPoly>();
         polygon->rasterState={{0x01010100u,0x00010080u,0,0}};
         const float left=static_cast<float>(target.left),top=static_cast<float>(target.top);
         const float right=left+static_cast<float>(target.width),bottom=top+static_cast<float>(target.height);
@@ -3151,23 +2642,17 @@ void EcstasyFrame::DisplayBlendPrevious(const CarCinematicServices& views)
             polygon->vertices[vertex].color=0x80808080u;
         }
         EcstasyDrawCommand command;command.kind=EcstasyDrawKind::ScreenFilterPolygon;
-        command.polygon=polygon;command.view=&view;command.target=view.target;
+        command.polygon=polygon.get();command.view=&view;command.target=view.target;
         command.sampledTarget=previous;command.sampledPreviousFrame=true;
         command.zWriteEnabled=zWriteEnabled_;command.rasterState=polygon->rasterState;
         command.clipToScreen=&CaptureProjection(view).matrices[0];
-        try {commands_.push_back(command);}catch(...) {--liveWorldPolygons_;throw;}
+        worldPolygons_.push_back(std::move(polygon));
+        try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
         AttachSolidPolys(); // PAL10F670 calls10BB20: history solid chain only.
     }
 }
 
 namespace {
-std::uint8_t MaterialProjectionIndex(const TextureInfo& texture)
-{
-    if(!texture.descriptor || !texture.descriptor->authoredRecord || texture.descriptor->authoredRecordSize<164)
-        throw std::runtime_error("World material lost its original projection selector");
-    const auto mode=texture.descriptor->authoredRecord[0x75];
-    return static_cast<std::uint8_t>(mode==1 || mode==2 ? mode:0);
-}
 const std::array<float,16>& CaptureMaterialProjection(
     const TextureInfo& texture,const EcstasyDrawProjection& projection)
 {
@@ -3194,9 +2679,9 @@ void EcstasyFrame::RenderPolygon3D(const frontend::FlailerPoly& polygon,
     Require(localToWorld && view.target && view.target->enabled &&
         view.target->width>0 && view.target->height>0 && texture->pixels.Data(),
         "World polygon lacks its actual target, matrix or loaded texture");
-    auto* owned=TakeWorldPolygon(polygon);
+    auto owned=std::make_unique<frontend::FlailerPoly>(polygon);
     EcstasyDrawCommand command;command.zWriteEnabled=zWriteEnabled_;
-    command.kind=EcstasyDrawKind::WorldPolygon;command.polygon=owned;
+    command.kind=EcstasyDrawKind::WorldPolygon;command.polygon=owned.get();
     command.textureQScale=view.pixelScale;
     command.clipToScreen=&CaptureMaterialProjection(*texture,CaptureProjection(view));
     command.texture=texture;command.view=&view;command.target=view.target;
@@ -3209,51 +2694,33 @@ void EcstasyFrame::RenderPolygon3D(const frontend::FlailerPoly& polygon,
         float depth[4];eMulVector3(depth,view.matrices.worldToView,polygon.vertices[0].position.data());
         command.sortDepth=depth[2];
     }
-    try {commands_.push_back(command);}catch (...) {--liveWorldPolygons_;throw;}
+    worldPolygons_.push_back(std::move(owned));
+    try {commands_.push_back(command);}catch (...) {worldPolygons_.pop_back();throw;}
 }
 
-frontend::FlailerPoly* EcstasyFrame::TakeWorldPolygon(const frontend::FlailerPoly& polygon)
-{
-    if(liveWorldPolygons_==worldPolygons_.size())worldPolygons_.push_back(std::make_unique<frontend::FlailerPoly>());
-    auto* owned=worldPolygons_[liveWorldPolygons_].get();*owned=polygon;++liveWorldPolygons_;
-    return owned;
-}
-std::vector<frontend::FlailerPolyVertex>* EcstasyFrame::TakeWorldStrip(
-    const frontend::FlailerPolyVertex* vertices,std::size_t count)
-{
-    if(liveWorldStrips_==worldStrips_.size())
-        worldStrips_.push_back(std::make_unique<std::vector<frontend::FlailerPolyVertex>>());
-    auto* strip=worldStrips_[liveWorldStrips_].get();
-    strip->assign(vertices,vertices+count);++liveWorldStrips_;
-    return strip;
-}
 void EcstasyFrame::RenderWorldStrip(const std::vector<frontend::FlailerPolyVertex>& vertices,
-    const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view,EcstasyCarShadow shadow)
-{
-    RenderWorldStrip(vertices.data(),vertices.size(),texture,localToWorld,view,shadow);
-}
-void EcstasyFrame::RenderWorldStrip(const frontend::FlailerPolyVertex* vertices,std::size_t count,
     const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view,EcstasyCarShadow shadow)
 {
     Require(phase_==Phase::Building,"Cannot append world strip to a sealed graphics frame");
     Require(localToWorld && view.target && view.target->enabled && view.matricesCalculated &&
         texture.pixels.Data(),"World strip lacks its source target, matrix or texture");
     // PAL1222B8 emits up to2*(64+1) vertices for a convex car-shadow border.
-    Require(vertices && count>=3 && count<=130,"World strip exceeds its original immediate extent");
+    Require(vertices.size()>=3 && vertices.size()<=130,"World strip exceeds its original immediate extent");
+    auto owned=std::make_unique<std::vector<frontend::FlailerPolyVertex>>(vertices);
     EcstasyDrawCommand command;command.kind=EcstasyDrawKind::WorldStrip;
     command.textureQScale=view.pixelScale;
     command.clipToScreen=&CaptureMaterialProjection(texture,CaptureProjection(view));
-    command.texture=&texture;command.view=&view;command.target=view.target;
+    command.worldStrip=owned.get();command.texture=&texture;command.view=&view;command.target=view.target;
     command.carShadow=shadow;
     command.zWriteEnabled=zWriteEnabled_;command.drawFlags=0x200u;
     command.instance=&CaptureInstance(localToWorld,view);
     command.depthSorted=texture.requiresDepthSort;
     if(command.depthSorted) {
-        float depth[4];eMulVector3(depth,view.matrices.worldToView,vertices[0].position.data());
+        float depth[4];eMulVector3(depth,view.matrices.worldToView,vertices.front().position.data());
         command.sortDepth=depth[2];
     }
-    command.worldStrip=TakeWorldStrip(vertices,count);
-    try {commands_.push_back(command);}catch(...) {--liveWorldStrips_;throw;}
+    worldStrips_.push_back(std::move(owned));
+    try {commands_.push_back(command);}catch(...) {worldStrips_.pop_back();throw;}
 }
 
 struct EcstasyFrame::StripCaptureState {
@@ -3362,10 +2829,6 @@ void EcstasyFrame::CaptureStrip(std::vector<EcstasyDrawCommand>& output,
             reflection.texture=state.frontendEnvironmentTexture;
             reflection.showcaseEnvironmentBlend=true;
         } else {
-#if defined(__vita__) && !defined(HP2_VITA_ENVIRONMENT_MAP)
-            // vitaGL drops environment-map readers (see the gather skip).
-            return;
-#endif
             Require(state.environment,"Reflected strip has no original environment-map owner");
             reflection.texture=nullptr;reflection.sampledTarget=&state.environment->MappedTarget();
             reflection.sampledPreviousFrame=!state.environmentUpdated;
@@ -3577,93 +3040,8 @@ EcstasyReflectionVertex EcstasyReflectVertex(const SceneLightContext& context,
     return ReflectNativeVertex(context,material,position,normal,color,flags,nullptr);
 }
 
-// Opaque scenery strip runs (one command per same-state strip run). PC:
-// HP2_SCENERY_RUNS=0 disables; Vita: scenery_runs_off.txt.
-int ecstasySceneryRuns=[] {
-#if !defined(__vita__)
-    if(const char* value=std::getenv("HP2_SCENERY_RUNS"))return std::atoi(value)!=0 ? 1:0;
-#endif
-    return 1;
-}();
-int ecstasySceneryStripCull=1;
-// Parallel cached-scenery emit (exact; PC HP2_PARALLEL_EMIT=0 / Vita emit_serial.txt off).
-int ecstasyParallelSceneryEmit=[] {
-#if !defined(__vita__)
-    if(const char* value=std::getenv("HP2_PARALLEL_EMIT"))return std::atoi(value)!=0 ? 1:0;
-#endif
-    return 1;
-}();
-std::array<double,8> ecstasyWorldSplitMs{},ecstasyDiscardWorldSplitMs{};
-#if defined(__vita__) || defined(__SWITCH__)
-int ecstasySceneJobsSerial=0; // Vita default 1 (main.cpp)
-#else
-// PC HP2_SCENE_JOBS_SERIAL=1 exercises the Vita serial paths.
-int ecstasySceneJobsSerial=[] {const char* value=std::getenv("HP2_SCENE_JOBS_SERIAL");return value && *value=='1' ? 1:0;}();
-#endif
-// Serial scenery capture: one projection snapshot per view and a light key
-// for the shared world context (exact; Vita scenery_fast_off.txt: 0).
-int ecstasyFastSceneryCapture=1;
-// Rear-view (view3) scenery captured on a collision helper concurrently with
-// view1 (exact; see SceneryResources::AsyncCapture). Vita default on
-// (async_mirror_off.txt); PC HP2_ASYNC_MIRROR=1, =2 also verifies each one.
-int ecstasyAsyncMirrorScenery=[] {
-#if defined(__vita__) || defined(__SWITCH__)
-    return 1;
-#else
-    const char* value=std::getenv("HP2_ASYNC_MIRROR");return value ? std::atoi(value):0;
-#endif
-}();
-// views, merged, state/matrix fallbacks, aborts, inline runs, wait us, job us, verify mismatches
-std::uint64_t ecstasyAsyncMirrorStats[12]{}; // [8..11] abort reasons
-// Diagnostic phase (Vita watchdog): main 1 launched, 2 finishing, 3 closing,
-// 4 merged/done; job +10: 10 waiting for view1 zones, 11 rendering, 12 done.
-std::atomic<int> ecstasyAsyncMirrorPhase{0};
-int ecstasyParallelSceneryPrepare=1;
-int ecstasySceneryFastMerge=1; // run union-box cull + template merge (Vita fastmerge_off.txt)
-// Solid strip template: a solid command equal to an earlier one of this
-// Gather in every field but its strip reuses that command's batch state
-// (texture, material, raster, depth range, transform, shading). Only the
-// strip's geometry, mip K and index range are resolved per strip.
-// PC HP2_SOLID_TEMPLATE=0 disables; HP2_VERIFY_SOLID_TEMPLATE=1 compares.
-int ecstasySolidTemplate=[] {
-#if !defined(__vita__)
-    if(const char* value=std::getenv("HP2_SOLID_TEMPLATE"))return std::atoi(value)!=0 ? 1:0;
-#endif
-    return 1;
-}();
-static bool NativeSolidCommandStateEqual(const EcstasyDrawCommand& a,const EcstasyDrawCommand& b) noexcept
-{
-    const auto bits=[](float value) {std::uint32_t result;std::memcpy(&result,&value,sizeof(result));return result;};
-    return a.kind==b.kind && a.instance==b.instance && a.texture==b.texture && a.model==b.model &&
-        a.lightMaterial==b.lightMaterial && a.clipToScreen==b.clipToScreen && a.view==b.view &&
-        a.target==b.target && a.drawFlags==b.drawFlags && bits(a.alphaScale)==bits(b.alphaScale) &&
-        bits(a.textureQScale)==bits(b.textureQScale) && a.rasterState==b.rasterState &&
-        a.nativeRenderEggState==b.nativeRenderEggState && a.zWriteEnabled==b.zWriteEnabled &&
-        a.depthSorted==b.depthSorted && a.alphaGroup==b.alphaGroup && a.carShadow==b.carShadow &&
-        a.orderingTexture==b.orderingTexture && a.sampledTarget==b.sampledTarget &&
-        a.sampledPreviousFrame==b.sampledPreviousFrame && a.showcaseEnvironmentBlend==b.showcaseEnvironmentBlend &&
-        a.cachedOpaqueScenery==b.cachedOpaqueScenery && a.sceneryRunCount==b.sceneryRunCount &&
-        a.sceneryRunFirst==b.sceneryRunFirst && a.clipClass==b.clipClass && a.layer==b.layer &&
-        a.uiPlacement==b.uiPlacement && a.polygon==b.polygon && a.particleGroup==b.particleGroup &&
-        a.worldStrip==b.worldStrip && a.depthPalette==b.depthPalette && a.focus==b.focus &&
-        a.feedbackGroup==b.feedbackGroup && a.vertexOrder==b.vertexOrder &&
-        a.screenFilter.color==b.screenFilter.color && a.screenFilter.blend==b.screenFilter.blend &&
-        a.screenFilter.enabled==b.screenFilter.enabled && a.screenFilter.fixedAlpha==b.screenFilter.fixedAlpha &&
-        a.screenFilter.textureFunction==b.screenFilter.textureFunction;
-}
-int ecstasyModelRuns=[] {
-#if !defined(__vita__)
-    if(const char* value=std::getenv("HP2_MODEL_RUNS"))return std::atoi(value)!=0 ? 1:0;
-#endif
-    return 1;
-}();
-int ecstasySceneryRunFastPath=[] {
-#if !defined(__vita__)
-    if(const char* value=std::getenv("HP2_SCENERY_RUN_FAST"))return std::atoi(value)!=0 ? 1:0;
-#endif
-    return 1;
-}();
-bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,bool lit)
+bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
+    const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext)
 {
     const auto* solid=model.solid;
     if(!solid || !solid->geometry || model.replacement || solid->rigidAnimation ||
@@ -3680,7 +3058,7 @@ bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edi
         batch.textureRevision=0;
         batch.geometry=&geometry;
         batch.eligible=true;
-        batch.bindings.clear();batch.strips.clear();batch.uniqueTextures.clear();
+        batch.bindings.clear();batch.strips.clear();
         for(const auto& binding:geometry.textures)batch.bindings.push_back(binding.texture);
         for(const auto& strip:geometry.strips) {
             if((strip.flags&0x400u) || strip.positions.size()<3)continue;
@@ -3693,399 +3071,23 @@ bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edi
             }
             batch.strips.push_back({&strip,texture,
                 static_cast<std::uint32_t>(strip.flags)|(texture->drawFlag4Enabled?4u:0u)});
-            if(std::find(batch.uniqueTextures.begin(),batch.uniqueTextures.end(),texture)==batch.uniqueTextures.end())
-                batch.uniqueTextures.push_back(texture);
         }
         batch.textureRevision=revision;
-        batch.runsValid=false;
     }
-    // Same predicate as over every strip: each strip texture is one of these.
-    if(!batch.eligible || std::any_of(batch.uniqueTextures.begin(),batch.uniqueTextures.end(),
-        [](const TextureInfo* texture) {return !texture->pixels.Data();}))return false;
-    if(ecstasySceneryRuns) {
-        const auto* root=model.resources && model.resources->catalogueRoot ?
-            model.resources->catalogueRoot:model.resources;
-        const auto* fallback=root?root->defaultLightMaterial:nullptr;
-        if(!batch.runsValid || batch.runLit!=lit || batch.runInGame!=inGameMaterials_ || batch.runFallback!=fallback) {
-            // Same per-strip values and grouping rule as the per-strip loop.
-            batch.runs.clear();batch.runStrips.clear();batch.materials.clear();batch.drawFlags.clear();
-            for(const auto& strip:batch.strips) {
-                const auto flags=lit?strip.flags:strip.flags&~0x1c0u;
-                const auto index=static_cast<std::size_t>(strip.geometry->lightMaterialIndex);
-                auto* material=index<geometry.lightMaterials.size()?geometry.lightMaterials[index]:nullptr;
-                if(!material)material=fallback;
-                const EditorMarkerLightMaterial* resolved=material && inGameMaterials_ && material->inGameVariant ?
-                    material->inGameVariant.get():material;
-                const auto at=static_cast<std::uint32_t>(batch.runStrips.size());
-                if(!batch.runs.empty()) {
-                    auto& run=batch.runs.back();
-                    if(batch.strips[run.first].texture==strip.texture && batch.drawFlags[run.first]==flags &&
-                        batch.materials[run.first]==resolved && run.count<0xffffu) {
-                        ++run.count;batch.runStrips.push_back(strip.geometry);
-                        batch.materials.push_back(resolved);batch.drawFlags.push_back(flags);continue;
-                    }
-                }
-                batch.runs.push_back({at,1});batch.runStrips.push_back(strip.geometry);
-                batch.materials.push_back(resolved);batch.drawFlags.push_back(flags);
-            }
-            batch.runBounds.clear();
-            for(const auto& run:batch.runs) {
-                std::array<float,6> box{};
-                for(std::uint32_t at=run.first;at<run.first+run.count;++at) {
-                    const auto* geometryStrip=batch.runStrips[at];
-                    for(std::size_t axis=0;axis<3;++axis) {
-                        const auto low=geometryStrip->minimum[axis],high=geometryStrip->maximum[axis];
-                        if(at==run.first) {box[axis]=low;box[axis+3]=high;}
-                        else {box[axis]=std::min(box[axis],low);box[axis+3]=std::max(box[axis+3],high);}
-                    }
-                }
-                batch.runBounds.push_back(box);
-            }
-            batch.emitRuns.clear();batch.stripBounds.clear();
-            for(std::size_t runIndex=0;runIndex<batch.runs.size();++runIndex) {
-                const auto& run=batch.runs[runIndex];
-                OpaqueSceneryBatch::EmitRun packed;
-                packed.texture=batch.strips[run.first].texture;
-                packed.material=batch.materials[run.first];packed.drawFlags=batch.drawFlags[run.first];
-                packed.firstStrip=batch.runStrips[run.first];packed.first=run.first;
-                packed.count=static_cast<std::uint16_t>(run.count);
-                packed.projection=MaterialProjectionIndex(*packed.texture);
-                packed.box=batch.runBounds[runIndex];
-                batch.emitRuns.push_back(packed);
-            }
-            for(const auto* geometryStrip:batch.runStrips)
-                batch.stripBounds.push_back({{geometryStrip->minimum[0],geometryStrip->minimum[1],geometryStrip->minimum[2],
-                    geometryStrip->maximum[0],geometryStrip->maximum[1],geometryStrip->maximum[2]}});
-            batch.runLit=lit;batch.runInGame=inGameMaterials_;batch.runFallback=fallback;batch.runsValid=true;
-        }
-    }
-    if(reused)reusedOpaqueSceneryStrips_+=batch.strips.size();
-    return true;
-}
+    if(!batch.eligible || std::any_of(batch.strips.begin(),batch.strips.end(),
+        [](const auto& strip) {return !strip.texture->pixels.Data();}))return false;
 
-EcstasyDrawInstance& EcstasyFrame::AllocateInstance()
-{
-    Require(phase_==Phase::Building,"Draw instance lost its active capture");
-    if(liveInstances_==capturedInstances_.size())capturedInstances_.emplace_back();
-    return capturedInstances_[liveInstances_++];
-}
-
-void EcstasyFrame::FillInstance(EcstasyDrawInstance& instance,const float localToWorld[16],
-    const CarCinematicScreen& view,const SceneLightContext* lightContext)
-{
-    eMulMatrix(instance.localToClip.data(),localToWorld,view.matrices.worldToClip);
-    instance.sharedLightContext=nullptr;
-    if(lightContext)instance.lightContext=*lightContext;
-    else instance.lightContext.reset();
-}
-
-EcstasyFrame& EcstasyFrame::AsyncSceneryFrame(std::size_t index)
-{
-    auto& slot=asyncScenery_[index&1u];
-    if(!slot)slot=std::make_unique<EcstasyFrame>();
-    return *slot;
-}
-void EcstasyFrame::PrepareAsyncScenery(EcstasyFrame& aux) const
-{
-    Require(phase_==Phase::Building,"Async scenery capture needs a building frame");
-    aux.commands_.clear();aux.sceneryRunStrips_.clear();
-    aux.liveInstances_=0;aux.liveProjections_=0;aux.lastProjection_=nullptr;aux.lastLightContext_=nullptr;aux.lastLightKey_=0;
-    aux.zWriteEnabled_=zWriteEnabled_;aux.dashboardProjection_=dashboardProjection_;aux.inGameMaterials_=inGameMaterials_;
-    aux.environment_=environment_;aux.environmentApplicationState_=environmentApplicationState_;
-    aux.phase_=Phase::Building;
-}
-bool EcstasyFrame::AsyncSceneryStateMatches(const EcstasyFrame& aux) const noexcept
-{
-    return aux.zWriteEnabled_==zWriteEnabled_ && aux.dashboardProjection_==dashboardProjection_ &&
-        aux.inGameMaterials_==inGameMaterials_ && aux.environment_==environment_ &&
-        aux.environmentApplicationState_==environmentApplicationState_;
-}
-#if !defined(__vita__) && !defined(__SWITCH__)
-bool EcstasyFrame::AsyncSceneryCommandsEqual(const EcstasyFrame& a,const EcstasyFrame& b)
-{
-    if(a.commands_.size()!=b.commands_.size())return false;
-    for(std::size_t at=0;at<a.commands_.size();++at) {
-        const auto& x=a.commands_[at];const auto& y=b.commands_[at];
-        bool same=x.kind==y.kind && x.strip==y.strip && x.model==y.model && x.texture==y.texture &&
-            x.view==y.view && x.target==y.target && x.drawFlags==y.drawFlags && x.lightMaterial==y.lightMaterial &&
-            x.clipClass==y.clipClass && std::memcmp(&x.textureQScale,&y.textureQScale,4)==0 &&
-            x.cachedOpaqueScenery==y.cachedOpaqueScenery && x.nativeRenderEggState==y.nativeRenderEggState &&
-            x.sceneryRunCount==y.sceneryRunCount && x.zWriteEnabled==y.zWriteEnabled && x.alphaGroup==y.alphaGroup &&
-            x.feedbackGroup==y.feedbackGroup && x.rasterState==y.rasterState &&
-            (x.clipToScreen!=nullptr)==(y.clipToScreen!=nullptr) && (x.instance!=nullptr)==(y.instance!=nullptr);
-        if(same && x.clipToScreen)same=*x.clipToScreen==*y.clipToScreen;
-        if(same && x.instance) {
-            same=x.instance->localToClip==y.instance->localToClip &&
-                (x.LightContext()!=nullptr)==(y.LightContext()!=nullptr) &&
-                (!x.LightContext() || std::memcmp(x.LightContext(),y.LightContext(),sizeof(SceneLightContext))==0);
-        }
-        for(std::uint32_t strip=0;same && strip<x.sceneryRunCount;++strip)
-            same=a.sceneryRunStrips_[x.sceneryRunFirst+strip]==b.sceneryRunStrips_[y.sceneryRunFirst+strip];
-        if(!same)return false;
-    }
-    return true;
-}
-#endif
-
-std::uint32_t EcstasyFrame::AppendSceneryRunStrips(const std::vector<const EditorMarkerSolidGeometry::Strip*>& strips)
-{
-    const auto base=static_cast<std::uint32_t>(sceneryRunStrips_.size());
-    sceneryRunStrips_.insert(sceneryRunStrips_.end(),strips.begin(),strips.end());
-    return base;
-}
-
-void EcstasyFrame::AppendOpaqueSceneryCommands(const EcstasyDrawCommand* first,std::size_t count,std::uint32_t runBase)
-{
-    Require(phase_==Phase::Building,"Opaque scenery commands need a building frame");
-    for(std::size_t at=0;at<count;++at) {
-        commands_.push_back(first[at]);
-        if(commands_.back().sceneryRunCount)commands_.back().sceneryRunFirst+=runBase;
-    }
-}
-
-#if !defined(__vita__) && !defined(__SWITCH__)
-// Field-wise EcstasyDrawCommand equality (memcmp would compare padding).
-static bool NativeDrawCommandFieldsEqual(const EcstasyDrawCommand& a,const EcstasyDrawCommand& b)
-{
-    return a.kind==b.kind && a.uiPlacement==b.uiPlacement && a.nativeRenderEggState==b.nativeRenderEggState &&
-        a.polygon==b.polygon && a.particleGroup==b.particleGroup && a.worldStrip==b.worldStrip &&
-        a.strip==b.strip && a.model==b.model && a.texture==b.texture && a.orderingTexture==b.orderingTexture &&
-        a.depthPalette==b.depthPalette && a.focus==b.focus &&
-        std::memcmp(&a.screenFilter,&b.screenFilter,sizeof(a.screenFilter))==0 &&
-        a.feedbackGroup==b.feedbackGroup && a.lightMaterial==b.lightMaterial && a.instance==b.instance &&
-        a.clipToScreen==b.clipToScreen && a.view==b.view && a.target==b.target && a.sampledTarget==b.sampledTarget &&
-        a.sampledPreviousFrame==b.sampledPreviousFrame && a.showcaseEnvironmentBlend==b.showcaseEnvironmentBlend &&
-        a.cachedOpaqueScenery==b.cachedOpaqueScenery && a.sceneryRunCount==b.sceneryRunCount &&
-        a.sceneryRunFirst==b.sceneryRunFirst && a.carShadow==b.carShadow && a.rasterState==b.rasterState &&
-        a.layer==b.layer && a.clipClass==b.clipClass &&
-        std::memcmp(&a.alphaScale,&b.alphaScale,4)==0 && std::memcmp(&a.textureQScale,&b.textureQScale,4)==0 &&
-        a.drawFlags==b.drawFlags && a.depthSorted==b.depthSorted && a.zWriteEnabled==b.zWriteEnabled &&
-        std::memcmp(&a.sortDepth,&b.sortDepth,4)==0 && a.alphaGroup==b.alphaGroup && a.vertexOrder==b.vertexOrder;
-}
-#endif
-#if !defined(__vita__) && !defined(__SWITCH__)
-// PC HP2_VERIFY_EMIT_RUNS=1 reference: the pre-packed emit (parallel run
-// arrays, strip-struct bounds, recomputed localToClip, descriptor selector).
-static void EmitOpaqueSceneryRunsReference(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
-    const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
-    const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,
-    std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips)
-{
-    const auto* solid=model.solid;
-    EcstasyDrawCommand command;
-    command.kind=EcstasyDrawKind::SolidStrip;command.model=&model;command.cachedOpaqueScenery=true;
-    command.view=&view;command.target=view.target;command.clipClass=2;
-    command.textureQScale=view.pixelScale;
-    command.instance=&instance;
-    float screenClip[16];
-    if(cullStrips) {
-        ecstasyViewLocalToScreenClip(&view,screenClip,localToWorld);
-        const auto whole=ecstasyClassifyBounds(solid->minimum,solid->maximum,screenClip);
-        if(whole==1) {
-            float clip[16];ecstasyViewLocalToClip(&view,clip,localToWorld);
-            if(ecstasyClassifyBounds(solid->minimum,solid->maximum,clip)==2)cullStrips=false;
-        } else cullStrips=false;
-    }
-    for(std::size_t runIndex=0;runIndex<batch.runs.size();++runIndex) {
-        const auto& run=batch.runs[runIndex];
-        const auto* texture=batch.strips[run.first].texture;
-        if(cullStrips) {
-            const auto start=runStrips.size();
-            const auto& box=batch.runBounds[runIndex];
-            const auto whole=run.count>1 && ecstasySceneryFastMerge ? ecstasyClassifyBounds(box.data(),box.data()+3,screenClip):1;
-            if(whole==0)continue;
-            if(whole==2)runStrips.insert(runStrips.end(),
-                batch.runStrips.begin()+run.first,batch.runStrips.begin()+run.first+run.count);
-            else for(std::uint32_t at=run.first;at<run.first+run.count;++at) {
-                const auto* geometryStrip=batch.runStrips[at];
-                if(ecstasyClassifyBounds(geometryStrip->minimum.data(),geometryStrip->maximum.data(),screenClip))
-                    runStrips.push_back(geometryStrip);
-            }
-            const auto visible=runStrips.size()-start;
-            if(!visible)continue;
-            if(command.texture!=texture) {
-                command.texture=texture;
-                command.clipToScreen=&CaptureMaterialProjection(*texture,projection);
-            }
-            command.drawFlags=batch.drawFlags[run.first];command.lightMaterial=batch.materials[run.first];
-            command.strip=runStrips[start];
-            if(visible>1) {
-                command.sceneryRunFirst=static_cast<std::uint32_t>(start);
-                command.sceneryRunCount=static_cast<std::uint16_t>(visible);
-            } else {
-                runStrips.pop_back();command.sceneryRunFirst=0;command.sceneryRunCount=0;
-            }
-            output.push_back(command);
-            continue;
-        }
-        if(command.texture!=texture) {
-            command.texture=texture;
-            command.clipToScreen=&CaptureMaterialProjection(*texture,projection);
-        }
-        command.strip=batch.runStrips[run.first];command.drawFlags=batch.drawFlags[run.first];
-        command.lightMaterial=batch.materials[run.first];
-        if(run.count>1) {
-            command.sceneryRunFirst=static_cast<std::uint32_t>(runStrips.size());
-            command.sceneryRunCount=static_cast<std::uint16_t>(run.count);
-            runStrips.insert(runStrips.end(),batch.runStrips.begin()+run.first,
-                batch.runStrips.begin()+run.first+run.count);
-        } else {command.sceneryRunFirst=0;command.sceneryRunCount=0;}
-        output.push_back(command);
-    }
-}
-#endif
-static void EmitOpaqueSceneryRunsPacked(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
-    const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
-    const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,
-    std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips)
-{
-    const auto* solid=model.solid;
-    EcstasyDrawCommand command;
-    command.kind=EcstasyDrawKind::SolidStrip;command.model=&model;command.cachedOpaqueScenery=true;
-    command.view=&view;command.target=view.target;command.clipClass=2;
-    command.textureQScale=view.pixelScale;
-    command.instance=&instance;
-    // An intersecting model drops the strips that ecstasyDetermineVisibleStrips
-    // (mode 1, non-angular) drops: screen-clip bounds outside. A model inside
-    // the clip volume keeps every strip, as there. GPU clipping does the rest.
-    float screenClip[16];
-    if(cullStrips) {
-        ecstasyViewLocalToScreenClip(&view,screenClip,localToWorld);
-        const auto whole=ecstasyClassifyBounds(solid->minimum,solid->maximum,screenClip);
-        // instance.localToClip is exactly localToWorld*worldToClip (CaptureInstance /
-        // FillInstance), the same product ecstasyViewLocalToClip forms.
-        if(whole==1) {
-            if(ecstasyClassifyBounds(solid->minimum,solid->maximum,instance.localToClip.data())==2)cullStrips=false;
-        } else cullStrips=false;
-    }
-    const auto* emitRuns=batch.emitRuns.data();
-    const auto runCount=batch.emitRuns.size();
-    const auto commandsBefore=output.size();
-    struct EmitCount {
-        const std::vector<EcstasyDrawCommand>& output;std::size_t before;bool cull;std::size_t runs;
-        ~EmitCount() {
-            if(!ecstasyEmitSampling)return;
-            ecstasyEmitCounters[0]+=runs;ecstasyEmitCounters[3]+=output.size()-before;ecstasyEmitCounters[4]+=cull;
-        }
-    } emitCount{output,commandsBefore,cullStrips,runCount};
-    for(std::size_t runIndex=0;runIndex<runCount;++runIndex) {
-        const auto& run=emitRuns[runIndex];
-        const auto* texture=run.texture;
-        if(cullStrips) {
-            const auto start=runStrips.size();
-            // The run union box first: wholly outside one clip plane
-            // (a convex region) drops every strip; wholly inside keeps
-            // every strip (the GPU clips any strip that is not).
-            const auto& box=run.box;
-            const auto whole=run.count>1 && ecstasySceneryFastMerge ? ecstasyClassifyBounds(box.data(),box.data()+3,screenClip):1;
-            if(ecstasyEmitSampling) {ecstasyEmitCounters[1]+=run.count>1;if(whole==1)ecstasyEmitCounters[2]+=run.count;}
-            if(whole==0)continue;
-            if(whole==2)runStrips.insert(runStrips.end(),
-                batch.runStrips.begin()+run.first,batch.runStrips.begin()+run.first+run.count);
-            else for(std::uint32_t at=run.first;at<run.first+run.count;++at) {
-                const auto& bounds=batch.stripBounds[at];
-                if(ecstasyClassifyBounds(bounds.data(),bounds.data()+3,screenClip))
-                    runStrips.push_back(batch.runStrips[at]);
-            }
-            const auto visible=runStrips.size()-start;
-            if(!visible)continue;
-            if(command.texture!=texture) {
-                command.texture=texture;
-                command.clipToScreen=&projection.matrices[run.projection];
-            }
-            command.drawFlags=run.drawFlags;command.lightMaterial=run.material;
-            command.strip=runStrips[start];
-            if(visible>1) {
-                command.sceneryRunFirst=static_cast<std::uint32_t>(start);
-                command.sceneryRunCount=static_cast<std::uint16_t>(visible);
-            } else {
-                runStrips.pop_back();command.sceneryRunFirst=0;command.sceneryRunCount=0;
-            }
-            output.push_back(command);
-            continue;
-        }
-        if(command.texture!=texture) {
-            command.texture=texture;
-            command.clipToScreen=&projection.matrices[run.projection];
-        }
-        command.strip=run.firstStrip;command.drawFlags=run.drawFlags;
-        command.lightMaterial=run.material;
-        if(run.count>1) {
-            command.sceneryRunFirst=static_cast<std::uint32_t>(runStrips.size());
-            command.sceneryRunCount=static_cast<std::uint16_t>(run.count);
-            runStrips.insert(runStrips.end(),batch.runStrips.begin()+run.first,
-                batch.runStrips.begin()+run.first+run.count);
-        } else {command.sceneryRunFirst=0;command.sceneryRunCount=0;}
-        output.push_back(command);
-    }
-}
-
-void EcstasyFrame::EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
-    const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
-    const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,
-    std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips) const
-{
-#if !defined(__vita__) && !defined(__SWITCH__)
-    static const bool verifyEmitRuns=[] {const char* value=std::getenv("HP2_VERIFY_EMIT_RUNS");return value && *value=='1';}();
-    if(verifyEmitRuns) {
-        const auto outputBefore=output.size(),runsBefore=runStrips.size();
-        EmitOpaqueSceneryRunsPacked(batch,model,localToWorld,view,instance,projection,cullStrips,output,runStrips);
-        std::vector<EcstasyDrawCommand> expected;std::vector<const EditorMarkerSolidGeometry::Strip*> expectedRuns(
-            runStrips.begin(),runStrips.begin()+static_cast<std::ptrdiff_t>(runsBefore));
-        EmitOpaqueSceneryRunsReference(batch,model,localToWorld,view,instance,projection,cullStrips,expected,expectedRuns);
-        bool same=expected.size()==output.size()-outputBefore && expectedRuns==runStrips;
-        for(std::size_t at=0;same && at<expected.size();++at)
-            same=NativeDrawCommandFieldsEqual(expected[at],output[outputBefore+at]);
-        static std::uint64_t checks=0,mismatches=0;
-        ++checks;if(!same)++mismatches;
-        if((checks&4095u)==0 || (!same && mismatches==1)) {
-            char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
-                (unsigned long long)checks,(unsigned long long)mismatches);
-            platform::RecordSessionEvent("render.emit_runs_verify",text);
-        }
-        return;
-    }
-#endif
-    EmitOpaqueSceneryRunsPacked(batch,model,localToWorld,view,instance,projection,cullStrips,output,runStrips);
-}
-
-bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
-    const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
-    bool cullStrips,const EcstasyDrawProjection* viewProjection,std::uint64_t lightKey)
-{
-    using SampleClock=std::chrono::steady_clock;
-    const bool sampling=ecstasyEmitSampling;
-    SampleClock::time_point mark{};
-    const auto sample=[&](std::size_t index) {
-        if(!sampling)return;
-        const auto now=SampleClock::now();
-        if(index<3)ecstasyEmitSampleMs[index]+=std::chrono::duration<double,std::milli>(now-mark).count();
-        mark=now;
-    };
-    sample(3);
-    if(!PrepareOpaqueSceneryBatch(batch,model,lightContext!=nullptr)) {sample(0);return false;}
-    sample(0);
     Require(phase_==Phase::Building && view.target && view.target->enabled && view.matricesCalculated,
         "Opaque scenery batch lost its live view");
-    const auto& instance=CaptureInstance(localToWorld,view,lightContext,lightKey);
-    const auto& projection=viewProjection ? *viewProjection:CaptureProjection(view);
-    sample(1);
-    if(ecstasySceneryRuns) {
-        EmitOpaqueSceneryRuns(batch,model,localToWorld,view,instance,projection,cullStrips,commands_,sceneryRunStrips_);
-        sample(2);
-        return true;
-    }
-    const auto& geometry=*model.solid->geometry;
+    EcstasyDrawCommand command;
+    command.kind=EcstasyDrawKind::SolidStrip;command.model=&model;command.cachedOpaqueScenery=true;
+    command.view=&view;command.target=view.target;command.clipClass=2;
+    command.textureQScale=view.pixelScale;
+    command.instance=&CaptureInstance(localToWorld,view,lightContext);
+    const auto& projection=CaptureProjection(view);
     const auto* root=model.resources && model.resources->catalogueRoot ?
         model.resources->catalogueRoot:model.resources;
     const auto* fallback=root?root->defaultLightMaterial:nullptr;
-    EcstasyDrawCommand command;
-    command.kind=EcstasyDrawKind::SolidStrip;command.model=&model;command.cachedOpaqueScenery=true;
-    command.view=&view;command.target=view.target;command.clipClass=2;
-    command.textureQScale=view.pixelScale;
-    command.instance=&instance;
-    constexpr auto noRun=std::numeric_limits<std::size_t>::max();
-    std::size_t runCommand=noRun;
     for(const auto& strip:batch.strips) {
         if(command.texture!=strip.texture) {
             command.texture=strip.texture;
@@ -4097,24 +3099,9 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
         if(!material)material=fallback;
         command.lightMaterial=material && inGameMaterials_ && material->inGameVariant ?
             material->inGameVariant.get():material;
-        // Consecutive strips with identical draw state share one command.
-        // Solid chains keep commands of one texture/target in source order,
-        // so the expanded strip order is exactly the per-strip order.
-        if(ecstasySceneryRuns && runCommand!=noRun) {
-            auto& previous=commands_[runCommand];
-            if(previous.texture==command.texture && previous.drawFlags==command.drawFlags &&
-                previous.lightMaterial==command.lightMaterial && previous.sceneryRunCount<0xffffu) {
-                if(!previous.sceneryRunCount) {
-                    previous.sceneryRunFirst=static_cast<std::uint32_t>(sceneryRunStrips_.size());
-                    sceneryRunStrips_.push_back(previous.strip);previous.sceneryRunCount=1;
-                }
-                sceneryRunStrips_.push_back(command.strip);++previous.sceneryRunCount;
-                continue;
-            }
-        }
-        runCommand=commands_.size();
         commands_.push_back(command);
     }
+    if(reused)reusedOpaqueSceneryStrips_+=batch.strips.size();
     return true;
 }
 
@@ -4157,13 +3144,6 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
             }
         }
     } clear{visible,sources,chunks,textures};
-    const bool splitTimed=ecstasyCarScope && collisionWitnessClockMicros;
-    std::uint32_t splitMark=splitTimed ? collisionWitnessClockMicros():0u;
-    const auto splitAt=[&](std::size_t part) {
-        if(!splitTimed)return;
-        const auto now=collisionWitnessClockMicros();ecstasyModelSplitMicros[part]+=now-splitMark;splitMark=now;
-    };
-    struct SplitCall {bool on;SplitCall(bool v):on(v){}~SplitCall(){if(on)++ecstasyModelSplitMicros[3];}} splitCall{splitTimed};
     if (!ecstasyDetermineVisibleStrips(visible,model,view,localToWorld,boneMatrices!=nullptr,
         boneMatrices ? 1:((flags&4u) ? 2:1)))return 0;
     // These are the original live model/solid mutations, once and in source
@@ -4171,26 +3151,16 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     if (model.replacement)editorMarkerModelApplyReplacementTextureTable(&model);
     const auto& geometry=*model.solid->geometry;
     const auto start=commands_.size();
-    splitAt(0);
     auto state=CaptureStripState();
     state.instance=&CaptureInstance(localToWorld,view,lightContext);
     state.projection=&CaptureProjection(view);
-    splitAt(1);
     const bool environmentEnabled=environmentMappingEnabled!=0;
     std::size_t count=0;
     for(const auto& run:visible)count+=run.count;
     // Task size amortizes queue publication; CPU count is discovered by the
     // shared scheduler and is never restricted to a fixed application cap.
-    // Posed models skin every strip on the CPU (~26 us/strip on Vita): they
-    // parallelize from a much smaller size, in small chunks.
-    const bool skinParallel=boneMatrices && ecstasyParallelSkinStrips>0 &&
-        count>=static_cast<std::size_t>(ecstasyParallelSkinStrips);
-    const std::size_t stripsPerChunk=boneMatrices ? 8:64;
-    const bool parallel=(skinParallel || count>=static_cast<std::size_t>(ecstasyParallelModelStrips)) &&
-        NativeSceneEffectiveHardwareConcurrency()>1 &&
-        // Serial jobs (Vita default): chunk capture is only extra copies.
-        !ecstasySceneJobsSerial;
-    auto& preposed=preposedScratch_;
+    constexpr std::size_t minimumParallelStrips=512,stripsPerChunk=64;
+    const bool parallel=count>=minimumParallelStrips && NativeSceneEffectiveHardwareConcurrency()>1;
     if(parallel) {
         // LookupDescriptor can rebuild a lazy resource index. Resolve every
         // binding on the owner after the original shared-table replacement;
@@ -4208,94 +3178,16 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     // This exact multiplication is shared by the model's ordered strip
     // packets. The owner does not advance the view or any borrowed input
     // before RunNativeSceneJobs has drained, including exceptional exits.
-    const auto skinStrip=[&](EditorMarkerSolidGeometry::Strip& posedStrip,
-        const std::vector<std::array<float,3>>& sourcePositions) {
-        Require(sourcePositions.size()==posedStrip.positions.size(),"Posed strip lost its source vertex extent");
-#if defined(__vita__) && defined(__ARM_NEON)
-        // Same products and sums as eMulVector3 -> vectorMatrixTransform's
-        // NEON path (enabled only when the boot self-test proves it equals
-        // the scalar order) and the scalar blend, entirely in NEON registers:
-        // the VFP<->NEON store/reload round trips cost ~0.6 us per vertex.
-        if(bMatrixNeonEnabled) {
-            const auto bones=boneMatrices->size();
-            const auto* matrices=boneMatrices->data();
-            for(std::size_t vertex=0;vertex<sourcePositions.size();++vertex) {
-                const auto& position=sourcePositions[vertex];
-                std::array<std::uint32_t,3> encoded{};
-                std::memcpy(encoded.data(),position.data(),sizeof(encoded));
-                const auto first=encoded[0]&255u,second=encoded[1]&255u,weight=encoded[2]&255u;
-                const auto point=bNeonPoint3(eUnitVector4,position.data());
-                const auto transform=[&](std::uint32_t bone) {
-                    Require(bone<bones,"Animated vertex bone exceeds its retained skeleton");
-                    return bNeonTransformMatrix(matrices[bone].data(),point);
-                };
-                float32x4_t posed;
-                if(weight==0)posed=transform(first);
-                else if(weight==1)posed=transform(second);
-                else {
-                    // weight/256 is exact; 1-blend rounds as the scalar one.
-                    const auto blend=vmul_n_f32(vcvt_f32_u32(vdup_n_u32(weight)),1.0f/256.0f);
-                    const auto keep=vsub_f32(vdup_n_f32(1.0f),blend);
-                    const auto a=transform(first),b=transform(second);
-                    posed=vaddq_f32(vmulq_lane_f32(a,keep,0),vmulq_lane_f32(b,blend,0));
-                }
-                float* out=posedStrip.positions[vertex].data();
-                vst1_f32(out,vget_low_f32(posed));vst1q_lane_f32(out+2,posed,2);
-            }
-            return;
-        }
-#endif
-        for(std::size_t vertex=0;vertex<sourcePositions.size();++vertex) {
-            const auto& position=sourcePositions[vertex];
-            std::array<std::uint32_t,3> encoded{};
-            std::memcpy(encoded.data(),position.data(),sizeof(encoded));
-            const auto first=encoded[0]&255u,second=encoded[1]&255u,weight=encoded[2]&255u;
-            const auto transformVertex=[&](std::uint32_t bone,float outputVertex[4]) {
-                Require(bone<boneMatrices->size(),"Animated vertex bone exceeds its retained skeleton");
-                eMulVector3(outputVertex,(*boneMatrices)[bone].data(),position.data());
-            };
-            float posed[4];
-            if(weight==0)transformVertex(first,posed);
-            else if(weight==1)transformVertex(second,posed);
-            else {
-                float other[4];transformVertex(first,posed);transformVertex(second,other);
-                const float blend=static_cast<float>(weight)*(1.0f/256.0f);
-                for(std::size_t axis=0;axis<3;++axis)
-                    posed[axis]=posed[axis]*(1.0f-blend)+other[axis]*blend;
-            }
-            std::copy(posed,posed+3,posedStrip.positions[vertex].begin());
-        }
-    };
-#if !defined(__vita__) && !defined(__SWITCH__)
-    static const bool verifyPoseReuse=[] {const char* value=std::getenv("HP2_VERIFY_POSE_REUSE");return value && *value=='1';}();
-#endif
-#if defined(__vita__) && !defined(HP2_VITA_ENVIRONMENT_MAP)
-    constexpr bool kModelRunsDropReflection=true; // CaptureStrip drops the reflection command
-#else
-    constexpr bool kModelRunsDropReflection=false;
-#endif
-    bool mergeRuns=false;
-    const EditorMarkerTexture* lastDescriptor=nullptr;const TextureInfo* lastTexture=nullptr;
-    const auto capture=[&](std::size_t ordinal,std::size_t index,std::int32_t clipClass,
+    const auto capture=[&](std::size_t index,std::int32_t clipClass,
         std::vector<EcstasyDrawCommand>& output,
         std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>>& posedStrips,
         std::uint64_t& alphaGroups) {
         Require(index<geometry.strips.size(),"Visible strip run leaves its actual model");
         const auto& strip=geometry.strips[index];
-#if defined(__GNUC__)
-        if(!parallel && index+2<geometry.strips.size()) {
-            const auto* ahead=reinterpret_cast<const char*>(&geometry.strips[index+2]);
-            for(std::size_t line=0;line<128;line+=32)__builtin_prefetch(ahead+line);
-        }
-#endif
         if (strip.flags&0x400u)return;
         const auto& descriptor=stripTexture(geometry,strip);
-        // The registry lookup is a hash probe; consecutive strips usually
-        // share their binding (the replacement table is fixed for the call).
-        const TextureInfo* texture;
-        if(parallel)texture=textures[static_cast<std::size_t>(strip.textureIndex)];
-        else if(&descriptor==lastDescriptor)texture=lastTexture;
-        else {texture=textureInfoForDescriptor(&descriptor);lastDescriptor=&descriptor;lastTexture=texture;}
+        const auto* texture=parallel ? textures[static_cast<std::size_t>(strip.textureIndex)]:
+            textureInfoForDescriptor(&descriptor);
         Require(texture,"Model texture is absent from the canonical TexturePack");
         // Final RenderStrips10DF1C..10DF50: target's alpha-only/opaque-only
         // passes are encoded by caller flags8/16; no second strip list.
@@ -4313,183 +3205,44 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         if (flags&2u)draw&=~0x80u;
         if (!lightContext)draw&=~0x1c0u; // released10DDE0 null-context mask
         const auto* submitted=&strip;
-        const bool skinTimed=boneMatrices && !parallel && collisionWitnessClockMicros;
-        std::uint32_t skinMark=skinTimed ? collisionWitnessClockMicros():0u;
-        const auto skinAt=[&](std::size_t part) {
-            if(!skinTimed)return;
-            const auto now=collisionWitnessClockMicros();ecstasySkinSplitMicros[part]+=now-skinMark;skinMark=now;
-        };
         if(boneMatrices) {
             // PAL10D778 DoBlendingOnStrip copies the actual strip packet and
             // changes XYZ only. Its three embedded low bytes are two bone
             // indices and an unscaled8-bit blend value, not extra channels.
-            // The owner takes pooled copies (parallel: pre-taken per ordinal).
-            auto animatedStrip=parallel ? std::move(preposed[ordinal]):TakePosedStrip(strip);
-            // A pooled copy keyed by this source already holds every
-            // non-XYZ channel while the source revision is unchanged
-            // (decode/ST fix/damage restamp it); XYZ is rewritten below.
-            const bool reuse=animatedStrip && strip.nativeVertexRevision &&
-                animatedStrip->nativePoseSource==&strip &&
-                animatedStrip->nativePoseSourceRevision==strip.nativeVertexRevision &&
-                animatedStrip->positions.size()==strip.positions.size();
-            if(!reuse) {
-                if(animatedStrip)*animatedStrip=strip;
-                else animatedStrip=std::make_unique<EditorMarkerSolidGeometry::Strip>(strip);
-                animatedStrip->nativePoseSourceRevision=strip.nativeVertexRevision;
-            }
-            animatedStrip->nativePoseSource=&strip;
+            auto animatedStrip=std::make_unique<EditorMarkerSolidGeometry::Strip>(strip);
             animatedStrip->nativeVertexRevision=0;
-            skinAt(0);
-            if(skinTimed) {++ecstasySkinSplitMicros[3];ecstasySkinSplitMicros[4]+=animatedStrip->positions.size();}
-            skinStrip(*animatedStrip,strip.positions);
-#if !defined(__vita__) && !defined(__SWITCH__)
-            if(verifyPoseReuse && reuse) {
-                auto reference=strip;reference.nativePoseSource=&strip;reference.nativeVertexRevision=0;
-                reference.nativePoseSourceRevision=strip.nativeVertexRevision;
-                skinStrip(reference,strip.positions);
-                const auto& a=*animatedStrip;
-                const bool same=std::memcmp(a.positions.data(),reference.positions.data(),a.positions.size()*12)==0 &&
-                    a.normals==reference.normals && a.textureCoordinates==reference.textureCoordinates &&
-                    a.colors==reference.colors && a.nativeUniqueOrder==reference.nativeUniqueOrder &&
-                    a.nativeTriangleOrder==reference.nativeTriangleOrder && a.flags==reference.flags &&
-                    a.textureIndex==reference.textureIndex && a.lightMaterialIndex==reference.lightMaterialIndex &&
-                    a.drawDisableMask==reference.drawDisableMask && a.minimum==reference.minimum &&
-                    a.maximum==reference.maximum && a.textureScales==reference.textureScales &&
-                    a.autoK==reference.autoK && a.nativeTopologyCount==reference.nativeTopologyCount &&
-                    a.nativeTopologyMask==reference.nativeTopologyMask && a.mipLevelScale==reference.mipLevelScale;
-                static std::uint64_t checks=0,mismatches=0;++checks;if(!same)++mismatches;
-                if((checks&4095u)==0 || (!same && mismatches==1)) {
-                    char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
-                        (unsigned long long)checks,(unsigned long long)mismatches);
-                    platform::RecordSessionEvent("render.pose_reuse_verify",text);
+            for(auto& position:animatedStrip->positions) {
+                std::array<std::uint32_t,3> encoded{};
+                std::memcpy(encoded.data(),position.data(),sizeof(encoded));
+                const auto first=encoded[0]&255u,second=encoded[1]&255u,weight=encoded[2]&255u;
+                const auto transformVertex=[&](std::uint32_t bone,float outputVertex[4]) {
+                    Require(bone<boneMatrices->size(),"Animated vertex bone exceeds its retained skeleton");
+                    eMulVector3(outputVertex,(*boneMatrices)[bone].data(),position.data());
+                };
+                float posed[4];
+                if(weight==0)transformVertex(first,posed);
+                else if(weight==1)transformVertex(second,posed);
+                else {
+                    float other[4];transformVertex(first,posed);transformVertex(second,other);
+                    const float blend=static_cast<float>(weight)*(1.0f/256.0f);
+                    for(std::size_t axis=0;axis<3;++axis)
+                        posed[axis]=posed[axis]*(1.0f-blend)+other[axis]*blend;
                 }
+                std::copy(posed,posed+3,position.begin());
             }
-#endif
             submitted=animatedStrip.get();posedStrips.push_back(std::move(animatedStrip));
-            skinAt(1);
-        }
-        if(mergeRuns && &output==&commands_ && output.size()>start && submitted->positions.size()>=3) {
-            // The command CaptureStrip would append differs from the
-            // previous one only by its strip: same model, instance, texture,
-            // final material, flags and clip class within this call. Only a
-            // strip that appends exactly one command (no depth sort, no
-            // specular/reflection follower) joins the run.
-            const bool reflectionCommand=(draw&0x100u) && (state.environmentApplicationState==3 || !kModelRunsDropReflection);
-            auto& previous=output.back();
-            const auto* finalMaterial=material && state.inGameMaterials && material->inGameVariant ?
-                material->inGameVariant.get():material;
-            if(!texture->requiresDepthSort && !(draw&0x40u) && !reflectionCommand &&
-                previous.kind==EcstasyDrawKind::SolidStrip && previous.model==&model &&
-                previous.instance==state.instance && previous.texture==texture &&
-                previous.lightMaterial==finalMaterial && previous.drawFlags==draw &&
-                previous.clipClass==clipClass && !previous.depthSorted &&
-                previous.carShadow==EcstasyCarShadow::None && previous.sceneryRunCount<0xffffu &&
-                (!previous.sceneryRunCount ||
-                    previous.sceneryRunFirst+previous.sceneryRunCount==sceneryRunStrips_.size())) {
-                Require(submitted->positions.size()==submitted->textureCoordinates.size() &&
-                    submitted->positions.size()==submitted->colors.size(),"Solid strip channels have different extents");
-                if(draw&0x140u)Require(lightContext && material && submitted->normals.size()==submitted->positions.size(),
-                    "Reflected strip lacks its original normal/material/light context");
-                if(!previous.sceneryRunCount) {
-                    previous.sceneryRunFirst=static_cast<std::uint32_t>(sceneryRunStrips_.size());
-                    sceneryRunStrips_.push_back(previous.strip);previous.sceneryRunCount=1;
-                }
-                sceneryRunStrips_.push_back(submitted);++previous.sceneryRunCount;
-                skinAt(2);
-                return;
-            }
         }
         CaptureStrip(output,alphaGroups,state,model,*submitted,*texture,material,localToWorld,
             view,clipClass,draw,alphaScale,lightContext);
-        skinAt(2);
     };
-#if !defined(__vita__) && !defined(__SWITCH__)
-    if(ecstasyCarCensusActive) {
-        ++ecstasyCarCensus[1];
-        const TextureInfo* censusTexture=nullptr;std::uint32_t lastFlags=~0u;const void* lastMaterial=nullptr;
-        for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index) {
-            const auto& strip=geometry.strips[index];
-            if(strip.flags&0x400u)continue;
-            const auto* texture=textureInfoForDescriptor(&stripTexture(geometry,strip));
-            ++ecstasyCarCensus[2];
-            if(texture && texture->requiresDepthSort)++ecstasyCarCensus[3];
-            if(strip.flags&0x40u)++ecstasyCarCensus[4];
-            if(strip.flags&0x100u)++ecstasyCarCensus[5];
-            if(run.clipClass==1)++ecstasyCarCensus[6];
-            if(boneMatrices)++ecstasyCarCensus[7];
-            const void* material=strip.lightMaterialIndex>=0 && static_cast<std::size_t>(strip.lightMaterialIndex)<geometry.lightMaterials.size() ?
-                geometry.lightMaterials[static_cast<std::size_t>(strip.lightMaterialIndex)]:nullptr;
-            if(texture!=censusTexture || strip.flags!=lastFlags || material!=lastMaterial)++ecstasyCarCensus[8];
-            censusTexture=texture;lastFlags=strip.flags;lastMaterial=material;
-        }
-        if((ecstasyCarCensus[1]&4095u)==0) {
-            char text[200];const auto& c=ecstasyCarCensus;
-            std::snprintf(text,sizeof(text),"cars=%llu models=%llu strips=%llu sorted=%llu spec40=%llu refl100=%llu clip1=%llu boned=%llu runs=%llu",
-                (unsigned long long)c[0],(unsigned long long)c[1],(unsigned long long)c[2],(unsigned long long)c[3],(unsigned long long)c[4],
-                (unsigned long long)c[5],(unsigned long long)c[6],(unsigned long long)c[7],(unsigned long long)c[8]);
-            platform::RecordSessionEvent("render.car_census",text);
-        }
-    }
-#endif
     if(!parallel) {
-        mergeRuns=ecstasyModelRuns!=0;
-#if !defined(__vita__) && !defined(__SWITCH__)
-        static const bool verifyModelRuns=[] {const char* value=std::getenv("HP2_VERIFY_MODEL_RUNS");return value && *value=='1';}();
-        std::vector<EcstasyDrawCommand> referenceCommands;
-        if(verifyModelRuns && mergeRuns && !boneMatrices) {
-            // Reference: the per-strip commands, captured first into a side
-            // list (no posed strips for unboned models; alpha groups local).
-            auto referenceGroups=nextAlphaGroup_;
-            mergeRuns=false;
-            for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index)
-                capture(0,index,run.clipClass,referenceCommands,animatedStrips_,referenceGroups);
-            mergeRuns=true;
-        }
-#endif
         for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index)
-            capture(0,index,run.clipClass,commands_,animatedStrips_,nextAlphaGroup_);
-#if !defined(__vita__) && !defined(__SWITCH__)
-        if(verifyModelRuns && ecstasyModelRuns && !boneMatrices) {
-            std::vector<EcstasyDrawCommand> expanded;
-            for(std::size_t at=start;at<commands_.size();++at) {
-                const auto& command=commands_[at];
-                if(!command.sceneryRunCount) {expanded.push_back(command);continue;}
-                for(std::uint32_t strip=0;strip<command.sceneryRunCount;++strip) {
-                    expanded.push_back(command);auto& single=expanded.back();
-                    single.strip=sceneryRunStrips_[command.sceneryRunFirst+strip];
-                    single.sceneryRunCount=0;single.sceneryRunFirst=0;
-                }
-            }
-            bool same=expanded.size()==referenceCommands.size();
-            for(std::size_t at=0;same && at<expanded.size();++at)
-                same=NativeDrawCommandFieldsEqual(expanded[at],referenceCommands[at]);
-            static std::uint64_t checks=0,mismatches=0,merged=0;
-            ++checks;if(!same)++mismatches;merged+=referenceCommands.size()-(commands_.size()-start);
-            if((checks&4095u)==0 || (!same && mismatches<4)) {
-                char text[128];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu merged_commands=%llu",
-                    (unsigned long long)checks,(unsigned long long)mismatches,(unsigned long long)merged);
-                platform::RecordSessionEvent("render.model_runs_verify",text);
-            }
-        }
-#endif
-        if(splitTimed) {splitAt(2);ecstasyModelSplitMicros[4]+=count;ecstasyModelSplitMicros[5]+=commands_.size()-start;}
+            capture(index,run.clipClass,commands_,animatedStrips_,nextAlphaGroup_);
         return commands_.size()-start;
     }
     sources.reserve(count);
     for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index)
         sources.push_back({index,run.clipClass});
-    if(boneMatrices) {
-        preposed.clear();preposed.resize(count);
-        for(std::size_t ordinal=0;ordinal<count;++ordinal) {
-            const auto index=sources[ordinal].index;
-            if(index<geometry.strips.size() && !(geometry.strips[index].flags&0x400u))
-                preposed[ordinal]=TakePosedStrip(geometry.strips[index]);
-        }
-    }
-    struct ReturnPreposed {
-        EcstasyFrame& frame;bool active;
-        ~ReturnPreposed() {if(active)for(auto& strip:frame.preposedScratch_)frame.ReturnPosedStrip(strip);}
-    } returnPreposed{*this,boneMatrices!=nullptr};
     const auto chunkCount=count/stripsPerChunk+(count%stripsPerChunk!=0);
     if(chunks.size()<chunkCount)chunks.resize(chunkCount);
     clear.chunksUsed=chunkCount;
@@ -4499,7 +3252,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         const auto last=first+std::min(stripsPerChunk,count-first);
         chunk.commands.reserve((last-first)*3);
         for(auto index=first;index<last;++index)
-            capture(index,sources[index].index,sources[index].clipClass,
+            capture(sources[index].index,sources[index].clipClass,
                 chunk.commands,chunk.animatedStrips,chunk.alphaGroups);
     },2);
     std::size_t commandCount=0,posedCount=0;
@@ -4520,30 +3273,6 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         }
         nextAlphaGroup_+=chunk.alphaGroups;
     }
-#if !defined(__SWITCH__) && !defined(__vita__)
-    // PC HP2_VERIFY_SKIN=1: re-pose each parallel posed strip serially from
-    // its source and compare every channel (pooled copies included).
-    static const bool verifySkin=[] {const char* value=std::getenv("HP2_VERIFY_SKIN");return value && *value=='1';}();
-    if(verifySkin && boneMatrices) {
-        static std::uint64_t checks=0,mismatches=0;
-        for(auto at=animatedStrips_.size()-posedCount;at<animatedStrips_.size();++at) {
-            const auto& posedStrip=*animatedStrips_[at];++checks;
-            Require(posedStrip.nativePoseSource,"Posed strip lost its source");
-            auto expected=*posedStrip.nativePoseSource;skinStrip(expected,posedStrip.nativePoseSource->positions);
-            const auto same=[](const auto& a,const auto& b) {
-                return a.size()==b.size() && (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(a[0]))==0);
-            };
-            if(!same(expected.positions,posedStrip.positions) || !same(expected.normals,posedStrip.normals) ||
-                !same(expected.textureCoordinates,posedStrip.textureCoordinates) || !same(expected.colors,posedStrip.colors) ||
-                expected.flags!=posedStrip.flags || expected.textureIndex!=posedStrip.textureIndex)++mismatches;
-        }
-        if((checks&4095u)<posedCount) {
-            char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
-                (unsigned long long)checks,(unsigned long long)mismatches);
-            platform::RecordSessionEvent("render.skin_verify",text);
-        }
-    }
-#endif
     return commands_.size()-start;
 }
 
@@ -4594,9 +3323,8 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     const auto captureCheckpoint=[&](std::size_t phase) {
         if(!scene.captureProfile)return;
         const auto now=CaptureClock::now();
-        const auto spent=std::chrono::duration<double,std::milli>(now-capturePhaseStarted).count();
-        scene.captureProfile->milliseconds[phase]+=spent;
-        if(!scene.emitRaceGeometry)scene.captureProfile->discardedMilliseconds[phase]+=spent;
+        scene.captureProfile->milliseconds[phase]+=
+            std::chrono::duration<double,std::milli>(now-capturePhaseStarted).count();
         capturePhaseStarted=now;
     };
     if(scene.captureProfile) {
@@ -4690,98 +3418,11 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         scene.track->trackFile && scene.track->trackFile->Loaded() ?
         scene.track->trackFile->Resources().scenery:nullptr;
     captureCheckpoint(1);
-    // Diagnostic: world-phase split (matrices, scenery, NIS, sun, skids,
-    // movers, players, objects) for both emitted and discarded captures.
-    auto worldSplitMark=CaptureClock::now();
-    auto& worldSplit=scene.emitRaceGeometry ? ecstasyWorldSplitMs:ecstasyDiscardWorldSplitMs;
-    const auto worldSplitAt=[&](std::size_t part) {
-        if(!scene.captureProfile)return;
-        const auto now=CaptureClock::now();
-        worldSplit[part]+=std::chrono::duration<double,std::milli>(now-worldSplitMark).count();
-        worldSplitMark=now;
-    };
-    // Asynchronous rear-view scenery (exact). Launched before view1 so it
-    // overlaps view1's scenery and world tail; merged at view3's position.
-    struct AsyncMirrorJob {
-        SceneryResources* scenery{};const CarCinematicScreen* view{};EcstasyFrame* aux{};
-        std::uint32_t mask{};std::int32_t worldFrames{};
-        SceneryResources::AsyncCapture capture;
-        std::atomic<int> collectReady{0};
-        std::exception_ptr failure;
-        std::uint32_t micros{};
-        static void Run(void* context,unsigned index) {
-            if(index!=0)return;
-            auto& job=*static_cast<AsyncMirrorJob*>(context);
-            const auto started=std::chrono::steady_clock::now();
-            ecstasyAsyncMirrorPhase.fetch_add(10);
-#if !defined(__vita__) && !defined(__SWITCH__)
-            // Race testing: start late so the job overlaps view1's tail.
-            static const int delay=[] {const char* v=std::getenv("HP2_ASYNC_MIRROR_DELAY_US");return v ? std::atoi(v):0;}();
-            if(delay>0)std::this_thread::sleep_for(std::chrono::microseconds(delay));
-#endif
-            try {job.scenery->Render(*job.view,*job.aux,job.mask,job.worldFrames,true,&job.capture);}
-            catch(...) {job.failure=std::current_exception();}
-            ecstasyAsyncMirrorPhase.fetch_add(2);
-            job.micros=static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now()-started).count());
-        }
-    };
-    struct AsyncMirror {
-        AsyncMirrorJob job;
-        bool launched{},finished{};
-        CarCinematicScreen screen{};CarCinematicViewFrame camera{};
-        void Finish() {
-            if(!launched || finished)return;
-            finished=true;
-            job.collectReady.store(1,std::memory_order_release);
-            ecstasyAsyncMirrorPhase.fetch_add(1);
-            unsigned index;
-            while(collisionHelperClaim(index)) {
-                if(index==0)++ecstasyAsyncMirrorStats[4];
-                AsyncMirrorJob::Run(&job,index);
-            }
-            ecstasyAsyncMirrorPhase.fetch_add(1);
-            collisionHelperClose();
-            ecstasyAsyncMirrorPhase.fetch_add(1);
-        }
-        ~AsyncMirror() {if(job.scenery)job.scenery->SetCollectSignal(nullptr);Finish();}
-    } asyncMirror;
-    if(ecstasyAsyncMirrorScenery && scenery && scene.emitRaceGeometry && scene.parameters &&
-        active(views.screens[1]) && !active(views.screens[2]) && active(views.screens[3]) &&
-        views.screens[3].id==3 && collisionHelperPoolSize()>0) {
-        auto& view=views.screens[3];
-        Require(ecstasyViewCalculateMatrices(&views,&view,0,0,0)==CAR_CINEMATIC_OK,
-            "Original world projection could not be calculated");
-        std::uint32_t mask=(views.presentationLayout==3 || views.presentationLayout==4) ? 0x10u:0x11u;
-        if(scene.parameters->reverse==0)mask|=8u;
-        if(scene.parameters->reverse==1)mask|=4u;
-        auto& aux=frame.AsyncSceneryFrame(0);
-        frame.PrepareAsyncScenery(aux);
-        auto& job=asyncMirror.job;
-        job.scenery=scenery;job.view=&view;job.aux=&aux;job.mask=mask;job.worldFrames=scene.clock->worldTimeFrames;
-        asyncMirror.screen=view;asyncMirror.camera=view.view->current;
-        job.capture.collectReady=&job.collectReady; // the job waits for view1's zone lookup
-        scenery->SetCollectSignal(&job.collectReady);
-        asyncMirror.launched=true;
-        ++ecstasyAsyncMirrorStats[0];
-        ecstasyAsyncMirrorPhase.store(1);
-        collisionHelperPublish(2,&AsyncMirrorJob::Run,&job);
-    }
     for(std::size_t i=1;i<10;++i) {
         auto& view=views.screens[i];if(!active(view))continue;
-        worldSplitMark=CaptureClock::now();
         // PAL113030..11304C supplies32 only to the cubemap culling far
         // override. Raster/depth projection retains the actual camera range.
         const float clipFar=view.id>=4 && view.id<10 ? 32.0f:0.0f;
-        const bool mergeMirror=asyncMirror.launched && i==3;
-        if(asyncMirror.launched && i>=2 && !asyncMirror.finished) {
-            const auto waitStarted=std::chrono::steady_clock::now();
-            asyncMirror.Finish();
-            ecstasyAsyncMirrorStats[5]+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now()-waitStarted).count());
-            ecstasyAsyncMirrorStats[6]+=asyncMirror.job.micros;
-            if(asyncMirror.job.failure)std::rethrow_exception(asyncMirror.job.failure);
-        }
         Require(ecstasyViewCalculateMatrices(&views,&view,0,0,clipFar)==CAR_CINEMATIC_OK,
             "Original world projection could not be calculated");
         ecstasyViewSetCurrent(&views,&view);
@@ -4789,67 +3430,14 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         // Its0/1 gates are independent of the auxiliary-view bits.
         std::uint32_t mask=(views.presentationLayout==3 || views.presentationLayout==4) ? 0x10u:0x11u;
         if(view.id>=4 && view.id<10)mask|=0x102u;
-        worldSplitAt(0);
         // Only view 1 updates scenery LOD hysteresis. A discarded frame
         // needs that state update, but no mirror or cubemap scenery walk.
-#if defined(__vita__)
-        // Vita: the native near-detail hysteresis updates on presented frames
-        // only (~30 Hz); a discarded catch-up step skips the whole tree walk.
-        if(scenery && scene.emitRaceGeometry) {
-#else
         if(scenery && (scene.emitRaceGeometry || view.id==1)) {
-#endif
             Require(scene.parameters,"Scenery source filter has no live RaceParameters");
             if(scene.parameters->reverse==0)mask|=8u;
             if(scene.parameters->reverse==1)mask|=4u;
             const auto sceneryStarted=std::chrono::steady_clock::now();
-            bool merged=false;
-            if(mergeMirror) {
-                // Exact only if nothing the job read changed before view3.
-                constexpr auto first=offsetof(CarCinematicScreen,pixelScale);
-                constexpr auto last=offsetof(CarCinematicScreen,matricesCalculated)+1;
-                auto& job=asyncMirror.job;auto& aux=*job.aux;
-                const bool same=job.mask==mask && !job.capture.abort &&
-                    std::memcmp(reinterpret_cast<const char*>(&view)+first,reinterpret_cast<const char*>(&asyncMirror.screen)+first,last-first)==0 &&
-                    view.view==asyncMirror.screen.view &&
-                    std::memcmp(&view.view->current,&asyncMirror.camera,sizeof(asyncMirror.camera))==0 &&
-                    frame.AsyncSceneryStateMatches(aux);
-                if(job.capture.abort) {++ecstasyAsyncMirrorStats[3];++ecstasyAsyncMirrorStats[7+(job.capture.abortReason&3 ? job.capture.abortReason:4)];}
-                else if(!same)++ecstasyAsyncMirrorStats[2];
-#if !defined(__vita__) && !defined(__SWITCH__)
-                if(same && ecstasyAsyncMirrorScenery==2) {
-                    // Rerun the same capture here (no concurrency) and compare.
-                    auto& check=frame.AsyncSceneryFrame(1);
-                    frame.PrepareAsyncScenery(check);
-                    SceneryResources::AsyncCapture again;
-                    scenery->Render(view,check,mask,scene.clock->worldTimeFrames,true,&again);
-                    bool equal=!again.abort && again.rejected.size()==job.capture.rejected.size() &&
-                        EcstasyFrame::AsyncSceneryCommandsEqual(aux,check);
-                    for(std::size_t at=0;equal && at<again.rejected.size();++at) {
-                        const auto& x=again.rejected[at];const auto& y=job.capture.rejected[at];
-                        equal=x.command==y.command && x.model==y.model && x.matrix==y.matrix && x.clip==y.clip &&
-                            x.context.has_value()==y.context.has_value() &&
-                            (!x.context || std::memcmp(&*x.context,&*y.context,sizeof(SceneLightContext))==0);
-                    }
-                    if(!equal)++ecstasyAsyncMirrorStats[7];
-                }
-#endif
-                if(same) {
-                    const auto& commands=aux.Commands();
-                    const auto runBase=frame.AppendSceneryRunStrips(aux.SceneryRunStrips());
-                    std::size_t at=0;
-                    for(auto& rejected:job.capture.rejected) {
-                        frame.AppendOpaqueSceneryCommands(commands.data()+at,rejected.command-at,runBase);
-                        at=rejected.command;
-                        frame.RenderModel(*rejected.model,rejected.matrix.data(),view,rejected.clip==2 ? 4u:0u,1.0f,
-                            scene.clock->worldTimeFrames,rejected.context ? &*rejected.context:nullptr);
-                    }
-                    frame.AppendOpaqueSceneryCommands(commands.data()+at,commands.size()-at,runBase);
-                    ++ecstasyAsyncMirrorStats[1];
-                    merged=true;
-                }
-            }
-            if(!merged)scenery->Render(view,frame,mask,scene.clock->worldTimeFrames,scene.emitRaceGeometry);
+            scenery->Render(view,frame,mask,scene.clock->worldTimeFrames,scene.emitRaceGeometry);
             if(scene.sceneryCaptureTiming || scene.sceneryFrameTiming) {
                 const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now()-sceneryStarted).count());
@@ -4857,25 +3445,14 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
                 if(scene.sceneryFrameTiming)scene.sceneryFrameTiming->Observe(elapsed);
             }
         }
-        if(i==1 && asyncMirror.launched) {
-            scenery->SetCollectSignal(nullptr);
-            asyncMirror.job.collectReady.store(1,std::memory_order_release);
-        }
-        worldSplitAt(1);
         // PAL113250 follows StuffScenery11321C and precedes the sun and
         // active camera mover. NIS actors retain their actual replay poses.
-        // A discarded capture publishes nothing: the NIS render-side setup
-        // (ground height, phase select) is recomputed from the world clock
-        // by the next rendered frame, so skipping it changes no state read
-        // by logic (placement bounds use the constant animation key only).
-        if(scene.emitRaceGeometry && i<4 && scene.track && scene.track->NisManagers())
+        if(i<4 && scene.track && scene.track->NisManagers())
             (void)DrawNisObjects(*scene.track->NisManagers(),view,frame);
-        worldSplitAt(2);
         // PAL113284 follows NIS and precedes RenderClans. Only the source
         // transfer operation is gated by InGameFlag; glare owns its timer.
         if(i<4)resources->Sun().StuffSun(view,frame,*scene.clock,
             scene.flow && scene.flow->inGameFlag!=0);
-        worldSplitAt(3);
         // PAL1132C4 -> RenderClans1AB810 consumes the original world's
         // live SkidSets on primary views1..3. The source1AACC0 polygons
         // already contain world positions and the authored material texture.
@@ -4893,16 +3470,13 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
                 frame.RenderPolygon3D(polygon,textureInfoForDescriptor(quad.texture),eMathIdentityMatrix,view);
             }
         }
-        worldSplitAt(4);
         // PAL11333C consumes the active (native last) mover virtual Render.
         // ZonePreview emits into FrameEffects; ordinary camera Render is empty.
         if(i<4)Require(carCinematicRenderMovers(&view,&frame)==CAR_CINEMATIC_OK,
             "Camera mover rendering lost its canonical active owner");
-        worldSplitAt(5);
         if(i<4 && scene.track && scene.track->Players())
             Require(carFramePlayerRenderPlayers(scene.track->Players(),&view,&frame)!=0,
                 "Player visible driving line lost its original owner");
-        worldSplitAt(6);
         // PAL11334C: the original WorldObject list follows scenery on the
         // primary views1..3 and precedes RenderFlailerModels. Fern shakers
         // hide their authored static placement while this very model lives.
@@ -4913,7 +3487,6 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         if(scene.emitRaceGeometry && i<4 && scene.track && scene.flow)
             (void)RenderWorldLightFlares(scene.track->files.Registry().Lights(),
                 scene.track->files.Registry(),view,frame,scene.flow->inGameFlag!=0);
-        worldSplitAt(7);
     }
     // The source RenderFlailerModels stage follows background/scenery and
     // precedes RenderCars. Each queued model retains its actual view; the
@@ -5067,13 +3640,13 @@ void EcstasyFrame::MarkSceneHistoryBoundary(const EcstasyRenderTarget& display,b
     AttachAlphaPolys();
     EcstasyDrawCommand command;command.kind=source ? EcstasyDrawKind::SceneHistorySource:EcstasyDrawKind::SceneHistoryBoundary;
     command.target=&display;commands_.push_back(command);
-    MarkCommandBoundary();
+    pendingAlphaBegin_=commands_.size();
 }
 
 void EcstasyFrame::Seal()
 {
     Require(phase_==Phase::Building,"Graphics frame was already sealed");
-    AttachAlphaPolys();MaterializeOrder();phase_=Phase::Ready;
+    AttachAlphaPolys();phase_=Phase::Ready;
 }
 void EcstasyFrame::MarkSubmitted()
 {
@@ -5096,9 +3669,9 @@ void EcstasyFrame::CancelBeforeSubmit()
 void EcstasyFrame::BeginNextFrame()
 {
     Require(phase_==Phase::Complete,"Only a completed graphics frame can be reused");
-    Require(commands_.empty() && pendingAlphaIndices_.empty() && order_.empty() &&
+    Require(commands_.empty() && pendingAlphaCommands_.empty() && orderingScratch_.empty() &&
         visibleScratch_.empty() && modelStripScratch_.empty() && modelTextureScratch_.empty() && depthTransfers_.empty() &&
-        retainedStrips_.empty() && liveWorldPolygons_==0 && liveWorldStrips_==0 &&
+        retainedStrips_.empty() && worldPolygons_.empty() && worldStrips_.empty() &&
         animatedStrips_.empty() && liveParticleGroups_==0 && !textureAnimationResources_ &&
         liveInstances_==0 && liveProjections_==0 && !lastProjection_,
         "Completed graphics frame still owns a submitted borrower");
@@ -5110,75 +3683,22 @@ void EcstasyFrame::BeginNextFrame()
     textureAnimationWorldFrames_=0;textureAnimationRealFrames_=0;
     phase_=Phase::Building;
 }
-std::unique_ptr<EditorMarkerSolidGeometry::Strip> EcstasyFrame::TakePosedStrip(const EditorMarkerSolidGeometry::Strip& source)
-{
-    std::unique_ptr<EditorMarkerSolidGeometry::Strip> strip;
-    const auto found=posedStripPool_.find(&source);
-    if(found!=posedStripPool_.end() && !found->second.empty()) {
-        strip=std::move(found->second.back());found->second.pop_back();--posedStripPooled_;
-    }
-    return strip;
-}
-void EcstasyFrame::ReturnPosedStrip(std::unique_ptr<EditorMarkerSolidGeometry::Strip>& strip) noexcept
-{
-    if(!strip || !strip->nativePoseSource || posedStripPooled_>=8192)return;
-    try {posedStripPool_[strip->nativePoseSource].push_back(std::move(strip));++posedStripPooled_;}
-    catch(...) {} // pool growth is optional
-}
 void EcstasyFrame::Release() noexcept
 {
     textureAnimationResources_=nullptr;environmentCameraFaces_=0;
-    commands_.clear();sceneryRunStrips_.clear();pendingAlphaIndices_.clear();order_.clear();orderTail_=0;orderScratch_.clear();attachSwap_.clear();visibleScratch_.clear();depthTransfers_.clear();
+    commands_.clear();pendingAlphaCommands_.clear();orderingScratch_.clear();visibleScratch_.clear();depthTransfers_.clear();
     modelStripScratch_.clear();modelTextureScratch_.clear();
     for(auto& chunk:modelCaptureScratch_) {
         chunk.commands.clear();chunk.animatedStrips.clear();chunk.alphaGroups=0;
     }
-    liveWorldPolygons_=0;
+    worldPolygons_.clear();
     for(std::size_t index=0;index<liveParticleGroups_;++index)particleGroups_[index]->clear();
     liveParticleGroups_=0;
-    liveWorldStrips_=0;
-    for(auto& strip:animatedStrips_)ReturnPosedStrip(strip); // unpooled strips are freed below
+    worldStrips_.clear();
     animatedStrips_.clear();
     for (auto* strip:retainedStrips_)strip->pool->Complete(*strip);
     retainedStrips_.clear();
-    liveInstances_=0;liveProjections_=0;lastProjection_=nullptr;lastLightContext_=nullptr;lastLightKey_=0;
-}
-// Indexed texture fast decode (exact; PC HP2_VERIFY_TEX_DECODE=1 checks it
-// against the per-texel form). 0 = per-texel form only.
-int ecstasyFastTextureDecode=1;
-struct NativeConvertedTexel {std::uint8_t x,y,byte,shift;};
-// Per-format 128-wide page tile of the preconverted stream addressing in
-// DecodeTextureMipRgba: page-relative source word (x,y), byte lane, shift.
-const std::array<NativeConvertedTexel,128*128>& NativeConvertedTextureTile(bool fourBit)
-{
-    static const auto build=[](bool four) {
-        std::array<NativeConvertedTexel,128*128> table{};
-        static constexpr std::uint8_t blocks4[8][4]={
-            {0,2,8,10},{1,3,9,11},{4,6,12,14},{5,7,13,15},
-            {16,18,24,26},{17,19,25,27},{20,22,28,30},{21,23,29,31}};
-        static constexpr std::uint8_t blocks8[4][8]={
-            {0,1,4,5,16,17,20,21},{2,3,6,7,18,19,22,23},
-            {8,9,12,13,24,25,28,29},{10,11,14,15,26,27,30,31}};
-        const std::uint32_t rows=four ? 128u:64u;
-        for(std::uint32_t y=0;y<rows;++y)for(std::uint32_t x=0;x<128u;++x) {
-            const auto blockWidth=four ? 32u:16u;
-            const auto block=four ? blocks4[(y%128u)/16u][(x%128u)/32u]:blocks8[(y%64u)/16u][(x%128u)/16u];
-            const auto column=(y%16u)/4u,cx=x&(blockWidth-1u),cy=y%4u;
-            const auto word=(cx&1u)+((cy&1u)<<1u)+((cx&2u)<<1u)+
-                ((((cx>>2u)&1u)^(cy>>1u)^(column&1u))<<3u);
-            const auto lane=(cx/8u)*2u+cy/2u;
-            const auto blockX=(block&1u)|((block>>1u)&2u)|((block>>2u)&4u);
-            const auto blockY=((block>>1u)&1u)|((block>>2u)&2u);
-            auto& entry=table[y*128u+x];
-            entry.x=static_cast<std::uint8_t>(blockX*8u+(word&1u)+((word>>1u)&6u));
-            entry.y=static_cast<std::uint8_t>(blockY*8u+column*2u+((word>>1u)&1u));
-            entry.byte=static_cast<std::uint8_t>(four ? lane/2u:lane);
-            entry.shift=static_cast<std::uint8_t>(four ? (lane&1u)*4u:0u);
-        }
-        return table;
-    };
-    static const auto four=build(true),eight=build(false);
-    return fourBit ? four:eight;
+    liveInstances_=0;liveProjections_=0;lastProjection_=nullptr;
 }
 std::vector<std::uint8_t> DecodeTextureMipRgba(const TextureInfo& texture,
     std::uint32_t level,std::size_t sourceOffset,std::size_t sourceBytes,
@@ -5237,145 +3757,50 @@ std::vector<std::uint8_t> DecodeTextureMipRgba(const TextureInfo& texture,
     // rectangle is smaller. Preserve the retained texels before extending
     // only repeated axes below; clamp-only padding remains transparent.
     std::vector<std::uint8_t> rgba(static_cast<std::size_t>(width)*height*4);
-    // Row/column loops: the Vita CPU has no integer divider, so per-pixel
-    // pixel/width and page%pages divisions dominated (~16 ms per 256x256).
-    // Every address below is the same value the per-pixel form computed.
-    const auto convertedPages=static_cast<std::uint32_t>(bufferWidth)/2u;
-    if (psm==0 || psm==1) {
-        // 32-bit texels are already RGBA in authored row order: copy rows
-        // (same bytes as the per-texel loop; PSMCT24 alpha is the constant).
-        for (std::uint32_t y=0;y<authoredHeight;++y) {
-            auto* destination=rgba.data()+static_cast<std::size_t>(y)*width*4;
-            std::memcpy(destination,source+static_cast<std::size_t>(y)*authoredWidth*4,
-                static_cast<std::size_t>(authoredWidth)*4);
-            if (psm==1)for (std::uint32_t x=0;x<authoredWidth;++x)destination[x*4+3]=128u;
+    for (std::size_t pixel=0;pixel<count;++pixel) {
+        const std::uint8_t* color{};
+        if (psm==0 || psm==1) color=source+pixel*4;
+        else {
+            std::size_t byteOffset=psm==0x13 ? pixel:pixel/2;
+            unsigned shift=psm==0x13 ? 0u:static_cast<unsigned>(pixel&1u)*4u;
+            if(converted) {
+                const auto x=static_cast<std::uint32_t>(pixel%authoredWidth);
+                const auto y=static_cast<std::uint32_t>(pixel/authoredWidth);
+                const auto pages=static_cast<std::uint32_t>(bufferWidth)/2u;
+                const auto pageHeight=psm==0x14 ? 128u:64u;
+                const auto blockWidth=psm==0x14 ? 32u:16u;
+                const auto page=x/128u+(y/pageHeight)*pages;
+                const auto block=psm==0x14 ? blocks4[(y%128u)/16u][(x%128u)/32u]:
+                    blocks8[(y%64u)/16u][(x%128u)/16u];
+                const auto column=(y%16u)/4u,cx=x%blockWidth,cy=y%4u;
+                const auto word=(cx&1u)+((cy&1u)<<1u)+((cx&2u)<<1u)+
+                    ((((cx>>2u)&1u)^(cy>>1u)^(column&1u))<<3u);
+                const auto lane=(cx/8u)*2u+cy/2u;
+                // Invert the32-bit layout to address the retained export
+                // stream directly. This is a format conversion, not VRAM.
+                const auto blockX=(block&1u)|((block>>1u)&2u)|((block>>2u)&4u);
+                const auto blockY=((block>>1u)&1u)|((block>>2u)&2u);
+                const auto sourceX=(page%pages)*64u+blockX*8u+(word&1u)+((word>>1u)&6u);
+                const auto sourceY=(page/pages)*32u+blockY*8u+column*2u+((word>>1u)&1u);
+                byteOffset=(static_cast<std::size_t>(sourceY)*(authoredWidth/2u)+sourceX)*4u+
+                    (psm==0x14 ? lane/2u:lane);
+                shift=psm==0x14 ? (lane&1u)*4u:0u;
+                Require(byteOffset<required,"Preconverted texture addresses outside its actual authored mip");
+            }
+            std::uint32_t index=(source[byteOffset]>>shift)&(psm==0x13 ? 255u:15u);
+            // Imported PSMT8 palettes retain their on-disk CLUT layout;
+            // native-generated movie palettes have no console permutation.
+            if(psm==0x13 && !texture.palette.nativeLinearPalette)
+                index=(index&~24u)|((index&8u)<<1)|((index&16u)>>1);
+            Require(index<paletteColors,"Vulkan indexed pixel exceeds its authored palette");
+            color=palette+index*4;
         }
-    } else {
-        // Reference per-texel form (also the verification oracle).
-        const auto slowIndexed=[&](std::vector<std::uint8_t>& out) {
-        for (std::uint32_t y=0;y<authoredHeight;++y)for (std::uint32_t x=0;x<authoredWidth;++x) {
-            const std::size_t pixel=static_cast<std::size_t>(y)*authoredWidth+x;
-            const std::uint8_t* color{};
-            if (psm==0 || psm==1) color=source+pixel*4;
-            else {
-                std::size_t byteOffset=psm==0x13 ? pixel:pixel/2;
-                unsigned shift=psm==0x13 ? 0u:static_cast<unsigned>(pixel&1u)*4u;
-                if(converted) {
-                    const auto pages=convertedPages;
-                    const auto blockWidth=psm==0x14 ? 32u:16u;
-                    // page=x/128+(y/pageHeight)*pages, so page%pages==(x/128)%pages
-                    // and page/pages==y/pageHeight+(x/128)/pages.
-                    const auto pageColumn=x>>7u;
-                    const auto pageX=pageColumn<pages ? pageColumn:pageColumn%pages;
-                    const auto pageY=(psm==0x14 ? y>>7u:y>>6u)+(pageColumn<pages ? 0u:pageColumn/pages);
-                    const auto block=psm==0x14 ? blocks4[(y%128u)/16u][(x%128u)/32u]:
-                        blocks8[(y%64u)/16u][(x%128u)/16u];
-                    const auto column=(y%16u)/4u,cx=x&(blockWidth-1u),cy=y%4u;
-                    const auto word=(cx&1u)+((cy&1u)<<1u)+((cx&2u)<<1u)+
-                        ((((cx>>2u)&1u)^(cy>>1u)^(column&1u))<<3u);
-                    const auto lane=(cx/8u)*2u+cy/2u;
-                    // Invert the32-bit layout to address the retained export
-                    // stream directly. This is a format conversion, not VRAM.
-                    const auto blockX=(block&1u)|((block>>1u)&2u)|((block>>2u)&4u);
-                    const auto blockY=((block>>1u)&1u)|((block>>2u)&2u);
-                    const auto sourceX=pageX*64u+blockX*8u+(word&1u)+((word>>1u)&6u);
-                    const auto sourceY=pageY*32u+blockY*8u+column*2u+((word>>1u)&1u);
-                    byteOffset=(static_cast<std::size_t>(sourceY)*(authoredWidth/2u)+sourceX)*4u+
-                        (psm==0x14 ? lane/2u:lane);
-                    shift=psm==0x14 ? (lane&1u)*4u:0u;
-                    Require(byteOffset<required,"Preconverted texture addresses outside its actual authored mip");
-                }
-                std::uint32_t index=(source[byteOffset]>>shift)&(psm==0x13 ? 255u:15u);
-                // Imported PSMT8 palettes retain their on-disk CLUT layout;
-                // native-generated movie palettes have no console permutation.
-                if(psm==0x13 && !texture.palette.nativeLinearPalette)
-                    index=(index&~24u)|((index&8u)<<1)|((index&16u)>>1);
-                Require(index<paletteColors,"Vulkan indexed pixel exceeds its authored palette");
-                color=palette+index*4;
-            }
-            const auto destination=(static_cast<std::size_t>(y)*width+x)*4;
-            std::copy_n(color,3,out.data()+destination);
-            // Retain the original alpha byte. Expanding it to UNORM unity here
-            // rounds authored48 upward and loses all values above128. The shader
-            // converts the sampled byte to the GS128-unit scale before TFX.
-            out[destination+3]=psm==1 ? 128u:color[3];
-        }
-        };
-        if(ecstasyFastTextureDecode) {
-            // Same bytes as slowIndexed: the palette entry each index selects
-            // is resolved once per index (permutation and bound included),
-            // and preconverted addresses come from a per-format tile table
-            // built with the identical per-texel arithmetic. A bad index or
-            // address raises the same error after the loop (output unused).
-            const unsigned indexCount=psm==0x13 ? 256u:16u;
-            std::array<std::uint32_t,256> lookup{};std::array<std::uint8_t,256> valid{};
-            for(unsigned value=0;value<indexCount;++value) {
-                unsigned index=value;
-                if(psm==0x13 && !texture.palette.nativeLinearPalette)
-                    index=(index&~24u)|((index&8u)<<1)|((index&16u)>>1);
-                if(index<paletteColors) {std::memcpy(&lookup[value],palette+index*4,4);valid[value]=1;}
-            }
-            const unsigned mask=psm==0x13 ? 255u:15u;
-            bool badIndex=false,badAddress=false;
-            if(!converted) {
-                for(std::uint32_t y=0;y<authoredHeight;++y) {
-                    auto* destination=rgba.data()+static_cast<std::size_t>(y)*width*4;
-                    const std::size_t row=static_cast<std::size_t>(y)*authoredWidth;
-                    if(psm==0x13) {
-                        const auto* indices=source+row;
-                        for(std::uint32_t x=0;x<authoredWidth;++x) {
-                            const unsigned index=indices[x];
-                            badIndex|=!valid[index];std::memcpy(destination+x*4,&lookup[index],4);
-                        }
-                    } else for(std::uint32_t x=0;x<authoredWidth;++x) {
-                        const std::size_t pixel=row+x;
-                        const unsigned index=(source[pixel/2]>>((pixel&1u)*4u))&mask;
-                        badIndex|=!valid[index];std::memcpy(destination+x*4,&lookup[index],4);
-                    }
-                }
-            } else {
-                const auto& tile=NativeConvertedTextureTile(psm==0x14);
-                const std::uint32_t tileHeight=psm==0x14 ? 128u:64u;
-                const std::size_t halfWidth=authoredWidth/2u;
-                const auto pages=convertedPages;
-                for(std::uint32_t y=0;y<authoredHeight;++y) {
-                    auto* destination=rgba.data()+static_cast<std::size_t>(y)*width*4;
-                    const auto* rowTile=tile.data()+static_cast<std::size_t>(y&(tileHeight-1u))*128u;
-                    const auto rowPage=psm==0x14 ? y>>7u:y>>6u;
-                    for(std::uint32_t x0=0;x0<authoredWidth;x0+=128u) {
-                        const auto pageColumn=x0>>7u;
-                        const auto pageX=pageColumn<pages ? pageColumn:pageColumn%pages;
-                        const auto pageY=rowPage+(pageColumn<pages ? 0u:pageColumn/pages);
-                        const std::size_t base=static_cast<std::size_t>(pageY)*32u*halfWidth+pageX*64u;
-                        const auto end=std::min<std::uint32_t>(authoredWidth,x0+128u);
-                        for(std::uint32_t x=x0;x<end;++x) {
-                            const auto& entry=rowTile[x-x0];
-                            const std::size_t byteOffset=(base+entry.y*halfWidth+entry.x)*4u+entry.byte;
-                            if(byteOffset>=required) {badAddress=true;continue;}
-                            const unsigned index=(source[byteOffset]>>entry.shift)&mask;
-                            badIndex|=!valid[index];std::memcpy(destination+x*4,&lookup[index],4);
-                        }
-                    }
-                }
-            }
-            Require(!badAddress,"Preconverted texture addresses outside its actual authored mip");
-            Require(!badIndex,"Vulkan indexed pixel exceeds its authored palette");
-#if !defined(__vita__) && !defined(__SWITCH__)
-            static const bool verifyDecode=[] {const char* value=std::getenv("HP2_VERIFY_TEX_DECODE");return value && *value=='1';}();
-            if(verifyDecode) {
-                std::vector<std::uint8_t> reference(rgba.size());
-                slowIndexed(reference);
-                static std::uint64_t checks=0,mismatches=0;++checks;
-                const bool same=reference==rgba;
-                if(!same)++mismatches;
-                if((checks&255u)==0 || (!same && mismatches<4)) {
-                    char text[128];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu psm=%02x converted=%d %ux%u",
-                        (unsigned long long)checks,(unsigned long long)mismatches,psm,converted ? 1:0,authoredWidth,authoredHeight);
-                    platform::RecordSessionEvent("render.tex_decode_verify",text);
-                }
-            }
-#endif
-        } else slowIndexed(rgba);
+        const auto destination=(pixel/authoredWidth*width+pixel%authoredWidth)*4;
+        std::copy_n(color,3,rgba.data()+destination);
+        // Retain the original alpha byte. Expanding it to UNORM unity here
+        // rounds authored48 upward and loses all values above128. The shader
+        // converts the sampled byte to the GS128-unit scale before TFX.
+        rgba[destination+3]=psm==1 ? 128u:color[3];
     }
     // Native PC texture conversion: bilinear/mip sampling at a repeated
     // NPOT edge must not mix the last authored texel with fabricated RGBA0.
@@ -5400,24 +3825,10 @@ void graphicsNotifyPresentationComplete() noexcept {
     graphicsVideoBlankCounter.fetch_add(1,std::memory_order_release);
 }
 
-#if defined(HP2_ENABLE_VULKAN) || defined(HP2_ENABLE_VITAGL)
+#ifdef HP2_ENABLE_VULKAN
 // Windows/Vulkan adaptation of the proven EcstasyE.cpp rendering boundary.
 // It consumes the same native frame and final TextureInfo records. No GS,
 // DMA, console memory or alternate gameplay state is emulated here.
-#if !defined(HP2_ENABLE_VULKAN)
-#include "src/ecstasy/vk_pod.hpp"
-#include <vitaGL.h>
-#include <psp2/gxm.h>
-#include <malloc.h>
-#include <psp2/display.h>
-extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface; // vitaGL's display depth surface
-extern "C" SceGxmRenderTarget* gxm_render_target;               // vitaGL's display render target
-extern "C" SceGxmContext* gxm_context;
-#include <psp2/io/fcntl.h>
-#include <psp2/io/stat.h>
-#include <pthread.h>
-#include <exception>
-#else
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -5430,7 +3841,6 @@ extern "C" SceGxmContext* gxm_context;
 #endif
 #endif
 #include <vulkan/vulkan.h>
-#endif // HP2_ENABLE_VULKAN types
 #include <chrono>
 #include <deque>
 #include <future>
@@ -7186,9 +5596,6 @@ using VkNativeDrawPush = NativeVulkanDrawPush;
 // no CPU job evaluates lighting or reflection for the native Vulkan path.
 struct VkSolidStripJob {
     const EcstasyDrawCommand* draw{};
-    // Set for one strip of a scenery run command; otherwise draw->strip.
-    const EditorMarkerSolidGeometry::Strip* strip{};
-    const EditorMarkerSolidGeometry::Strip* Strip() const noexcept {return strip ? strip:draw->strip;}
     std::uint32_t destination{};
     std::array<float,2> scroll{},lod{};
     std::uint32_t glyphBoundsIndex{};
@@ -7285,7 +5692,7 @@ VkSolidTopology DecodeNativeSolidTopology(const EditorMarkerSolidGeometry::Strip
 // a separately captured draw record, including on cache-capacity misses.
 void PrepareNativeSolidStripVertices(const VkSolidStripJob& job,VkVertex* output)
 {
-    const auto& strip=*job.Strip();
+    const auto& strip=*job.draw->strip;
     for(std::size_t ordinal=0;ordinal<job.count;++ordinal) {
         const auto index=job.sourceOrder[ordinal];const auto packed=strip.colors[index];
         auto& vertex=output[job.destination+ordinal];
@@ -7322,17 +5729,6 @@ bool NativeResidentGeometryKey(const VkSolidStripJob& job,VkResidentGeometryKey&
 // Frame-owned immutable inputs share the existing fenced vertex/fragment
 // SSBO. Its offsets never enter resident geometry. Each decoded material is
 // snapshotted once per frame; FE and IG variants retain their actual tables.
-// calls, last-input hits, slot hits, lit record builds, unlit builds, dedupe hits
-std::array<std::uint64_t,6> nativeShadingCounters{};
-// Last Gather's resident geometry events: new entries, evictions, source
-// captures (byte copies), variant reuses.
-std::array<std::uint32_t,4> nativeGatherResidentEvents{};
-// Gather solid-path census: template hits, full solid commands, car-shadow
-// commands, scenery run strips, depth-sorted solid commands.
-std::array<std::uint64_t,5> nativeGatherCounters{};
-// Diagnostic: particle quad screen coverage (sum of clipped bbox area in
-// output-screen units) for the main view [0] and other targets [1]; quads [2].
-std::array<double,3> nativeParticleCoverage{};
 class VkNativeFrameShading {
     using Record=std::array<std::array<float,4>,19>;
     using Key=std::array<std::uint32_t,76>;
@@ -7344,7 +5740,6 @@ class VkNativeFrameShading {
         std::array<float,4> unit{};
         std::array<float,16> coefficients{};
         SceneLightContext context;
-        const SceneLightContext* contextSource{};
         bool valid{};
         bool Matches(const VkSolidStripJob& job,std::uint32_t requestedMode) const noexcept {
             const auto& draw=*job.draw;
@@ -7355,11 +5750,7 @@ class VkNativeFrameShading {
             if(!(job.reflection || (draw.drawFlags&0xc0u)))return true;
             if(material!=draw.lightMaterial || !draw.lightMaterial || !draw.LightContext())return false;
             const auto& light=*draw.LightContext();
-            if(std::memcmp(coefficients.data(),draw.lightMaterial->NativeCoefficients(),sizeof(coefficients)))return false;
-            // Sealed-frame instances own immutable light snapshots and inputs
-            // are cleared every Gather, so the same snapshot object matches.
-            if(contextSource==&light)return true;
-            return
+            return std::memcmp(coefficients.data(),draw.lightMaterial->NativeCoefficients(),sizeof(coefficients))==0 &&
                 std::memcmp(context.colorMatrix.data(),light.colorMatrix.data(),sizeof(context.colorMatrix))==0 &&
                 std::memcmp(context.directionMatrix.data(),light.directionMatrix.data(),sizeof(context.directionMatrix))==0 &&
                 std::memcmp(context.environmentMatrix.data(),light.environmentMatrix.data(),sizeof(context.environmentMatrix))==0 &&
@@ -7370,9 +5761,9 @@ class VkNativeFrameShading {
             flags=draw.drawFlags;mode=requestedMode;alpha=draw.alphaScale;
             scroll=job.scroll;std::copy_n(eUnitVector4,unit.size(),unit.begin());index=first;
             if(job.reflection || (draw.drawFlags&0xc0u)) {
-                material=draw.lightMaterial;context=*draw.LightContext();contextSource=draw.LightContext();
+                material=draw.lightMaterial;context=*draw.LightContext();
                 std::copy_n(draw.lightMaterial->NativeCoefficients(),coefficients.size(),coefficients.begin());
-            } else {material=nullptr;contextSource=nullptr;}
+            } else material=nullptr;
             valid=true;
         }
     };
@@ -7382,7 +5773,7 @@ class VkNativeFrameShading {
     };
 public:
     void Clear() {
-        materials_.clear();lastMaterial_=nullptr;lastMaterialIndex_=0;recordCount_=0;lastIndex_=0;
+        materials_.clear();recordCount_=0;lastIndex_=0;
         std::fill(records_.begin(),records_.end(),RecordSlot{});
         for(auto& input:inputs_)input.valid=false;
         lastInput_=inputs_.size();
@@ -7394,14 +5785,11 @@ public:
         // Compare the consumed source bits before rebuilding the same record
         // for every strip. Snapshots also detect changes when a diagnostic
         // caller reuses the same draw object. Nothing survives Clear().
-        ++nativeShadingCounters[0];
-        if(lastInput_<inputs_.size() && inputs_[lastInput_].Matches(job,mode)) {++nativeShadingCounters[1];return inputs_[lastInput_].index;}
+        if(lastInput_<inputs_.size() && inputs_[lastInput_].Matches(job,mode))return inputs_[lastInput_].index;
         const auto inputSlot=InputSlot(job,mode);
         if(inputs_[inputSlot].Matches(job,mode)) {
-            ++nativeShadingCounters[2];
             lastInput_=inputSlot;return inputs_[inputSlot].index;
         }
-        ++nativeShadingCounters[(job.reflection || (draw.drawFlags&0xc0u)) ? 3:4];
         const auto remember=[&](std::uint32_t first) {
             inputs_[inputSlot].Capture(job,mode,first);lastInput_=inputSlot;return first;
         };
@@ -7439,7 +5827,7 @@ public:
         Key key{};
         static_assert(sizeof(record)==sizeof(key),"Native shading record packing changed");
         std::memcpy(key.data(),record.data(),sizeof(record));
-        if(lastIndex_ && key==lastKey_) {++nativeShadingCounters[5];return remember(lastIndex_);}
+        if(lastIndex_ && key==lastKey_)return remember(lastIndex_);
         const auto hash=RecordHash(key);
         if(!records_.empty()) {
             auto slot=static_cast<std::size_t>(hash)&(records_.size()-1);
@@ -7449,7 +5837,6 @@ public:
                 // frame table supplies all 304 exact bytes without a second
                 // large key allocation or a pointer tree rebuilt each frame.
                 if(entry.hash==hash && std::memcmp(data.data()+entry.first,record.data(),sizeof(record))==0) {
-                    ++nativeShadingCounters[5];
                     lastKey_=key;lastIndex_=entry.first;return remember(lastIndex_);
                 }
                 slot=(slot+1)&(records_.size()-1);
@@ -7498,11 +5885,7 @@ private:
         records_.swap(next);
     }
     std::uint32_t Material(const EditorMarkerLightMaterial& material,std::vector<std::array<float,4>>& data) {
-        // Consecutive lit strips usually share one material (exact: the map
-        // value for a key never changes until Clear resets both).
-        if(&material==lastMaterial_)return lastMaterialIndex_;
-        const auto found=materials_.find(&material);
-        if(found!=materials_.end()) {lastMaterial_=&material;lastMaterialIndex_=found->second;return found->second;}
+        const auto found=materials_.find(&material);if(found!=materials_.end())return found->second;
         constexpr std::size_t tableVectors=(EditorMarkerLightMaterial::kNativeResponseSamples+3)/4;
         constexpr std::size_t materialVectors=5+2*tableVectors;
         static_assert(EditorMarkerLightMaterial::kNativeResponseSamples==1025 && tableVectors==257,
@@ -7516,23 +5899,15 @@ private:
             data[first+index/4][index%4]=coefficients[index];
         }
         data[first+4][0]=material.nativeSpecularReady ? 1.0f:0.0f;
-        static_assert(sizeof(std::array<float,4>)==4*sizeof(float),"Shading rows are not packed float4");
-        if(material.nativeSpecularReady && material.nativeSpecularFinite) {
-            // Same bytes as the loop below: each table fills consecutive
-            // float4 rows from row first+5+table*257 (rest stay zero).
-            for(std::size_t table=0;table<2;++table)
-                std::memcpy(data[first+5+table*tableVectors].data(),material.nativeSpecularResponse[table].data(),
-                    sizeof(material.nativeSpecularResponse[table]));
-        } else if(material.nativeSpecularReady)for(std::size_t table=0;table<2;++table)
+        if(material.nativeSpecularReady)for(std::size_t table=0;table<2;++table)
             for(std::size_t index=0;index<EditorMarkerLightMaterial::kNativeResponseSamples;++index) {
                 const auto value=material.nativeSpecularResponse[table][index];
                 if(!std::isfinite(value))throw std::runtime_error("Native GPU specular response sample is nonfinite");
                 data[first+5+table*tableVectors+index/4][index%4]=value;
             }
-        materials_.emplace(&material,first);lastMaterial_=&material;lastMaterialIndex_=first;return first;
+        materials_.emplace(&material,first);return first;
     }
     std::unordered_map<const EditorMarkerLightMaterial*,std::uint32_t> materials_;
-    const EditorMarkerLightMaterial* lastMaterial_{};std::uint32_t lastMaterialIndex_{};
     std::vector<RecordSlot> records_;
     std::size_t recordCount_{};
     std::array<Input,256> inputs_{};
@@ -7547,15 +5922,11 @@ struct VkResidentGeometrySource {
     std::size_t queuedValidation{};
     std::size_t count{},normalCount{},uniqueCount{},triangleCount{},topologyCount{};
     std::uint64_t disableMask{},topologyMask{};
-    // Byte shadows: only the first count/normalCount/uniqueCount/
-    // triangleCount elements are ever written (Capture) or read (Matches),
-    // so they are left uninitialized (default-initialized allocation): a
-    // first-sight zero fill costs ~2 KB of write-allocate misses on Vita.
-    std::array<std::array<float,3>,48> positions,normals;
-    std::array<std::array<float,2>,48> coordinates;
-    std::array<std::uint16_t,48> colors;
-    std::array<std::uint8_t,48> unique;
-    std::array<std::uint8_t,138> triangles;
+    std::array<std::array<float,3>,48> positions{},normals{};
+    std::array<std::array<float,2>,48> coordinates{};
+    std::array<std::uint16_t,48> colors{};
+    std::array<std::uint8_t,48> unique{};
+    std::array<std::uint8_t,138> triangles{};
     std::array<std::uint32_t,4> variants{};
     std::size_t variantCount{};
     VkSolidTopology topology;
@@ -7605,15 +5976,8 @@ struct VkResidentGeometryEntry {
     std::uint16_t indexCount{};
     std::uint8_t count{};
     bool prepared{},uploaded{};
-    // Raw vertex storage: vertex preparation writes the first count
-    // vertices and only those are copied out, so the remaining slot bytes
-    // are never read (no first-sight zero fill of 3.3 KB on Vita).
-    struct VertexStorage {
-        alignas(VkVertex) unsigned char bytes[sizeof(VkVertex)*48];
-        VkVertex* data() noexcept {return reinterpret_cast<VkVertex*>(bytes);}
-        const VkVertex* data() const noexcept {return reinterpret_cast<const VkVertex*>(bytes);}
-    } shadow;
-    std::array<std::uint32_t,138> indices; // first indexCount written before use
+    std::array<VkVertex,48> shadow{};
+    std::array<std::uint32_t,138> indices{};
 };
 
 class VkResidentGeometryCache {
@@ -7641,19 +6005,18 @@ public:
         // presenter still waits before any GPU allocation, upload or reuse.
         // No current-Gather slot is recycled, even under cache pressure.
         if(gather<=gather_) {
-            sources_.clear();recency_.clear();free_.clear();frameSources_.fill(nullptr);
+            sources_.clear();recency_.clear();free_.clear();
             for(std::size_t at=entries_.size();at;--at) {
                 entries_[at-1].reset();free_.push_back(static_cast<std::uint32_t>(at-1));
             }
         }
-        gather_=gather;active_.clear();frameEntries_.fill(nullptr);
+        gather_=gather;active_.clear();frameEntries_.fill(nullptr);frameSources_.fill(nullptr);
         validations_.clear();validationsReady_=false;
         while(!recency_.empty() && gather_-entries_[recency_.front()]->lastGather>600)
             Evict(recency_.front());
     }
     std::size_t PreparedValidationCount() const noexcept {return validationsReady_ ? validations_.size():0;}
-    void ValidateSources(const std::vector<EcstasyDrawCommand>& commands,
-        const std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips,unsigned workers) {
+    void ValidateSources(const std::vector<EcstasyDrawCommand>& commands,unsigned workers) {
         if(workers<2 || commands.size()<1024 || sources_.empty())return;
         // Resolve and deduplicate all borrowed sources on the owner. The
         // workers only compare immutable bytes with separate result slots;
@@ -7661,9 +6024,7 @@ public:
         for(const auto& draw:commands) {
             if(draw.kind!=EcstasyDrawKind::SolidStrip && draw.kind!=EcstasyDrawKind::SolidReflectionStrip &&
                 draw.kind!=EcstasyDrawKind::SolidSpecularStrip)continue;
-          const auto runCount=draw.sceneryRunCount ? draw.sceneryRunCount:1u;
-          for(std::uint32_t runAt=0;runAt<runCount;++runAt) {
-            const auto* token=draw.sceneryRunCount ? runStrips[draw.sceneryRunFirst+runAt]:draw.strip;
+            const auto* token=draw.strip;
             if(!token || token->nativeVertexRevision)continue;
             // Malformed or cropped-out commands keep their existing Gather
             // validation point. Do not add a failure for a draw that would
@@ -7674,7 +6035,6 @@ public:
             if(!source || source->validatedGather==gather_ || source->queuedValidationGather==gather_)continue;
             const auto index=validations_.size();validations_.push_back({source,token,false});
             source->queuedValidation=index;source->queuedValidationGather=gather_;
-          }
         }
         if(validations_.size()<512)return;
         RunNativeSceneJobs(validations_.size(),[&](std::size_t index) {
@@ -7688,7 +6048,7 @@ public:
     VkResidentGeometryEntry* Acquire(VkSolidStripJob& job,bool& prepare) {
         prepare=false;VkResidentGeometryKey key;
         if(!Capacity() || !NativeResidentGeometryKey(job,key))return nullptr;
-        const auto* token=job.Strip();
+        const auto* token=job.draw->strip;
         const auto identity=reinterpret_cast<std::uintptr_t>(token);
         const auto hash=(identity>>4)^(identity>>12)^(identity>>20)^
             (static_cast<std::size_t>(key.words[1])*0x9e3779b9u)^key.words[0]^key.words[2];
@@ -7706,7 +6066,7 @@ public:
             if(free_.empty() && (!recency_.empty() && entries_[recency_.front()]->lastGather==gather_)) {
                 return nullptr;
             }
-            resolved=sources_.emplace(token,std::unique_ptr<VkResidentGeometrySource>(new VkResidentGeometrySource)).first->second.get();
+            resolved=sources_.emplace(token,std::make_unique<VkResidentGeometrySource>()).first->second.get();
             resolved->token=token;FrameSource(token)=resolved;
         }
         auto& source=*resolved;
@@ -7716,7 +6076,7 @@ public:
             const bool sameRevision=revision!=0 && revision==source.vertexRevision;
             const bool matches=sameRevision || (compared ? validations_[source.queuedValidation].matches:
                 source.generation && source.Matches(*token));
-            if(!matches) {source.Capture(*token);++nativeGatherResidentEvents[2];}
+            if(!matches)source.Capture(*token);
             source.vertexRevision=revision;
             // Publication stays at the original first used strip. A
             // completed comparison alone never marks source bytes valid.
@@ -7761,19 +6121,18 @@ public:
                     entry.indices[index]=first+topology.indices[index];
 
             }
-            entry.prepared=false;entry.uploaded=false;++nativeGatherResidentEvents[3];
+            entry.prepared=false;entry.uploaded=false;
             Touch(entry);prepare=true;cached=&entry;return &entry;
         }
-        ++nativeGatherResidentEvents[0];
         if(free_.empty()) {
             if(recency_.empty() || entries_[recency_.front()]->lastGather==gather_) {
                 if(!source.variantCount)ForgetSource(token);
                 return nullptr;
             }
-            Evict(recency_.front());++nativeGatherResidentEvents[1];
+            Evict(recency_.front());
         }
         const auto slot=free_.back();free_.pop_back();
-        auto owned=std::unique_ptr<VkResidentGeometryEntry>(new VkResidentGeometryEntry);auto& entry=*owned;
+        auto owned=std::make_unique<VkResidentGeometryEntry>();auto& entry=*owned;
         entry.source=token;entry.sourceGeneration=source.generation;entry.key=key;
         entry.slot=slot;entry.count=job.count;
         Require(nextIndexToken_!=std::numeric_limits<std::uint64_t>::max(),"Native geometry index token exhausted");
@@ -7783,18 +6142,6 @@ public:
         recency_.push_back(slot);entry.recency=std::prev(recency_.end());
         entries_[slot]=std::move(owned);source.variants[source.variantCount++]=slot;
         Touch(entry);prepare=true;cached=&entry;return &entry;
-    }
-    // Hint only: warms the lookup slot and source of a strip about to be
-    // acquired (scenery runs walk strips whose sources are cold).
-    void Prefetch(const EditorMarkerSolidGeometry::Strip* token) const noexcept {
-#if defined(__GNUC__) || defined(__clang__)
-        const auto identity=reinterpret_cast<std::uintptr_t>(token);
-        const auto* slot=&frameSources_[((identity>>4)^(identity>>12)^(identity>>20))&(frameSources_.size()-1)];
-        if(const auto* source=*slot)__builtin_prefetch(source);
-        __builtin_prefetch(token);
-#else
-        (void)token;
-#endif
     }
     void CompletePreparation() {
         for(const auto slot:active_)entries_[slot]->prepared=true;
@@ -7824,10 +6171,7 @@ private:
         sources_.erase(token);
     }
     void Touch(VkResidentGeometryEntry& entry) {
-        // Entries touched this Gather already follow every older entry and
-        // are never evicted during it; repeated touches need no list splice.
-        if(entry.lastGather==gather_)return;
-        active_.push_back(entry.slot);entry.lastGather=gather_;
+        if(entry.lastGather!=gather_) {active_.push_back(entry.slot);entry.lastGather=gather_;}
         recency_.splice(recency_.end(),recency_,entry.recency);
     }
     void Evict(std::uint32_t slot) {
@@ -7846,11 +6190,8 @@ private:
     std::uint64_t gather_{};
     std::uint64_t nextIndexToken_{};
     std::vector<std::unique_ptr<VkResidentGeometryEntry>> entries_;
-    std::array<VkResidentGeometryEntry*,8192> frameEntries_{};
-    // Persistent lookup front for sources_: a slot is only ever a cached
-    // copy of a live map value (ForgetSource clears the token's slot before
-    // erasing it; a full clear wipes it). Hits are checked by token.
-    std::array<VkResidentGeometrySource*,8192> frameSources_{};
+    std::array<VkResidentGeometryEntry*,1024> frameEntries_{};
+    std::array<VkResidentGeometrySource*,1024> frameSources_{};
     std::vector<Validation> validations_;
     bool validationsReady_{};
     std::vector<std::uint32_t> free_,active_;
@@ -7883,66 +6224,37 @@ public:
     const std::vector<VkResidentIndexEntry*>& Active() const noexcept {return active_;}
     void Begin(std::uint64_t gather) {
         if(gather<=gather_) {
-            entries_.clear();lookup_.clear();free_.clear();front_.fill({});
+            entries_.clear();lookup_.clear();free_.clear();
             if(capacity_)free_.emplace(0,capacity_);
         }
         gather_=gather;active_.clear();
         while(!entries_.empty() && gather_-entries_.front().lastGather>600)Evict(entries_.begin());
     }
-    // tokens[i]==spans[i]->indexToken and indexTotal is the batch's summed
-    // span index count (recorded at gather time, so a hit reads no entry).
     VkResidentIndexEntry* Acquire(const std::vector<const VkResidentGeometryEntry*>& spans,
-        const std::vector<std::uint64_t>& tokens,std::uint32_t first,std::uint32_t count,std::uint32_t indexTotal)
+        std::uint32_t first,std::uint32_t count)
     {
         Require(first<=spans.size() && count<=spans.size()-first,"Resident index spans exceed their frame owner");
-        std::uint64_t hash=1469598103934665603ull;const std::uint64_t indices=indexTotal;
-        for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at)
-            hash=(hash^tokens[at])*1099511628211ull;
-#if !defined(__vita__)
-        {
-            std::uint64_t summed=0;
-            for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at) {
-                summed+=spans[at]->indexCount;
-                Require(tokens[at]==spans[at]->indexToken,"Resident span token changed during Gather");
-            }
-            Require(summed==indexTotal,"Resident batch count differs from its span index total");
+        std::uint64_t hash=1469598103934665603ull;std::uint64_t indices=0;
+        for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at) {
+            const auto& span=*spans[at];indices+=span.indexCount;
+            hash=(hash^span.indexToken)*1099511628211ull;
         }
-#endif
         if(!indices || indices>capacity_) {return nullptr;}
-        // Direct-mapped front: a slot only names a live entry (Evict and a
-        // full clear drop it) and live entries have unique token sequences,
-        // so a verified slot hit is the entry the map lookup would return.
-        auto& slot=front_[FrontIndex(hash)];
-        if(slot.live && slot.hash==hash && slot.count==count) {
-            bool equal;
-            if(count==1)equal=slot.token==tokens[first];
-            else {
-                const auto& entryTokens=slot.entry->tokens;equal=true;
-                for(std::size_t at=0;at<count;++at)
-                    if(entryTokens[at]!=tokens[first+at]) {equal=false;break;}
-            }
-            if(equal) {Touch(slot.entry);return &*slot.entry;}
-        }
         const auto candidates=lookup_.equal_range(hash);
         for(auto found=candidates.first;found!=candidates.second;++found) {
             auto entry=found->second;
             if(entry->tokens.size()!=count)continue;
             bool equal=true;
             for(std::size_t at=0;at<count;++at)
-                if(entry->tokens[at]!=tokens[first+at]) {equal=false;break;}
+                if(entry->tokens[at]!=spans[first+at]->indexToken) {equal=false;break;}
             if(!equal)continue;
-            SetFront(entry);Touch(entry);return &*entry;
+            Touch(entry);return &*entry;
         }
         const auto needed=(static_cast<std::uint32_t>(indices)+63u)&~std::uint32_t(63);
         auto range=Find(needed);
         while(range==free_.end()) {
             if(entries_.empty() || entries_.front().lastGather==gather_) {return nullptr;}
-            // No range fitted before this eviction and it changes only the
-            // range it merges into, so first-fit Find can return only that
-            // one: test it instead of rescanning every fragment (quadratic
-            // under pressure: 40-240 ms Gather spikes on Vita).
-            const auto merged=Evict(entries_.begin());
-            if(merged->second>=needed)range=merged;
+            Evict(entries_.begin());range=Find(needed);
         }
         // Allocate payload before consuming a free range, so allocation
         // failures cannot leave a partially published GPU index entry.
@@ -7961,7 +6273,7 @@ public:
                 EraseLookup(entry);entries_.erase(entry);throw;
             }
         }
-        free_.erase(range);SetFront(entry);Touch(entry);
+        free_.erase(range);Touch(entry);
         return &*entry;
     }
     void InvalidateUploads() {for(auto& entry:entries_)entry.uploaded=false;}
@@ -7971,30 +6283,18 @@ public:
 private:
     using Entries=std::list<VkResidentIndexEntry>;
     using Ranges=std::map<std::uint32_t,std::uint32_t>;
-    struct FrontSlot {std::uint64_t hash{};std::uint64_t token{};Entries::iterator entry{};std::uint32_t count{};bool live{};};
-    static constexpr std::size_t FrontSize=4096;
-    static std::size_t FrontIndex(std::uint64_t hash) noexcept {
-        return static_cast<std::size_t>((hash^(hash>>32))&(FrontSize-1));
-    }
-    void SetFront(Entries::iterator entry) noexcept {
-        auto& slot=front_[FrontIndex(entry->hash)];
-        slot.hash=entry->hash;slot.entry=entry;slot.live=true;
-        slot.count=static_cast<std::uint32_t>(entry->tokens.size());
-        slot.token=entry->tokens.empty() ? 0:entry->tokens.front();
-    }
     Ranges::iterator Find(std::uint32_t count) {
         return std::find_if(free_.begin(),free_.end(),[&](const auto& range){return range.second>=count;});
     }
     void Touch(Entries::iterator entry) {
-        if(entry->lastGather==gather_)return; // already after every older entry
-        active_.push_back(&*entry);entry->lastGather=gather_;
+        if(entry->lastGather!=gather_) {active_.push_back(&*entry);entry->lastGather=gather_;}
         entries_.splice(entries_.end(),entries_,entry);
     }
     void EraseLookup(Entries::iterator entry) {
         const auto candidates=lookup_.equal_range(entry->hash);
         for(auto at=candidates.first;at!=candidates.second;++at)if(at->second==entry) {lookup_.erase(at);return;}
     }
-    Ranges::iterator Evict(Entries::iterator entry) {
+    void Evict(Entries::iterator entry) {
         Require(entry->lastGather!=gather_,"Cannot recycle resident indices referenced by the current frame");
         auto first=entry->first;auto count=entry->allocated;
         auto next=free_.lower_bound(first);
@@ -8006,17 +6306,13 @@ private:
         }
         next=free_.lower_bound(first);
         if(next!=free_.end() && first+count==next->first) {count+=next->second;free_.erase(next);}
-        const auto merged=free_.emplace(first,count).first;EraseLookup(entry);
-        if(auto& slot=front_[FrontIndex(entry->hash)];slot.live && slot.entry==entry)slot={};
-        entries_.erase(entry);
-        return merged;
+        free_.emplace(first,count);EraseLookup(entry);entries_.erase(entry);
     }
     std::uint64_t gather_{};
     std::uint32_t capacity_{};
     Entries entries_;
     Ranges free_;
     std::unordered_multimap<std::uint64_t,Entries::iterator> lookup_;
-    std::array<FrontSlot,FrontSize> front_{};
     std::vector<VkResidentIndexEntry*> active_;
 };
 
@@ -8104,8 +6400,6 @@ private:
 bool NativeTextureReferenced(const std::vector<VkNativeTextureKey>& referenced,VkNativeTextureKey key)
 {return std::binary_search(referenced.begin(),referenced.end(),key);}
 
-// Diagnostic: bytes compared by texture validation (vitaGL journal).
-inline std::uint64_t nativeTextureCompareBytes{},nativeTextureCompares{};
 struct VkDrawTexture {
     struct OpaqueSceneryState {
         std::uint32_t blend{};
@@ -8140,10 +6434,6 @@ struct VkDrawTexture {
     std::uint64_t generation{};
     std::uint64_t validatedGather{};
     bool uploadCompleted{};
-    // vitaGL: earlier uploads of this same TextureInfo whose pixels came
-    // from a different immutable buffer (texture animations swap frame
-    // pointers). Reused by exact Matches instead of decoding again.
-    std::vector<VkDrawTexture> variants;
     bool OwnersAlive() const noexcept
     {
         return !metadataOwner.expired() && !pixelOwner.expired() &&
@@ -8175,7 +6465,6 @@ struct VkDrawTexture {
                 return true;
             }
 
-            nativeTextureCompareBytes+=bytes.size();++nativeTextureCompares;
             return std::memcmp(view.Data(),bytes.data(),bytes.size())==0;
         };
         return sameBytes(texture.pixels,pixelOwner,sourcePixelOffset,sourcePixels) &&
@@ -8282,11 +6571,6 @@ struct VkDrawBatch {
     bool postProcess{};
     bool showcaseEnvironmentBlend{};
     bool wireframe{},untextured{},clampTopLeft{};
-    // Every CPU-written vertex of this batch has q==1 exactly, so uv/q==uv
-    // (vitaGL samples without the per-fragment divide; same result).
-    bool affineUV{};
-    // Particle-group quads (vitaGL may draw runs of them at half resolution).
-    bool particle{};
     VkRect2D scissor{};
     VkViewport viewport{};
     std::int32_t textureFunction{},alphaTest{};
@@ -8313,7 +6597,7 @@ struct VkDrawBatch {
             sampledPreviousFrame==previous.sampledPreviousFrame && blend==previous.blend &&
             blendConstant==previous.blendConstant && depth==previous.depth && depthWrite==previous.depthWrite &&
             postProcess==previous.postProcess && showcaseEnvironmentBlend==previous.showcaseEnvironmentBlend &&
-            wireframe==previous.wireframe && affineUV==previous.affineUV && particle==previous.particle &&
+            wireframe==previous.wireframe &&
             untextured==previous.untextured && clampTopLeft==previous.clampTopLeft &&
             textureFunction==previous.textureFunction && alphaTest==previous.alphaTest &&
             focusFirst==previous.focusFirst && focusPassCount==previous.focusPassCount && focusBlend==previous.focusBlend &&
@@ -8403,13 +6687,12 @@ VkFogDepthPlan PlanFogDepth(const std::vector<VkDrawBatch*>& packets)
 }
 
 void ResolveNativeResidentIndices(VkResidentIndexCache& cache,
-    const std::vector<const VkResidentGeometryEntry*>& spans,const std::vector<std::uint64_t>& tokens,
-    std::vector<std::uint32_t>& indices,std::vector<VkDrawBatch>& batches)
+    const std::vector<const VkResidentGeometryEntry*>& spans,std::vector<std::uint32_t>& indices,
+    std::vector<VkDrawBatch>& batches)
 {
-    Require(tokens.size()==spans.size(),"Resident span tokens lost their spans");
     for(auto& batch:batches) {
         if(!batch.residentGeometry)continue;
-        if(auto* entry=cache.Acquire(spans,tokens,batch.nativeSpanFirst,batch.nativeSpanCount,batch.count)) {
+        if(auto* entry=cache.Acquire(spans,batch.nativeSpanFirst,batch.nativeSpanCount)) {
             Require(entry->shadow.size()==batch.count,"Resident merged index extent changed during Gather");
             batch.residentIndices=true;batch.first=entry->first;
         } else {
@@ -8434,7 +6717,6 @@ std::array<float,4> vulkanColor(std::uint32_t color,float alphaScale)
 }
 }
 
-#ifdef HP2_ENABLE_VULKAN
 struct EcstasyVulkanDevice::Storage {
     EcstasyVulkanOptions options;
     std::uint64_t completedFrameSerial{};
@@ -8501,7 +6783,6 @@ struct EcstasyVulkanDevice::Storage {
     VkSceneryPacketCache sceneryPackets;
     std::uint64_t nextTextureGeneration{};
     std::vector<const VkResidentGeometryEntry*> gatheredResidentIndexSpans;
-    std::vector<std::uint64_t> gatheredResidentSpanTokens;
     std::vector<VkResidentIndexEntry*> residentIndexPendingUploads;
     std::vector<VkBufferCopy> residentIndexCopies;
     std::vector<std::uint32_t> residentPendingUploads;
@@ -9099,7 +7380,6 @@ struct EcstasyVulkanDevice::Storage {
     // Reused across frames. Input commands belong to the sealed source frame;
     // workers only read that frame and write disjoint completed vertex slots.
     std::vector<VkSolidStripJob> nativeStripJobs;
-    std::deque<EcstasyDrawCommand> sceneryRunFallbacks;
     VkNativeFrameShading nativeFrameShading;
     std::vector<VkNativeStripWorkRange> nativeWorkRanges;
     void Gather(const EcstasyFrame& frame,
@@ -10294,7 +8574,799 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
 
 }
 
-#include "src/ecstasy/ecstasy_gather.inc"
+namespace {
+// Native presentation of an explicitly selected centred 640x480 layout.
+// Ordinary race HUD/menu placement does not enter this adaptation.
+std::array<float,2> nativeUiCanvasScale(float width,float height)
+{
+    Require(std::isfinite(width) && std::isfinite(height) && width>0.0f && height>0.0f,
+        "Native UI canvas has no finite viewport");
+    const double horizontal=static_cast<double>(width)/640.0;
+    const double vertical=static_cast<double>(height)/480.0;
+    const double uniform=std::min(horizontal,vertical);
+    return {static_cast<float>(uniform/horizontal),static_cast<float>(uniform/vertical)};
+}
+
+}
+
+void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
+    std::vector<VkVertex>& output,std::vector<std::uint32_t>& elementIndices,
+    std::vector<VkDrawBatch>& batches)
+{
+    // BeginGather also identifies validation performed during overlap
+    // preflight. The sealed frame cannot mutate between that check and here.
+    residentGeometry.Begin(gatherSerial);residentIndexCache.Begin(gatherSerial);
+    residentFrameVertices=0;residentFrameIndices=0;gatheredResidentIndexSpans.clear();
+    nativeStripJobs.clear();nativeWorkRanges.clear();nativeFrameShading.Clear();
+    using Clock=std::chrono::steady_clock;
+    auto& profile=statistics.renderProfile;
+    profile.shadowStrips={};profile.shadowTriangles={};
+    const bool sampleShadowGather=platform::nativeDiagnosticsEnabled && nextSubmission%16u==0;
+    profile.shadowGatherSamples=sampleShadowGather ? 1u:0u;
+    profile.shadowGatherMilliseconds={};
+    const auto nativeWorkers=NativeSceneEffectiveHardwareConcurrency();
+    const auto validateStarted=Clock::now();
+    residentGeometry.ValidateSources(frame.Commands(),nativeWorkers);
+    profile.gatherValidationMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-validateStarted).count();
+    const bool directSourcePreparation=nativeWorkers<=1;
+    std::size_t nativePendingWork=0;
+    // Cold raw uploads use the shared native pool after ordered state
+    // capture. Warm source validation above needs no vertex repacking.
+    // There is no private renderer thread pool and no CPU vertex shader.
+    if(!directSourcePreparation)nativeStripJobs.reserve(frame.Commands().size());
+
+    std::array<float,2> textureLod{},lastDepthRange{};
+    std::array<float,5> lastDepthProjection{};bool depthRangeValid=false;
+    std::uint32_t glyphBoundsIndex{};
+    auto appendValidated=[&](const VkVertex& vertex) {
+        Require(output.size()<std::numeric_limits<std::uint32_t>::max(),
+            "Vulkan frame vertex count exceeds32-bit index range");
+        const auto index=static_cast<std::uint32_t>(output.size());
+        output.push_back(vertex);output.back().lod=textureLod;output.back().glyphBoundsIndex=glyphBoundsIndex;
+        return index;
+    };
+    auto append=[&](const VkVertex& vertex) {
+        // Validate every component before publishing a vertex. Construct
+        // diagnostics only on failure; Require's std::string parameter
+        // otherwise allocates eleven temporary strings per emitted vertex.
+        for(auto value:vertex.position)if(!std::isfinite(value))throw std::runtime_error("Nonfinite original vertex position");
+        for(auto value:vertex.uvq)if(!std::isfinite(value))throw std::runtime_error("Nonfinite original texture coordinate");
+        for(auto value:vertex.color)if(!std::isfinite(value))throw std::runtime_error("Nonfinite original vertex color");
+        return appendValidated(vertex);
+    };
+    // A sealed frame borrows one stable texture identity/descriptor per
+    // source. Validate through the normal upload path on its first use for
+    // each clamp context; repeated strips then need no associative lookup.
+    // This scratch cache never crosses Gather, owns no resource and keeps
+    // separate clamp/repeat indices for authored NPOT textures. Indices stay
+    // valid when the texture vector grows; retirement happens before Gather.
+    struct FrameTextureResolution {
+        const TextureInfo* source{};
+        std::array<std::size_t,2> indices{};
+        std::uint8_t contexts{};
+    };
+    std::array<FrameTextureResolution,256> frameTextures{};
+    const auto resolveTexture=[&](const TextureInfo& texture,bool forcedClamp) {
+        const auto identity=reinterpret_cast<std::uintptr_t>(&texture);
+        const auto slot=((identity>>4)^(identity>>12)^(identity>>20))&(frameTextures.size()-1);
+        auto& resolved=frameTextures[slot];
+        const auto context=static_cast<std::size_t>(forcedClamp);
+        const auto mask=static_cast<std::uint8_t>(1u<<context);
+        if(resolved.source==&texture && (resolved.contexts&mask))return resolved.indices[context];
+        const auto key=NativeTextureKey(texture,forcedClamp);
+        auto found=textureIndices.find(key);
+        if(found==textureIndices.end()) {
+            const auto index=textures.size();textures.emplace_back();
+            found=textureIndices.emplace(key,index).first;
+            UploadTexture(texture,index,key.repeatedPadding);textures[index].validatedGather=gatherSerial;
+        } else if(textures[found->second].validatedGather!=gatherSerial) {
+            const auto index=found->second;
+            ++statistics.textureValidations;
+            if(!textures[index].Matches(texture))UploadTexture(texture,index,key.repeatedPadding);
+            textures[index].validatedGather=gatherSerial;
+        }
+        if(resolved.source!=&texture) {resolved.source=&texture;resolved.contexts=0;}
+        resolved.indices[context]=found->second;resolved.contexts|=mask;
+        return found->second;
+    };
+    // Logical targets can share one physical attachment. Use the original
+    // source identity and keep the raster cache local to this Gather.
+    struct TargetRaster {
+        const EcstasyRenderTarget* source{};
+        VkViewport originalViewport{},viewport{};
+        VkRect2D scissor{};
+        float displayWidth{},displayHeight{};
+        std::uint32_t outputWidth{},outputHeight{};
+        std::array<double,2> translation{},clipScale{{1.0,1.0}},clipOffset{};
+    };
+    std::array<TargetRaster,15> targetRasters{};
+    const auto rasterFor=[&](const EcstasyRenderTarget& target,std::int32_t destination) -> const TargetRaster& {
+        auto& raster=targetRasters[static_cast<std::size_t>(target.id)];
+        if(raster.source==&target)return raster;
+        raster={};
+        raster.source=&target;
+        auto& viewport=raster.viewport;
+        // Source targets are authored in the original display coordinates;
+        // viewport scaling maps them to the selected native output resolution.
+        raster.displayWidth=static_cast<float>(target.width);
+        raster.displayHeight=static_cast<float>(target.height);
+        const auto* attachment=destination ? &renderedTargets.at(destination):nullptr;
+        raster.outputWidth=attachment ? attachment->width:options.width;
+        raster.outputHeight=attachment ? attachment->height:options.height;
+        const auto outputWidth=raster.outputWidth,outputHeight=raster.outputHeight;
+        // Offscreen attachments may have a native mirror/reflection extent.
+        // Source vertices and camera matrices remain in authored coordinates.
+        const float sx=static_cast<float>(outputWidth)/
+            (attachment ? raster.displayWidth:static_cast<float>(options.logicalWidth));
+        const float sy=static_cast<float>(outputHeight)/
+            (attachment ? raster.displayHeight:static_cast<float>(options.logicalHeight));
+        viewport={static_cast<float>(target.left)*sx,static_cast<float>(target.top)*sy,
+            raster.displayWidth*sx,raster.displayHeight*sy,0.0f,1.0f};
+        raster.originalViewport=viewport;
+        const auto left=std::clamp(static_cast<std::int32_t>(viewport.x),0,static_cast<std::int32_t>(outputWidth));
+        const auto top=std::clamp(static_cast<std::int32_t>(viewport.y),0,static_cast<std::int32_t>(outputHeight));
+        const auto right=std::clamp(static_cast<std::int32_t>(viewport.x+viewport.width),left,static_cast<std::int32_t>(outputWidth));
+        const auto bottom=std::clamp(static_cast<std::int32_t>(viewport.y+viewport.height),top,static_cast<std::int32_t>(outputHeight));
+        raster.scissor={{left,top},{static_cast<std::uint32_t>(right-left),static_cast<std::uint32_t>(bottom-top)}};
+        // Display calibration translates the final raster, not the rear
+        // image a second time before that image is composited.
+        if(!destination)raster.translation=frame.DisplayTranslation();
+        const auto& translation=raster.translation;
+        if(translation[0]!=0.0 || translation[1]!=0.0) {
+            // Shift the final display rectangle, then crop it to the actual
+            // target before forming Vulkan integers or viewport coordinates.
+            // A huge persisted word can move a view fully offscreen without
+            // overflowing a cast or violating viewportBoundsRange.
+            const double x=static_cast<double>(viewport.x)+translation[0]*outputWidth;
+            const double y=static_cast<double>(viewport.y)+translation[1]*outputHeight;
+            const double width=viewport.width,height=viewport.height;
+            const double l=std::clamp(x,0.0,static_cast<double>(outputWidth));
+            const double t=std::clamp(y,0.0,static_cast<double>(outputHeight));
+            const double r=std::clamp(x+width,0.0,static_cast<double>(outputWidth));
+            const double b=std::clamp(y+height,0.0,static_cast<double>(outputHeight));
+            if(r<=l || b<=t) {raster.scissor={};return raster;}
+            const double w=r-l,h=b-t;
+            // Homogeneous affine conversion into that cropped viewport.
+            // Its image is exactly the translated original view intersected
+            // with the client area; z/w, UV and source colors stay intact.
+            raster.clipScale={{width/w,height/h}};
+            raster.clipOffset={{(2.0*(x-l)+width-w)/w,(2.0*(y-t)+height-h)/h}};
+            viewport={static_cast<float>(l),static_cast<float>(t),static_cast<float>(w),
+                static_cast<float>(h),viewport.minDepth,viewport.maxDepth};
+            const auto il=static_cast<std::int32_t>(std::floor(l));
+            const auto it=static_cast<std::int32_t>(std::floor(t));
+            const auto ir=static_cast<std::int32_t>(std::ceil(r));
+            const auto ib=static_cast<std::int32_t>(std::ceil(b));
+            raster.scissor={{il,it},{static_cast<std::uint32_t>(ir-il),static_cast<std::uint32_t>(ib-it)}};
+        }
+        return raster;
+    };
+    const auto appendBatch=[&](const VkDrawBatch& batch) {
+        if(!batches.empty() && batch.Continues(batches.back())) {
+            batches.back().count+=batch.count;
+            batches.back().nativeSpanCount+=batch.nativeSpanCount;
+        } else batches.push_back(batch);
+    };
+    const auto applyDepthRange=[&](const EcstasyDrawCommand& draw,VkDrawBatch& batch) {
+        const auto* projection=draw.ClipToScreen().data();
+        const std::array<float,5> key{{projection[10],projection[11],projection[14],projection[15],
+            static_cast<float>(draw.target->format)}};
+        if(!depthRangeValid || key!=lastDepthProjection) {
+            lastDepthRange=ecstasyNativeDepthRange(projection,draw.target->format);
+            lastDepthProjection=key;depthRangeValid=true;
+        }
+        batch.viewport.minDepth=lastDepthRange[0];batch.viewport.maxDepth=lastDepthRange[1];
+    };
+    std::array<const EcstasyDrawInstance*,1024> validatedSceneryInstances{};
+    const auto prepareSceneryPacket=[&](const EcstasyDrawCommand& draw) {
+        if(draw.kind!=EcstasyDrawKind::SolidStrip || !draw.instance || !draw.strip ||
+            !draw.texture || draw.sampledTarget || draw.orderingTexture ||
+            draw.carShadow!=EcstasyCarShadow::None || !draw.target ||
+            draw.target->id<0 || draw.target->id>14 ||
+            draw.target->width<=0 || draw.target->height<=0)return false;
+        const auto textureIndex=resolveTexture(*draw.texture,NativeDrawClampsTexture(draw));
+        auto& texture=textures[textureIndex];
+        const auto* wire=draw.texture->descriptor->authoredRecord;
+        // Scrolling materials retain the normal dynamic preparation path.
+        if(wire[0x79])return false;
+        const auto destination=draw.target->id>=7 ? draw.target->id:0;
+        const auto& raster=rasterFor(*draw.target,destination);
+        if(!raster.scissor.extent.width || !raster.scissor.extent.height)return false;
+        const auto& strip=*draw.strip;
+        const auto count=strip.positions.size();
+        Require(strip.textureCoordinates.size()==count && strip.colors.size()==count,
+            "Original strip vertex/color/UV extents differ");
+        Require(count<=48,"Vulkan strip exceeds the original packet vertex extent");
+        Require(std::isfinite(draw.textureQScale),"Native solid texture Q scale is nonfinite");
+        if(draw.drawFlags&0xc0u)
+            Require(draw.LightContext() && draw.lightMaterial && strip.normals.size()==count,
+                "Lit strip lacks its source context, material or signed normal payload");
+        const auto identity=reinterpret_cast<std::uintptr_t>(draw.instance);
+        auto& validated=validatedSceneryInstances[((identity>>4)^(identity>>12))&
+            (validatedSceneryInstances.size()-1)];
+        if(validated!=draw.instance) {
+            Require(std::all_of(draw.LocalToClip().begin(),draw.LocalToClip().end(),
+                [](float value){return std::isfinite(value);}),"Native solid projection matrix is nonfinite");
+            validated=draw.instance;
+        }
+        VkSolidStripJob job;job.draw=&draw;
+        job.lod={{draw.textureQScale,static_cast<std::uint8_t>(strip.autoK)*0.0625f}};
+        job.lineTopology=(draw.nativeRenderEggState&EcstasyRenderEggWireframe)!=0;
+        bool prepare=false;
+        auto* resident=residentGeometry.Acquire(job,prepare);
+        if(!resident)return false;
+        const auto state=draw.nativeRenderEggState |
+            (static_cast<std::uint32_t>(draw.texture->drawFlag4Enabled)<<3) |
+            (static_cast<std::uint32_t>(draw.target->id==14)<<4);
+        VkDrawBatch batch;
+        if(const auto* cached=sceneryPackets.Find(*resident,texture.generation,state)) {
+            batch=*cached;
+            ++statistics.sceneryPacketHits;
+        } else {
+            const auto& material=ResolveOpaqueSceneryMaterial(texture,wire,options.textureFilter);
+            batch.indexed=true;batch.cachedOpaqueScenery=true;batch.residentGeometry=true;
+            batch.depth=true;batch.depthWrite=material.depthWrite;batch.blend=material.blend;
+            batch.blendConstant=material.blendConstant;batch.lodScale=material.lodScale;
+            batch.textureFunction=material.textureFunction;batch.minification=material.minification;
+            batch.alphaTest=material.fullAlpha || draw.texture->drawFlag4Enabled || draw.target->id==14 ? 0:2;
+            batch.wireframe=job.lineTopology;
+            batch.untextured=(draw.nativeRenderEggState&EcstasyRenderEggTexturing)==0;
+            batch.clampTopLeft=NativeDrawClampsTexture(draw);
+            batch.nativeGpuPosition=true;batch.count=resident->indexCount;batch.nativeSpanCount=1;
+            Require(batch.textureFunction>=0 && batch.textureFunction<=3,"Invalid authored GS texture function");
+            sceneryPackets.Store(*resident,texture.generation,state,batch);
+            ++statistics.sceneryPacketMisses;
+        }
+        // Frame-local ranges, shading, camera and viewport never enter the cache.
+        batch.texture=textureIndex;batch.target=destination;
+        batch.viewport=raster.viewport;batch.scissor=raster.scissor;
+        applyDepthRange(draw,batch);
+        batch.nativeLocalToClip=draw.LocalToClip();
+        batch.nativeClipMapping={{static_cast<float>(raster.clipScale[0]),static_cast<float>(raster.clipScale[1]),
+            static_cast<float>(raster.clipOffset[0]),static_cast<float>(raster.clipOffset[1])}};
+        batch.nativeTextureQScale=draw.textureQScale;
+        batch.nativeShadingIndex=nativeFrameShading.Capture(job,gatheredGlyphBounds);
+        Require(residentFrameIndices+resident->indexCount<=UINT32_MAX,
+            "Native resident frame index count exceeds32-bit draw range");
+        Require(gatheredResidentIndexSpans.size()<UINT32_MAX,"Native resident index span count exceeds32-bit range");
+        batch.first=static_cast<std::uint32_t>(residentFrameIndices);
+        batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());
+        gatheredResidentIndexSpans.push_back(resident);
+        residentFrameIndices+=resident->indexCount;residentFrameVertices+=job.count;
+        job.residentOutput=resident->shadow.data();
+        job.workUnits=prepare ? NativePendingVertexWork(job):0;
+        if(job.workUnits) {
+            if(directSourcePreparation)PrepareNativeSolidStripVertices(job,job.residentOutput);
+            else {nativePendingWork+=job.workUnits;nativeStripJobs.push_back(job);}
+        }
+        if(batch.count)appendBatch(batch);
+        return true;
+    };
+    const bool sampleCategories=platform::nativeDiagnosticsEnabled && nextSubmission%32u==0;
+    if(sampleCategories)++profile.gatherCategorySamples;
+    NativeGatherCategoryTimer categoryTimer(sampleCategories ? &profile:nullptr);
+    for (const auto& draw:frame.Commands()) {
+        categoryTimer.Enter(draw);
+        if(draw.kind==EcstasyDrawKind::SceneHistoryBoundary || draw.kind==EcstasyDrawKind::SceneHistorySource) {
+            // Ordinary racing retains its single pass and does no history copy.
+            if(preparedFrame.historyReaders.display) {
+                VkDrawBatch marker;marker.target=0;
+                marker.textureFunction=draw.kind==EcstasyDrawKind::SceneHistorySource ? 12:11;
+                batches.push_back(marker);
+            }
+            continue;
+        }
+        if(draw.cachedOpaqueScenery) {
+            if(prepareSceneryPacket(draw))continue;
+            ++statistics.sceneryPacketFallbacks;
+        }
+        const auto shadowStarted=sampleShadowGather && draw.carShadow!=EcstasyCarShadow::None ?
+            Clock::now():Clock::time_point{};
+        if(draw.kind==EcstasyDrawKind::BlackAndWhitePass || draw.kind==EcstasyDrawKind::DestinationFilterPass) {
+            Require(draw.target && draw.target->id>=0 && draw.target->id<7 && draw.feedbackGroup,
+                "Colour feedback lost its original view or source-stage group");
+            const auto region=ecstasyNativeFeedbackRegion(*draw.target,options.width,options.height,
+                options.logicalWidth,options.logicalHeight,frame.DisplayTranslation());
+            if(!region.scissor[2] || !region.scissor[3])continue;
+            VkDrawBatch feedback;feedback.target=0;feedback.feedbackGroup=draw.feedbackGroup;
+            feedback.textureFunction=draw.kind==EcstasyDrawKind::BlackAndWhitePass ? 9:10;
+            feedback.blend=0x00000202u; // source overwrite; RGB equation is evaluated by the shader.
+            feedback.viewport={region.viewport[0],region.viewport[1],region.viewport[2],region.viewport[3],0,1};
+            feedback.scissor={{region.scissor[0],region.scissor[1]},
+                {static_cast<std::uint32_t>(region.scissor[2]),static_cast<std::uint32_t>(region.scissor[3])}};
+            std::array<float,4> tint{{1,1,1,1}};
+            std::array<float,2> sourceLod{};
+            if(feedback.textureFunction==10) {
+                Require(draw.texture && draw.screenFilter.textureFunction==0 &&
+                    draw.screenFilter.blend==std::array<std::uint8_t,4>{{1,0,2,1}},
+                    "Destination filter lost its released TFX/ALPHA inputs");
+                feedback.texture=resolveTexture(*draw.texture,false);
+                feedback.lodScale=static_cast<float>(draw.screenFilter.fixedAlpha)/128.0f;
+                const auto* wire=draw.texture->descriptor->authoredRecord;
+                feedback.minification=options.textureFilter==EcstasyTextureFilter::Authored ? wire[0x70]:-2;
+                std::int32_t mipK=ReadU16(wire+0x72)&0xfff;if(mipK&0x800)mipK-=0x1000;
+                sourceLod={{static_cast<float>(1u<<wire[0x71]),static_cast<float>(mipK)*0.0625f}};
+                for(std::size_t lane=0;lane<4;++lane)tint[lane]=static_cast<float>(draw.screenFilter.color[lane])/128.0f;
+            }
+            feedback.first=static_cast<std::uint32_t>(output.size());feedback.count=3;
+            const auto& uv=region.textureRectangle;
+            output.push_back({{{-1,-1,0,1}},{{uv[0],uv[1],1}},tint,sourceLod});
+            output.push_back({{{3,-1,0,1}},{{uv[0]+2*(uv[2]-uv[0]),uv[1],1}},tint,sourceLod});
+            output.push_back({{{-1,3,0,1}},{{uv[0],uv[1]+2*(uv[3]-uv[1]),1}},tint,sourceLod});
+            batches.push_back(feedback);continue;
+        }
+        if(draw.kind==EcstasyDrawKind::FogPass || draw.kind==EcstasyDrawKind::FocusMaskPass) {
+            Require(draw.depthPalette && draw.target && draw.target->id>=0 && draw.target->id<7 &&
+                draw.target->width>0 && draw.target->height>0,"Fog packet lost its source view/palette");
+            VkDrawBatch fog;fog.target=0;fog.textureFunction=draw.kind==EcstasyDrawKind::FogPass ? 5:6;
+            fog.depth=fog.depthWrite=false;
+            fog.blend=draw.depthPalette->blend;fog.blendConstant=draw.depthPalette->blendConstant;
+            fog.minification=static_cast<std::int32_t>(DepthPalette(*draw.depthPalette));
+            fog.lodScale=draw.target->format==0x31 ? 16777215.0f:65535.0f;
+            const double sx=static_cast<double>(options.width)/options.logicalWidth;
+            const double sy=static_cast<double>(options.height)/options.logicalHeight;
+            const auto translation=frame.DisplayTranslation();
+            const double x=draw.target->left*sx+translation[0]*options.width;
+            const double y=draw.target->top*sy+translation[1]*options.height;
+            const double left=std::clamp(x,0.0,static_cast<double>(options.width));
+            const double top=std::clamp(y,0.0,static_cast<double>(options.height));
+            const double right=std::clamp(x+draw.target->width*sx,0.0,static_cast<double>(options.width));
+            const double bottom=std::clamp(y+draw.target->height*sy,0.0,static_cast<double>(options.height));
+            if(right<=left || bottom<=top)continue;
+            fog.viewport={static_cast<float>(left),static_cast<float>(top),static_cast<float>(right-left),static_cast<float>(bottom-top),0,1};
+            const auto l=static_cast<std::int32_t>(std::floor(left)),t=static_cast<std::int32_t>(std::floor(top));
+            fog.scissor={{l,t},{static_cast<std::uint32_t>(std::ceil(right)-l),static_cast<std::uint32_t>(std::ceil(bottom)-t)}};
+            fog.first=static_cast<std::uint32_t>(output.size());fog.count=3;
+            output.push_back({{{-1,-1,0,1}},{{0,0,1}},{{1,1,1,1}}});
+            output.push_back({{{3,-1,0,1}},{{0,0,1}},{{1,1,1,1}}});
+            output.push_back({{{-1,3,0,1}},{{0,0,1}},{{1,1,1,1}}});
+            batches.push_back(fog);continue;
+        }
+        if(draw.kind==EcstasyDrawKind::DepthOfFieldPass) {
+            Require(draw.focus && draw.target && draw.target->id>=0 && draw.target->id<7 &&
+                frame.SourceDisplayExtent()[0] && frame.SourceDisplayExtent()[1],
+                "Depth of field lost its source display/settings");
+            const auto& focus=*draw.focus;
+            // Complete48-byte JitterOffsets PAL2DA750, independently
+            // matched to Beta2D1D20. Adjacent bytes belong to FogPalette.
+            static constexpr float jitter[6][2]={{0,0},{2,2},{2,0},{2,2},{0,2},{0,0}};
+            Require(focus.numPasses>=0 && focus.numPasses<=6,"Focus tap count exceeds its original JitterOffsets table");
+            const auto& extent=frame.SourceDisplayExtent();
+            VkDrawBatch composite;composite.target=0;composite.textureFunction=8;
+            composite.blend=draw.rasterState[0];composite.blendConstant=static_cast<float>(focus.compositeBlend[4])/128.0f;
+            composite.viewport={0,0,static_cast<float>(options.width),static_cast<float>(options.height),0,1};
+            composite.scissor={{0,0},{options.width,options.height}};
+            composite.focusFirst=static_cast<std::uint32_t>(output.size());
+            composite.focusPassCount=focus.numPasses;composite.focusBlend=static_cast<float>(focus.jitterBlend)/128.0f;
+            const auto triangle=[&](float u,float v) {
+                output.push_back({{{-1,-1,0,1}},{{u,v,1}},{{1,1,1,1}}});
+                output.push_back({{{3,-1,0,1}},{{u+2,v,1}},{{1,1,1,1}}});
+                output.push_back({{{-1,3,0,1}},{{u,v+2,1}},{{1,1,1,1}}});
+            };
+            for(std::int32_t index=0;index<focus.numPasses;++index)
+                // GS window centers are integers; texture centers n+.5.
+                // Half-size XY0/UV0 therefore samples source2*j, whereas
+                // a native full-rectangle draw samples2*j+1. Keep this
+                // one-source-pixel phase in the selected PC raster scale.
+                triangle((jitter[index][0]-1.0f)/extent[0],(jitter[index][1]-1.0f)/extent[1]);
+            composite.first=static_cast<std::uint32_t>(output.size());composite.count=3;
+            // Native source-pixel displacement; the default full rectangle
+            // has zero displacement. The earlier half-size tap phase is
+            // independent and remains part of the filter's sampling pattern.
+            Require(std::isfinite(focus.compositeOffsetPixels[0]) && std::isfinite(focus.compositeOffsetPixels[1]),
+                "Focus composite displacement is not finite");
+            triangle(focus.compositeOffsetPixels[0]/static_cast<float>(extent[0]),
+                focus.compositeOffsetPixels[1]/static_cast<float>(extent[1]));
+            batches.push_back(composite);continue;
+        }
+        glyphBoundsIndex=0;
+        if(draw.kind==EcstasyDrawKind::FlailerPolygon && draw.polygon) {
+            const auto& bounds=draw.polygon->glyphSamplingBounds;
+            if(bounds[2]>0.0f && bounds[3]>0.0f) {
+                Require(std::all_of(bounds.begin(),bounds.end(),[](float v){return std::isfinite(v);}) &&
+                    bounds[0]>0 && bounds[1]>0 && bounds[2]>=bounds[0] && bounds[3]>=bounds[1] &&
+                    bounds[2]<=1.0f && bounds[3]<=1.0f,"Glyph sampling bounds exceed their actual atlas cell");
+                Require(gatheredGlyphBounds.size()<std::numeric_limits<std::uint32_t>::max(),"Glyph sampling table exceeds native range");
+                glyphBoundsIndex=static_cast<std::uint32_t>(gatheredGlyphBounds.size());
+                gatheredGlyphBounds.push_back(bounds);
+            }
+        }
+        const bool targetSample=draw.sampledTarget!=nullptr;
+        const bool rearSample=draw.kind==EcstasyDrawKind::RenderTargetPolygon;
+        const bool remap=draw.kind==EcstasyDrawKind::RenderTargetStrip;
+        const bool reflection=draw.kind==EcstasyDrawKind::SolidReflectionStrip;
+        const bool specular=draw.kind==EcstasyDrawKind::SolidSpecularStrip;
+        const bool filter=draw.kind==EcstasyDrawKind::ScreenFilterPolygon;
+        const bool screenPolygon=draw.kind==EcstasyDrawKind::ScreenPolygon;
+        Require(draw.target && draw.target->id>=0 && draw.target->id<=14 && draw.target->width>0 && draw.target->height>0 &&
+            (targetSample ? !draw.texture:draw.texture!=nullptr),"Vulkan draw lost its actual image or render target");
+        const auto destination=draw.target->id>=7 ? draw.target->id:0;
+        const auto sampled=targetSample ? (draw.sampledTarget->id>=7 ? draw.sampledTarget->id:0):-1;
+        if(targetSample) {
+            const auto& owner=renderedTargets.at(sampled);
+            Require((draw.sampledPreviousFrame ? owner.previousDescriptor:owner.descriptor)!=VK_NULL_HANDLE,
+                "Vulkan target draw lost its current/previous image owner");
+            Require(draw.sampledPreviousFrame || sampled!=destination,
+                "A render target cannot sample its own current attachment");
+        }
+        const std::uint8_t* wire=nullptr;std::size_t textureIndex{};
+        if(!targetSample) {
+            textureIndex=resolveTexture(*draw.texture,NativeDrawClampsTexture(draw));wire=draw.texture->descriptor->authoredRecord;
+        }
+        const bool particle=draw.kind==EcstasyDrawKind::ParticleGroup;
+        const bool mirrorOverlay=draw.kind==EcstasyDrawKind::MirrorOverlayPolygon;
+        const bool ui=draw.kind==EcstasyDrawKind::FlailerPolygon || rearSample || mirrorOverlay || filter || remap || screenPolygon;
+        const bool layeredUi=ui && (draw.rasterState[2]&255u)!=0;
+        Require(elementIndices.size()<=std::numeric_limits<std::uint32_t>::max(),
+            "Vulkan frame index count exceeds32-bit draw range");
+        VkDrawBatch batch;batch.indexed=true;batch.cachedOpaqueScenery=draw.cachedOpaqueScenery;
+        batch.first=static_cast<std::uint32_t>(elementIndices.size());batch.texture=textureIndex;
+        // AttachMicroCode's TME/primitive controls feed the solid VU
+        // templates; UI and immediate particle packets have independent PRIM.
+        const bool solidPrimitive=draw.kind==EcstasyDrawKind::SolidStrip || reflection || specular;
+        batch.wireframe=solidPrimitive && (draw.nativeRenderEggState&EcstasyRenderEggWireframe)!=0;
+        batch.untextured=solidPrimitive && (draw.nativeRenderEggState&EcstasyRenderEggTexturing)==0;
+        batch.showcaseEnvironmentBlend=reflection && draw.showcaseEnvironmentBlend && !batch.untextured;
+        // CreateTextureContext108F98 consumes the clamp override for the
+        // actual authored texture. Native image/history passes own samplers.
+        batch.clampTopLeft=NativeDrawClampsTexture(draw);
+        batch.target=destination;batch.sampledTarget=sampled;batch.sampledPreviousFrame=draw.sampledPreviousFrame;
+        textureLod[0]=draw.textureQScale;
+        if(batch.cachedOpaqueScenery) {
+            const auto& material=ResolveOpaqueSceneryMaterial(textures[textureIndex],wire,options.textureFilter);
+            batch.blend=material.blend;batch.blendConstant=material.blendConstant;
+            batch.lodScale=material.lodScale;batch.textureFunction=material.textureFunction;
+            batch.minification=material.minification;
+            batch.depth=true;batch.depthWrite=material.depthWrite;
+            batch.alphaTest=material.fullAlpha || draw.texture->drawFlag4Enabled || draw.target->id==14?0:2;
+            textureLod[1]=static_cast<std::uint8_t>(draw.strip->autoK)*0.0625f;
+        } else {
+            batch.depth=(!ui || layeredUi || rearSample || mirrorOverlay || filter || screenPolygon);
+            batch.depthWrite=targetSample || filter ? draw.zWriteEnabled:
+                layeredUi ? draw.zWriteEnabled && wire[0x50]!=0:!ui && draw.zWriteEnabled && !draw.depthSorted;
+            if(reflection || specular || remap)batch.depthWrite=false;
+            batch.blend=draw.rasterState[0];batch.blendConstant=static_cast<float>(draw.rasterState[1]&255u)/128.0f;
+            batch.textureFunction=targetSample || reflection ? 0:wire[0x4e];
+            batch.alphaTest=rearSample ? ecstasyNativeMirrorCompositeAlphaTest() :
+                targetSample || reflection || specular || filter ? 0:draw.texture->requiresDepthSort ? 1:0;
+            batch.minification=targetSample ? 2:wire[0x70];
+            // UI coordinates are authored in640x480 and scaled by the PC
+            // output extent. Keep their atlas sampling linear at level0; the
+            // selectable world filter must not pixelate fonts or movie panels.
+            if(draw.kind==EcstasyDrawKind::FlailerPolygon)batch.minification=-1;
+            else if(options.textureFilter!=EcstasyTextureFilter::Authored)batch.minification=-2;
+            batch.lodScale=targetSample ? 1.0f:static_cast<float>(1u<<wire[0x71]);
+            std::int32_t mipK=targetSample ? 0:ReadU16(wire+0x72)&0xfff;
+            if(mipK&0x800)mipK-=0x1000;
+            if(draw.kind==EcstasyDrawKind::SolidStrip) {
+                Require(draw.strip,"Mip-mapped model lost its original strip");
+                // CalcAutoK10C0F0 retains16 bits, but SetMipMapK11C328 gets
+                // lbu+3C and VU01E8..0220 copies that unsigned byte into TEX1 K.
+                mipK=static_cast<std::uint8_t>(draw.strip->autoK);
+            } else if(draw.kind==EcstasyDrawKind::WorldPolygon || draw.kind==EcstasyDrawKind::WorldStrip) {
+                // Immediate polygon110040 and strip110564 headers replicate
+                // zero into this same K lane before the common VU program.
+                mipK=0;
+            }
+            textureLod[1]=static_cast<float>(mipK)*0.0625f;
+            if(draw.kind==EcstasyDrawKind::SolidStrip || draw.kind==EcstasyDrawKind::WorldStrip ||
+                draw.kind==EcstasyDrawKind::WorldPolygon || particle || mirrorOverlay || screenPolygon) {
+                // Particle direct packets carry PRIM0x54 (ABE1) and pass through
+                // the very same AttachSolid/Alpha texture contexts. Their own
+                // packet does not override ALPHA, TEST or ZBUF.
+                // Final AttachMicroCode10AD78 enables PRIM.ABE for these packets.
+                // CreateTextureContext108CC0 writes ALPHA from descriptor76/77;
+                // descriptor4D only controls ordering, including unsorted shadows.
+                const auto alpha=wire[0x76];
+                if(!screenPolygon || !(draw.rasterState[1]&0x00ff0000u)) {
+                    batch.blend=(alpha&3u)|(((alpha>>2)&3u)<<8)|
+                        (((alpha>>4)&3u)<<16)|(((alpha>>6)&3u)<<24);
+                    batch.blendConstant=static_cast<float>(wire[0x77])/128.0f;
+                }
+                // Final AttachSolidPolys10BC00..10BC38 and AttachAlphaPolys10BA24..10BA4C
+                // choose context bit0 from descriptor4F OR runtime74, independently
+                // of the sorting lane4D. Contexts0/2 carry TEST GREATER with AREF48;
+                // contexts1/3 carry GEQUAL0 (PAL105AC0 UpdateGifTags). Alpha is
+                // expressed in the same128-unit GS range by this native shader.
+                const bool fullAlpha=(wire[0x4f]!=0) || draw.texture->drawFlag4Enabled;
+                batch.alphaTest=fullAlpha || draw.target->id==14 ? 0:2;
+                // The same source context bit1 is descriptor50 gated by the
+                // captured original Z-write state, not by depth sorting.
+                batch.depthWrite=draw.zWriteEnabled && wire[0x50]!=0;
+            }
+        }
+        Require(batch.textureFunction>=0 && batch.textureFunction<=3,"Invalid authored GS texture function");
+        const auto& raster=rasterFor(*draw.target,destination);
+        const auto displayWidth=raster.displayWidth,displayHeight=raster.displayHeight;
+        const auto outputWidth=raster.outputWidth,outputHeight=raster.outputHeight;
+        const auto& originalViewport=raster.originalViewport;
+        const auto& translation=raster.translation;
+        const auto& clipScale=raster.clipScale;
+        const auto& clipOffset=raster.clipOffset;
+        batch.viewport=raster.viewport;
+        batch.scissor=raster.scissor;
+        std::array<float,2> uiCanvasScale{{1.0f,1.0f}};
+        if(draw.kind==EcstasyDrawKind::FlailerPolygon &&
+           draw.uiPlacement==EcstasyUiPlacement::CenteredCanvas &&
+           (draw.rasterState[1]&0x01000000u))
+            uiCanvasScale=nativeUiCanvasScale(originalViewport.width,originalViewport.height);
+        const double maximumDepth=draw.target->format==0x31 ? 16777215.0:65535.0;
+        if(!ui && !particle)applyDepthRange(draw,batch);
+        if(rearSample) {
+            // B24: the camera image is sampled into the authored PAL
+            // 160..352 x 20..84 quadrilateral. Constrain Vulkan raster
+            // to those pixel centres after the native viewport mapping,
+            // avoiding a visible camera strip beyond the mirror's edge.
+            // The original mask, textured overlay, UV and view remain live.
+            const auto& extent=frame.SourceDisplayExtent();
+            const auto mirror=ecstasyNativeMirrorScissor(
+                originalViewport.x,originalViewport.y,
+                originalViewport.width,originalViewport.height,
+                extent[0],extent[1],outputWidth,outputHeight,
+                translation[0]*outputWidth,translation[1]*outputHeight);
+            const auto x0=std::max(batch.scissor.offset.x,mirror.left);
+            const auto y0=std::max(batch.scissor.offset.y,mirror.top);
+            const auto x1=std::min(batch.scissor.offset.x+
+                static_cast<std::int32_t>(batch.scissor.extent.width),mirror.right);
+            const auto y1=std::min(batch.scissor.offset.y+
+                static_cast<std::int32_t>(batch.scissor.extent.height),mirror.bottom);
+            batch.scissor={{x0,y0},{static_cast<std::uint32_t>(std::max(x0,x1)-x0),
+                static_cast<std::uint32_t>(std::max(y0,y1)-y0)}};
+        }
+        // The final draw submission already rejects a zero-area scissor.
+        // Do it before transforming/lighting every vertex and building an
+        // index buffer: no pixel can be emitted, and target/texture ownership
+        // has already been processed exactly as in the existing path.
+        if (!batch.scissor.extent.width || !batch.scissor.extent.height) continue;
+        // Feed dynamic world geometry to the same vertex shader projection
+        // as resident models on Switch. Keep the calibrated CPU path's
+        // double-precision viewport translation and the UI/particle paths.
+#ifdef __SWITCH__
+        const bool gpuWorldProjection=!ui && !particle && !solidPrimitive &&
+            translation[0]==0.0 && translation[1]==0.0;
+#else
+        constexpr bool gpuWorldProjection=false;
+#endif
+        if(gpuWorldProjection) {
+            batch.nativeGpuPosition=true;
+            batch.nativeLocalToClip=draw.LocalToClip();
+            batch.nativeTextureQScale=textureLod[0];
+        }
+        auto position=[&](const float input[3]) -> std::array<float,4> {
+            if(gpuWorldProjection) {
+                ++statistics.gpuWorldVertices;
+                return {input[0],input[1],input[2],1.0f};
+            }
+            std::array<float,4> result{};
+            if(ui) {
+                // ScaleCoordinates is byte97. Flailer authored coordinates
+                // use its640x480 design space; the target decides pixel size.
+                const bool scaled=(draw.rasterState[1]&0x01000000u)!=0;
+                const auto& sourceExtent=frame.SourceDisplayExtent();
+                const float width=rearSample ? static_cast<float>(sourceExtent[0]):scaled ? 640.0f:displayWidth;
+                const float height=rearSample ? static_cast<float>(sourceExtent[1]):scaled ? 480.0f:displayHeight;
+                float projectedDepth=0.0f;
+                if(layeredUi || rearSample || mirrorOverlay || filter || screenPolygon) {
+                    // Final ePoly::Render10FC74..10FCE4: byte98 selects the
+                    // logical layer table2C9E70. Background20..24 uses its
+                    // small direct GS Z; all foreground layers use MaxZ-table.
+                    // Keeping every UI primitive at z=0 with depth disabled
+                    // incorrectly covered the preceding opaque frontend car.
+                    static constexpr float layerDepths[29]={10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,
+                        5,6,7,8,5,4,3,2,1,1,2,3,4};
+                    Require(draw.view && draw.view->matricesCalculated,
+                        "Polygon source depth lacks its calculated view");
+                    float sourceDepth=input[2];
+                    if(layeredUi) {
+                        const auto layer=convertFloatToInt32(input[2]);
+                        Require(layer>=0 && layer<29,"Flailer logical depth has no authored layer");
+                        const float maximum=draw.target->format==0x31 ? 16777215.0f:65535.0f;
+                        sourceDepth=layer>=20 && layer<=24 ? layerDepths[layer]:maximum-layerDepths[layer];
+                    }
+                    // Byte98==0 (RVM/Sun/filters) uses direct Z. Preserve all
+                    // original layer distinctions in the same reversed GS-Z
+                    // interval as world/particles, including polygons ahead
+                    // of the world's near plane. Clamping them to that plane
+                    // makes priority0 movie panels disappear behind layer10.
+                    projectedDepth=static_cast<float>(1.0-static_cast<double>(sourceDepth)/maximumDepth);
+                }
+                const float x=filter ? input[0]-static_cast<float>(draw.target->left):input[0];
+                const float y=filter ? input[1]-static_cast<float>(draw.target->top):input[1];
+                result={(x*2.0f/width-1.0f)*uiCanvasScale[0],
+                    (y*2.0f/height-1.0f)*uiCanvasScale[1],projectedDepth,1.0f};
+            } else {
+                eMulVector3(result.data(),draw.LocalToClip().data(),input);
+                // Original perspective clip Z is[-W,+W]; Vulkan is[0,W].
+                result[2]=(result[2]+result[3])*0.5f;
+            }
+            if(translation[0]!=0.0 || translation[1]!=0.0) {
+                result[0]=static_cast<float>(result[0]*clipScale[0]+result[3]*clipOffset[0]);
+                result[1]=static_cast<float>(result[1]*clipScale[1]+result[3]*clipOffset[1]);
+            }
+            return result;
+        };
+        if(draw.kind==EcstasyDrawKind::SolidStrip || reflection || specular) {
+            batch.nativeGpuPosition=true;
+            Require(std::isfinite(draw.textureQScale),"Native solid texture Q scale is nonfinite");
+            batch.nativeTextureQScale=draw.textureQScale;
+            batch.nativeLocalToClip=draw.LocalToClip();
+            Require(std::all_of(batch.nativeLocalToClip.begin(),batch.nativeLocalToClip.end(),
+                [](float v){return std::isfinite(v);}),"Native solid projection matrix is nonfinite");
+            batch.nativeClipMapping={{static_cast<float>(clipScale[0]),static_cast<float>(clipScale[1]),
+                static_cast<float>(clipOffset[0]),static_cast<float>(clipOffset[1])}};
+            Require(draw.strip!=nullptr,"Vulkan solid draw has no actual strip");const auto& strip=*draw.strip;
+            const auto count=strip.positions.size();Require(strip.textureCoordinates.size()==count && strip.colors.size()==count,
+                "Original strip vertex/color/UV extents differ");
+            Require(count<=48,"Vulkan strip exceeds the original packet vertex extent");
+            const bool lit=(draw.drawFlags&0xc0u)!=0;
+            if(lit || reflection)Require(draw.LightContext() && draw.lightMaterial && strip.normals.size()==count,
+                "Lit strip lacks its source context, material or signed normal payload");
+            float scroll[2]{};
+            const auto* textureRecord=draw.orderingTexture ? draw.orderingTexture->descriptor->authoredRecord:
+                draw.texture ? draw.texture->descriptor->authoredRecord:nullptr;
+            const auto scrollMode=textureRecord && !reflection ? static_cast<std::int8_t>(textureRecord[0x79]):0;
+            if(scrollMode) {
+                // CreateTextureContext108D80..108E4C writes S,T,T,S to its
+                //+70 vector; UNPACK at10913C places it atVU30F. The ordinary
+                //strip program0E08/0F40 adds it before perspective division.
+                const bool override=textureAnimationScrollSpeed[0]!=0.0f || textureAnimationScrollSpeed[1]!=0.0f;
+                for(std::size_t axis=0;axis<2;++axis) {
+                    const auto rate=override ? textureAnimationScrollSpeed[axis]/
+                        static_cast<float>(static_cast<std::int16_t>(ReadU16(textureRecord+0x24+axis*2))):
+                        real(textureRecord+0x7c+axis*4);
+                    scroll[axis]=TextureInfo::GetScroll(frame.TextureTime(),rate,
+                        override ? textureAnimationScrollMode:scrollMode,
+                        override ? textureAnimationScrollInterval:real(textureRecord+0x84));
+                }
+            }
+            // A resident hit already owns validated first-use topology.
+            // The public source snapshot is still checked once per Gather.
+            VkSolidStripJob job;job.draw=&draw;
+            job.scroll={{scroll[0],scroll[1]}};job.lod=textureLod;
+            job.glyphBoundsIndex=glyphBoundsIndex;job.reflection=reflection;job.targetSample=targetSample;
+            job.lineTopology=batch.wireframe;
+            batch.nativeShadingIndex=nativeFrameShading.Capture(job,gatheredGlyphBounds);
+            bool prepare=false;auto* resident=residentGeometry.Acquire(job,prepare);
+            VkSolidTopology topology;
+            if(!resident) {
+                topology=DecodeNativeSolidTopology(strip,job.lineTopology);
+                job.count=topology.count;job.sourceOrder=topology.sourceOrder;
+            }
+            std::uint32_t firstVertex;
+            if(resident) {
+                firstVertex=resident->slot*static_cast<std::uint32_t>(VkResidentGeometryCache::VerticesPerSlot);
+                batch.residentGeometry=true;job.destination=0;job.residentOutput=resident->shadow.data();
+                residentFrameVertices+=job.count;
+                Require(residentFrameIndices+resident->indexCount<=std::numeric_limits<std::uint32_t>::max(),
+                    "Native resident frame index count exceeds32-bit draw range");
+                Require(gatheredResidentIndexSpans.size()<std::numeric_limits<std::uint32_t>::max(),
+                    "Native resident index span count exceeds32-bit range");
+                batch.first=static_cast<std::uint32_t>(residentFrameIndices);batch.count=resident->indexCount;
+                batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());batch.nativeSpanCount=1;
+                gatheredResidentIndexSpans.push_back(resident);residentFrameIndices+=resident->indexCount;
+            } else {
+                Require(output.size()+job.count<std::numeric_limits<std::uint32_t>::max(),
+                    "Vulkan frame vertex count exceeds32-bit index range");
+                firstVertex=static_cast<std::uint32_t>(output.size());job.destination=firstVertex;
+                output.resize(output.size()+job.count);prepare=true;
+            }
+            if(!resident)for(std::size_t index=0;index<topology.indexCount;++index)
+                elementIndices.push_back(firstVertex+topology.indices[index]);
+
+            job.workUnits=prepare ? NativePendingVertexWork(job):0;
+            if(job.workUnits) {
+                if(directSourcePreparation)
+                    PrepareNativeSolidStripVertices(job,job.residentOutput ? job.residentOutput:output.data());
+                else {nativePendingWork+=job.workUnits;nativeStripJobs.push_back(job);}
+            }
+        } else if(particle) {
+            Require(draw.particleGroup,"Particle draw lost its contiguous group");
+            for(const auto& quad:*draw.particleGroup) {
+                const auto firstVertex=output.size();
+                const auto particleColor=vulkanColor(quad.color,draw.alphaScale);
+                for(std::size_t corner=0;corner<4;++corner) {
+                    std::array<float,4> point{{quad.clipXY[corner][0],quad.clipXY[corner][1],quad.depth,1.0f}};
+                    if(translation[0]!=0.0 || translation[1]!=0.0) {
+                        point[0]=static_cast<float>(point[0]*clipScale[0]+clipOffset[0]);
+                        point[1]=static_cast<float>(point[1]*clipScale[1]+clipOffset[1]);
+                    }
+                    append({point,{{quad.uv[corner][0],quad.uv[corner][1],1.0f}},particleColor});
+                }
+                for(const auto corner:{0u,1u,2u,1u,3u,2u})
+                    elementIndices.push_back(static_cast<std::uint32_t>(firstVertex+corner));
+            }
+            statistics.particles+=draw.particleGroup->size();
+        } else if(draw.kind==EcstasyDrawKind::WorldStrip || remap) {
+            Require(draw.worldStrip,"Vulkan world strip has no retained vertices");
+            const auto& strip=*draw.worldStrip;
+            const auto firstVertex=output.size();
+            if(strip.size()>=3)for(const auto& source:strip) {
+                auto vertexColor=vulkanColor(source.color,draw.alphaScale);
+                if(targetSample)vertexColor[3]*=128.0f/255.0f;
+                append({position(source.position.data()),source.textureCoordinate,vertexColor});
+            }
+            for(std::size_t triangle=2;triangle<strip.size();++triangle) {
+                const std::size_t triangleIndices[]={triangle-2+(triangle&1u),triangle-1-(triangle&1u),triangle};
+                for(auto index:triangleIndices)elementIndices.push_back(static_cast<std::uint32_t>(firstVertex+index));
+            }
+        } else {
+            Require(draw.polygon!=nullptr,"Vulkan polygon draw has no actual polygon");
+            // ePoly stores perimeter vertices; native triangles retain the
+            // source's0,1,3,2 packet strip winding without a crossed diagonal.
+            const std::size_t polygonIndices[]={0,1,3,1,2,3};
+            std::array<std::uint32_t,4> decoded{};unsigned decodedMask{};
+            for(auto index:polygonIndices) {
+                if(decodedMask&(1u<<index)) {elementIndices.push_back(decoded[index]);continue;}
+                const auto& source=draw.polygon->vertices[index];
+                auto vertexColor=vulkanColor(source.color,draw.alphaScale);
+                // Uploaded GS textures store alpha in raw8-bit units; the
+                // native color attachment already stores the shader's logical
+                // alpha. Undo only that upload-specific alpha conversion when
+                // sampling this GPU target through the common TFX0 shader.
+                if(targetSample)vertexColor[3]*=128.0f/255.0f;
+                auto sampledUV=source.textureCoordinate;
+                if(rearSample)sampledUV[0]=ecstasyNativeMirrorMaskedSampleU(sampledUV[0]);
+                decoded[index]=append({position(source.position.data()),sampledUV,vertexColor});
+                decodedMask|=1u<<index;elementIndices.push_back(decoded[index]);
+            }
+        }
+        Require(elementIndices.size()<=std::numeric_limits<std::uint32_t>::max(),"Vulkan frame index count exceeds32-bit draw range");
+        if(!batch.residentGeometry)batch.count=static_cast<std::uint32_t>(elementIndices.size())-batch.first;
+        if(batch.count && batch.scissor.extent.width && batch.scissor.extent.height) {
+            if(draw.carShadow!=EcstasyCarShadow::None) {
+                const auto shadow=static_cast<std::size_t>(draw.carShadow)-1;
+                ++profile.shadowStrips[shadow];
+                profile.shadowTriangles[shadow]+=batch.count/3u;
+            }
+            // A Vulkan draw is only a transport boundary. Concatenate adjacent
+            // triangles when every consumed GPU state value agrees. Original
+            // packet order, texture versions, alpha/depth, and target changes
+            // are untouched; no sorting or transparency approximation occurs.
+            appendBatch(batch);
+        }
+        if(shadowStarted!=Clock::time_point{}) {
+            const auto shadow=static_cast<std::size_t>(draw.carShadow)-1;
+            profile.shadowGatherMilliseconds[shadow]+=
+                std::chrono::duration<double,std::milli>(Clock::now()-shadowStarted).count();
+        }
+    }
+    categoryTimer.Finish();
+    const auto finishStarted=Clock::now();
+    profile.coldVertexJobs+=nativeStripJobs.size();profile.coldVertices+=nativePendingWork;
+    if(!directSourcePreparation) {
+        const auto prepareJob=[&](std::size_t jobIndex) {
+            const auto& job=nativeStripJobs[jobIndex];
+            PrepareNativeSolidStripVertices(job,job.residentOutput ? job.residentOutput:output.data());
+        };
+        if(nativePendingWork<8192 || nativeStripJobs.size()<64) {
+            for(std::size_t index=0;index<nativeStripJobs.size();++index)prepareJob(index);
+        } else {
+            // Chunk by actual cold vertices and available processors. The
+            // shared pool drains all disjoint writes, including failures,
+            // before resident publication or unwinding borrowed frame input.
+            const auto shares=static_cast<std::size_t>(nativeWorkers)*4;
+            const auto budget=std::clamp<std::size_t>(nativePendingWork/shares+(nativePendingWork%shares!=0),512,8192);
+            std::size_t first=0,work=0;
+            for(std::size_t index=0;index<nativeStripJobs.size();++index) {
+                work+=nativeStripJobs[index].workUnits;
+                if(work>=budget) {nativeWorkRanges.push_back({first,index+1});first=index+1;work=0;}
+            }
+            if(first<nativeStripJobs.size())nativeWorkRanges.push_back({first,nativeStripJobs.size()});
+            const auto workers=static_cast<unsigned>(std::min<std::size_t>(nativeWorkers,nativeWorkRanges.size()));
+            RunNativeSceneJobs(nativeWorkRanges.size(),[&](std::size_t rangeIndex) {
+                const auto& range=nativeWorkRanges[rangeIndex];
+                for(auto index=range.first;index<range.last;++index)prepareJob(index);
+            },1,workers);
+        }
+    }
+    residentGeometry.CompletePreparation();
+    const auto indicesStarted=Clock::now();
+    profile.gatherVertexJobsMilliseconds+=
+        std::chrono::duration<double,std::milli>(indicesStarted-finishStarted).count();
+    ResolveNativeResidentIndices(residentIndexCache,gatheredResidentIndexSpans,elementIndices,batches);
+    profile.gatherIndicesMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-indicesStarted).count();
+    profile.gatherFinishMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-finishStarted).count();
+}
 
 void EcstasyVulkanDevice::Storage::RecordDepthTransfers(const std::vector<EcstasyDepthTransfer>& requests,
     const std::array<double,2>& displayTranslation)
@@ -11329,11 +10401,11 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         }
         char detail[1024]{};
         std::snprintf(detail,sizeof(detail),
-            "gather=%llu extent=%ux%u samples=%u commands=%" HP2_ZU " scene_batches=(%" HP2_ZU ",%" HP2_ZU ",%" HP2_ZU ") "
+            "gather=%llu extent=%ux%u samples=%u commands=%zu scene_batches=(%zu,%zu,%zu) "
             "scene_triangles=(%llu,%llu,%llu) line_indices=%llu "
             "transient_vertex_bytes=%llu transient_index_bytes=%llu resident_vertex_upload_bytes=%llu "
-            "resident_index_upload_bytes=%llu resident_vertex_slots=%" HP2_ZU " texture_keys=%" HP2_ZU " resident_textures=%" HP2_ZU " pipelines=%" HP2_ZU " "
-            "available_cpus=%u recording_threads=%u recording_chunks=%u native_draw_calls=%llu resident_validation_jobs=%" HP2_ZU " prepared=%u secondary_reused=%u",
+            "resident_index_upload_bytes=%llu resident_vertex_slots=%zu texture_keys=%zu resident_textures=%zu pipelines=%zu "
+            "available_cpus=%u recording_threads=%u recording_chunks=%u native_draw_calls=%llu resident_validation_jobs=%zu prepared=%u secondary_reused=%u",
             static_cast<unsigned long long>(gatherSerial),options.width,options.height,static_cast<unsigned>(samples),
             preparedFrame.sourceCommands,mainBatches,mirrorBatches,otherBatches,
             static_cast<unsigned long long>(mainTriangles),static_cast<unsigned long long>(mirrorTriangles),
@@ -11522,10 +10594,7 @@ EcstasyVulkanColorReadback EcstasyVulkanDevice::ReadColorTarget(std::int32_t tar
     return storage_->ReadColorTarget(target);
 }
 }
-#else
-#include "src/ecstasy/ecstasy_gl.inc"
-#endif // HP2_ENABLE_VULKAN Storage
-#endif // HP2_ENABLE_VULKAN || HP2_ENABLE_VITAGL
+#endif // HP2_ENABLE_VULKAN
 
 /* Individually qualified coordinator and cinematic view owners. */
 int32_t carViewCrossesNearPlane(const CarCinematicView* view,CarMovement* movement,

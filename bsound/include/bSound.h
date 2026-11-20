@@ -145,33 +145,16 @@ public:
     size_t CueCount() const noexcept { return entries_.size(); }
     size_t DecodeCount() const noexcept { return decodeCount_; }
     size_t ResidentBytes() const;
-    // Background warm-up (Vita): decodes cues [first, first+count) from the
-    // immutable bank bytes without touching cache state, so it may run on a
-    // worker while the owner thread keeps calling Acquire. Failed cues are
-    // left empty (Acquire reports them as usual). Install runs on the owner.
-    std::vector<std::shared_ptr<const PcmWave>> DecodeResidentRange(size_t first,size_t count) const;
-    void InstallDecoded(size_t first,std::vector<std::shared_ptr<const PcmWave>>&& decoded);
-    // Non-decoding probe (Vita async misses): the cached PCM or null, and the
-    // cue index DecodeResidentRange takes. Adopt publishes a worker result
-    // exactly as Acquire would have after its own decode.
-    std::shared_ptr<const PcmWave> TryAcquire(size_t metadataOffset,size_t& index);
-    std::shared_ptr<const PcmWave> Adopt(size_t index,std::shared_ptr<const PcmWave> pcm);
 private:
-    std::shared_ptr<const PcmWave> DecodeEntry(size_t index) const;
-    void Retain(size_t index,const std::shared_ptr<const PcmWave>& pcm);
     struct Entry {
         size_t offset{},bytes{};
         uint32_t rate{};
         bool resident{};
         std::weak_ptr<const PcmWave> pcm;
-        // Vita only: decoded cues stay resident (bounded per bank) so a
-        // replayed effect is not re-decoded on the game thread.
-        std::shared_ptr<const PcmWave> retained;
     };
     const WorldAudioBank* bank_;
     std::vector<Entry> entries_;
     size_t decodeCount_{};
-    size_t retainedBytes_{};
 };
 
 // Native consumer policy belongs to this individually proven audio owner.

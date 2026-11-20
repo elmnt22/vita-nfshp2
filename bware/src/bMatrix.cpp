@@ -11,18 +11,6 @@
 #else
 #define NFSHP2_NATIVE_SSE2 0
 #endif
-#if !NFSHP2_NATIVE_SSE2 && defined(__ARM_NEON)
-#include "bware/inc/bMathNeon.hpp"
-// NEON VMLA rounds the product before the add (no fusion), so the lane
-// order ((m0*x+m1*y)+m2*z)+m3*w matches the scalar path. NEON always flushes
-// denormals; the Vita host enables this only after confirming FPSCR.FZ and a
-// bit-exact self-test (vita/selftest.cpp), otherwise the scalar path runs.
-int bMatrixNeonEnabled = 0;
-int bFastRoundEnabled = 0;
-#define NFSHP2_NATIVE_NEON 1
-#else
-#define NFSHP2_NATIVE_NEON 0
-#endif
 
 void rotationMatrixIdentity(float matrix[16])
 {
@@ -34,21 +22,8 @@ void rotationMatrixIdentity(float matrix[16])
     matrix[15] = 1.0f;
 }
 
-
 void vectorMatrixMultiply(float output[16], const float left[16], const float right[16])
 {
-#if NFSHP2_NATIVE_NEON
-    if (bMatrixNeonEnabled) {
-        const float32x4_t c0 = vld1q_f32(left), c1 = vld1q_f32(left + 4), c2 = vld1q_f32(left + 8), c3 = vld1q_f32(left + 12);
-        // All right columns are read before any store (output may alias).
-        const float32x4_t r0 = vld1q_f32(right), r1 = vld1q_f32(right + 4), r2 = vld1q_f32(right + 8), r3 = vld1q_f32(right + 12);
-        vst1q_f32(output, bNeonTransform(c0, c1, c2, c3, r0));
-        vst1q_f32(output + 4, bNeonTransform(c0, c1, c2, c3, r1));
-        vst1q_f32(output + 8, bNeonTransform(c0, c1, c2, c3, r2));
-        vst1q_f32(output + 12, bNeonTransform(c0, c1, c2, c3, r3));
-        return;
-    }
-#endif
     float result[16];
     for (int column = 0; column < 4; ++column) vectorMatrixTransform(result + column * 4, left, right + column * 4);
     memcpy(output, result, sizeof(result));
@@ -99,27 +74,11 @@ void vectorMatrixTransform(float output[4], const float matrix[16], const float 
     result = _mm_add_ps(result, _mm_mul_ps(_mm_loadu_ps(matrix + 12), _mm_set1_ps(w)));
     _mm_storeu_ps(output, result);
 #else
-#if NFSHP2_NATIVE_NEON
-    if (bMatrixNeonEnabled) {
-        vst1q_f32(output, bNeonTransformMatrix(matrix, vld1q_f32(input)));
-        return;
-    }
-#endif
     float result[4];
     for (int row = 0; row < 4; ++row)
         result[row] = ((matrix[row]*x + matrix[row+4]*y) + matrix[row+8]*z) + matrix[row+12]*w;
     memcpy(output, result, sizeof(result));
 #endif
-}
-
-// Scalar reference for the Vita NEON self-test.
-void vectorMatrixTransformScalar(float output[4], const float matrix[16], const float input[4])
-{
-    const float x = input[0], y = input[1], z = input[2], w = input[3];
-    float result[4];
-    for (int row = 0; row < 4; ++row)
-        result[row] = ((matrix[row]*x + matrix[row+4]*y) + matrix[row+8]*z) + matrix[row+12]*w;
-    memcpy(output, result, sizeof(result));
 }
 
 float* vectorMatrixTranspose(float output[16], const float matrix[16])
@@ -131,14 +90,6 @@ float* vectorMatrixTranspose(float output[16], const float matrix[16])
 
 void vectorMatrixTransformPoint(float output[4], const float matrix[16], const float input[4])
 {
-#if NFSHP2_NATIVE_NEON
-    if (bMatrixNeonEnabled) {
-        // {x, y, z, 1} built in registers (no store-forwarding stall).
-        const float32x2_t high = vld1_lane_f32(input + 2, vdup_n_f32(1.0f), 0);
-        vst1q_f32(output, bNeonTransformMatrix(matrix, vcombine_f32(vld1_f32(input), high)));
-        return;
-    }
-#endif
     const float point[4] = {input[0], input[1], input[2], 1.0f};
     vectorMatrixTransform(output, matrix, point);
 }

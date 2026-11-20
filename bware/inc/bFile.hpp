@@ -24,11 +24,6 @@ namespace hp2 {
 class RandomAccessFile final {
 public:
     explicit RandomAccessFile(std::filesystem::path path);
-#ifdef __vita__
-    ~RandomAccessFile();
-    RandomAccessFile(const RandomAccessFile&)=delete;
-    RandomAccessFile& operator=(const RandomAccessFile&)=delete;
-#endif
     std::uint64_t Size() const noexcept { return size_; }
     const std::filesystem::path& Path() const noexcept { return path_; }
     void Read(std::uint64_t offset, void* buffer, std::size_t length) const;
@@ -36,13 +31,7 @@ public:
 private:
     std::filesystem::path path_;
     std::uint64_t size_ = 0;
-#ifdef __vita__
-    // Vita newlib has a 32-bit off_t and no libstdc++ LFS: ZZDATA.BIN (3.1 GB)
-    // needs the native 64-bit sceIo positioned read instead of ifstream.
-    int fd_ = -1;
-#else
     mutable std::ifstream stream_;
-#endif
     mutable std::mutex lock_;
 };
 

@@ -8,26 +8,6 @@
 #include <math.h>
 #include <cmath>
 #include <string.h>
-#include <array>
-#include <string>
-#include <cstdlib>
-#include <cstdint>
-
-// Diagnostic (Vita micro clock): calibrate+boost, derivatives+apply,
-// component prepare (suspension/terrain), collect forces, orthonormalize,
-// publish, terrain queries; [7] substeps.
-extern uint32_t (*collisionWitnessClockMicros)();
-std::array<std::uint64_t,8> mellowSplitMicros{};
-namespace {
-struct MellowMark {
-    std::uint32_t at;
-    MellowMark():at(collisionWitnessClockMicros ? collisionWitnessClockMicros():0u) {}
-    void Lap(std::size_t part) {
-        if(!collisionWitnessClockMicros)return;
-        const auto now=collisionWitnessClockMicros();mellowSplitMicros[part]+=now-at;at=now;
-    }
-};
-}
 
 void mellovatorSetWheelMotion(Mellovator* component, const float angularVelocity[4])
 {
@@ -208,14 +188,11 @@ void mellowMoverLoadState(MellowMover* mover)
 
 void mellowMoverPrepare(MellowMover* mover)
 {
-    MellowMark mark;
     componentSystemPrepare(&mover->components);
     const float impulse = mellovatorResolveBottomOutImpulses(mover->suspension, mover->state,
         mover->environment->contact.tuning->contactImpulseScale);
     if (0.0f < impulse) componentSystemPrepare(&mover->components);
-    mark.Lap(2);
     mellowMoverCollectForces(mover);
-    mark.Lap(3);
 }
 
 void mellowMoverCollectForces(MellowMover* mover)
@@ -321,7 +298,6 @@ void mellowMoverPublishState(MellowMover* mover, float elapsed)
 
 float mellowMoverMove(MellowMover* mover, float elapsed)
 {
-    MellowMark mark;
     mellowMoverCalibrate(mover);
     Mellovator* component = mover->suspension;
     component->throttle = mover->controls->throttle;
@@ -334,20 +310,15 @@ float mellowMoverMove(MellowMover* mover, float elapsed)
     mellowMoverSetBoost(mover, mover->state->performanceScale);
     const int32_t steps = convertFloatToInt32(elapsed / 0.00839999970048666f) + 1;
     const float step = elapsed / (float)steps;
-    mark.Lap(0);
     for (int32_t index = 0; index < steps; ++index) {
         mover->environment->stepContext->lastSubstepElapsed = step;
-        const auto before2=mellowSplitMicros[2]+mellowSplitMicros[3];
         componentSystemIntegrateEuler(&mover->components, step, mover->derivatives, 33);
-        mark.Lap(1);mellowSplitMicros[1]-=mellowSplitMicros[2]+mellowSplitMicros[3]-before2;
         motionMatrixOrthonormalize(mover->body->motion.orientation, mover->body->motion.orientation);
         // The integrator prepared omega before this normalization. Refresh its
         // angular cache without discarding the forces already collected.
         rigidBodyRefreshAngularVelocity(mover->body);
-        mark.Lap(4);++mellowSplitMicros[7];
     }
     mellowMoverPublishState(mover, elapsed);
-    mark.Lap(5);
     return elapsed;
 }
 
@@ -475,7 +446,6 @@ float* mellovatorComputeDerivatives(const Mellovator* component, float derivativ
 
 void mellovatorGroundHeightsAndPositions(Mellovator* component, float positions[4][4], float heights[4])
 {
-    struct TerrainLap {MellowMark mark;~TerrainLap(){mark.Lap(6);}} terrainLap;
     for (int wheel = 0; wheel < 4; ++wheel) {
         float lever[4];
         wheelLever(component, wheel, lever);
@@ -614,12 +584,6 @@ void mellovatorResolveForces(Mellovator* component)
 {
     RigidBody* body = component->body;
     const float* frame = body->motion.orientation;
-    // The frame, steering and these pure trig helpers are invariant across
-    // the four wheels (ApplyForce only accumulates): front wheels share one
-    // heading/steer pair, rear wheels the other. Evaluate each once, lazily.
-    struct WheelTrig {bool ready; float cosine, sine, wheelCosine, wheelSine;};
-    WheelTrig trig[2] = {};
-    float baseHeading = 0.0f; bool baseReady = false;
     for (int wheel = 0; wheel < 4; ++wheel) {
         float localLever[4], worldLever[4];
         // PAL21AFB0 SUB from vf0, then21AFC8 ADD the wheel mount.
@@ -632,23 +596,11 @@ void mellovatorResolveForces(Mellovator* component)
         if (component->touchingGround[wheel]) {
             const float velocityX = bScalarAdd(body->linearVelocity[0],-bScalarMultiply(body->angularVelocity[2],worldLever[1]));
             const float velocityY = bScalarAdd(body->linearVelocity[1],bScalarMultiply(body->angularVelocity[2],worldLever[0]));
-            auto& memo = trig[wheel < 2 ? 0 : 1];
+            float heading = bScalarMultiply((float)vectorAtan2Angle(frame[0],frame[1]),0.0000958738019107841f);
             const float steering = wheel < 2 ? bScalarMultiply((float)component->steeringAngle,0.0000958738019107841f) : 0.0f;
-            if (!memo.ready) {
-                if (!baseReady) {
-                    baseHeading = bScalarMultiply((float)vectorAtan2Angle(frame[0],frame[1]),0.0000958738019107841f);
-                    baseReady = true;
-                }
-                float heading = baseHeading;
-                if(wheel<2)heading = bScalarAdd(heading,steering);
-                memo.cosine = rotationSineRadians(bScalarAdd(heading,1.5707964897155762f));
-                memo.sine = rotationSineRadians(heading);
-                memo.wheelCosine = rotationSineRadians(bScalarAdd(steering,1.5707964897155762f));
-                memo.wheelSine = rotationSineRadians(steering);
-                memo.ready = true;
-            }
-            const float cosine = memo.cosine;
-            const float sine = memo.sine;
+            if(wheel<2)heading = bScalarAdd(heading,steering);
+            const float cosine = rotationSineRadians(bScalarAdd(heading,1.5707964897155762f));
+            const float sine = rotationSineRadians(heading);
             const float longitudinal = bScalarAdd(bScalarMultiply(velocityX,cosine),bScalarMultiply(velocityY,sine));
             const float lateral = bScalarAdd(bScalarMultiply(-velocityX,sine),bScalarMultiply(velocityY,cosine));
             const float rolling = bScalarMultiply(component->motion.wheelAngularVelocity[wheel],component->info.wheels[wheel].mountPosition[3]);
@@ -663,24 +615,9 @@ void mellovatorResolveForces(Mellovator* component)
             const float scale = bScalarMultiply(component->suspensionForce[wheel],1.25f);
             const float tireX = bScalarMultiply(bScalarMultiply(-slipX,friction),scale);
             const float tireY = bScalarMultiply(bScalarMultiply(-lateral,friction),scale);
-            const float wheelCosine = memo.wheelCosine;
-            const float wheelSine = memo.wheelSine;
-#if !defined(__vita__) && !defined(__SWITCH__)
-            static const bool verifyTrig=[] {const char* v=std::getenv("HP2_VERIFY_MELLOW");return v && *v=='1';}();
-            if (verifyTrig) {
-                float heading = bScalarMultiply((float)vectorAtan2Angle(frame[0],frame[1]),0.0000958738019107841f);
-                if(wheel<2)heading = bScalarAdd(heading,steering);
-                const float reference[4] = {rotationSineRadians(bScalarAdd(heading,1.5707964897155762f)),
-                    rotationSineRadians(heading),rotationSineRadians(bScalarAdd(steering,1.5707964897155762f)),
-                    rotationSineRadians(steering)};
-                const float cached[4] = {cosine,sine,wheelCosine,wheelSine};
-                static unsigned long long checks=0,mismatches=0;++checks;
-                if (memcmp(reference,cached,sizeof(cached))!=0) ++mismatches;
-                if ((checks&65535u)==0)
-                    hp2::platform::RecordSessionEvent("physics.mellow_trig_verify",
-                        ("checks="+std::to_string(checks)+" mismatches="+std::to_string(mismatches)).c_str());
-            }
-#endif
+            const float angle = steering;
+            const float wheelCosine = rotationSineRadians(bScalarAdd(angle,1.5707964897155762f));
+            const float wheelSine = rotationSineRadians(angle);
             localForce[0] = bScalarAdd(bScalarMultiply(wheelCosine,tireX),-bScalarMultiply(wheelSine,tireY));
             localForce[1] = bScalarAdd(bScalarMultiply(wheelSine,tireX),bScalarMultiply(wheelCosine,tireY));
         }

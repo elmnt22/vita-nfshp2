@@ -1,4 +1,3 @@
-#include <atomic>
 #include "indep/inc/VoronoiClip.hpp"
 #include "indep/inc/Contact.hpp"
 #include "indep/inc/Polyhedra.hpp"
@@ -6,12 +5,9 @@
 #include "bware/inc/bMath.hpp"
 #include "indep/inc/VoronoiClip.hpp"
 
-#include <chrono>
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
-#include <cstdio>
-#include <cstring>
 
 CollisionWitness* collisionWitnessInitialize(CollisionWitness* witness, CollisionGeometry* first, CollisionGeometry* second)
 {
@@ -71,46 +67,6 @@ void collisionTransformEdge(CollisionTransformedEdge* output, const float frame[
     vectorMatrixTransformPoint(output->second, frame, secondPoint);
     memcpy(output->direction, output->first, sizeof(output->direction));
     for (int lane = 0; lane < 3; ++lane) output->direction[lane] = output->first[lane] - output->second[lane];
-}
-
-// Per-query transformed-feature reuse (exact). Each scratch slot of a query
-// is only ever filled from one frame (firstVertex/firstEdge: firstToSecond,
-// secondVertex/secondEdge: secondToFirst) and the frames and geometry are
-// fixed for the query, so a slot that already holds a feature holds exactly
-// what transforming it again would compute. Vita witness_cache_off.txt: 0;
-// PC HP2_VERIFY_WITNESS_CACHE=1 recomputes every reuse and counts mismatches.
-int collisionWitnessTransformCache=1;
-std::atomic<uint64_t> collisionWitnessCacheChecks{0},collisionWitnessCacheMismatches{0};
-static const bool verifyWitnessCache=[] {
-#if !defined(__vita__) && !defined(__SWITCH__)
-    const char* value=getenv("HP2_VERIFY_WITNESS_CACHE");return value && *value=='1';
-#else
-    return false;
-#endif
-}();
-static inline void cachedTransformVertex(CollisionTransformedVertex* slot,const float frame[16],const CollisionFeature* vertex)
-{
-    if(collisionWitnessTransformCache && slot->feature==vertex) {
-        if(verifyWitnessCache) {
-            CollisionTransformedVertex fresh;collisionTransformVertex(&fresh,frame,vertex);
-            ++collisionWitnessCacheChecks;
-            if(memcmp(&fresh,slot,sizeof(fresh))!=0) ++collisionWitnessCacheMismatches;
-        }
-        return;
-    }
-    collisionTransformVertex(slot,frame,vertex);
-}
-static inline void cachedTransformEdge(CollisionTransformedEdge* slot,const float frame[16],const CollisionFeature* edge)
-{
-    if(collisionWitnessTransformCache && slot->feature==edge) {
-        if(verifyWitnessCache) {
-            CollisionTransformedEdge fresh;collisionTransformEdge(&fresh,frame,edge);
-            ++collisionWitnessCacheChecks;
-            if(memcmp(&fresh,slot,sizeof(fresh))!=0) ++collisionWitnessCacheMismatches;
-        }
-        return;
-    }
-    collisionTransformEdge(slot,frame,edge);
 }
 
 CollisionClip* collisionClipInitialize(CollisionClip* clip)
@@ -400,7 +356,7 @@ int32_t collisionWitnessVertexEdge(CollisionWitness* witness,const float feature
 {
     CollisionFeature* first=witness->side==1?witness->first:witness->second;
     CollisionFeature* second=witness->side==2?witness->first:witness->second;
-    cachedTransformVertex(vertex,featureFrame,first);
+    collisionTransformVertex(vertex,featureFrame,first);
     for(int index=0;index<4;++index) {
         const CollisionPlane* plane=&second->adjacent[index];
         if(dot3(plane->normal,vertex->point)-plane->offset<0.0f) {
@@ -408,7 +364,7 @@ int32_t collisionWitnessVertexEdge(CollisionWitness* witness,const float feature
             return 0;
         }
     }
-    cachedTransformEdge(edge,otherFrame,second);
+    collisionTransformEdge(edge,otherFrame,second);
     CollisionClip clip;collisionClipInitialize(&clip);
     const float point[4]={first->vector[0],first->vector[1],first->vector[2],0.0f};
     CollisionFeature* changed=collisionClipVertex(&clip,edge,point,first->adjacent,first->adjacentCount);
@@ -461,7 +417,7 @@ int32_t collisionWitnessVertexFace(CollisionWitness* witness, const float featur
 {
     CollisionFeature* vertex = witness->side == 1 ? witness->first : witness->second;
     CollisionFeature* face = witness->side == 2 ? witness->first : witness->second;
-    cachedTransformVertex(transformed, featureFrame, vertex);
+    collisionTransformVertex(transformed, featureFrame, vertex);
     float minimum = 0.0f;
     int32_t violated = -1;
     for (int index = 0; index < face->adjacentCount; ++index) {
@@ -602,10 +558,10 @@ int32_t collisionWitnessEdges(CollisionWitness* witness, const float featureFram
 {
     CollisionFeature* firstFeature = witness->side == 1 ? witness->first : witness->second;
     CollisionFeature* secondFeature = witness->side == 2 ? witness->first : witness->second;
-    cachedTransformEdge(first, featureFrame, firstFeature);
+    collisionTransformEdge(first, featureFrame, firstFeature);
     int32_t result = collisionWitnessEdgeRegions(witness, first, secondFeature, 2);
     if (result != 1) return result;
-    cachedTransformEdge(second, otherFrame, secondFeature);
+    collisionTransformEdge(second, otherFrame, secondFeature);
     result = collisionWitnessEdgeRegions(witness, second, firstFeature, 1);
     if (result != 1) return result;
     float* firstPoint = witness->side == 1 ? witness->firstPoint : witness->secondPoint;
@@ -628,7 +584,7 @@ int32_t collisionWitnessEdgeFace(CollisionWitness* witness, const float featureF
 {
     CollisionFeature* edgeFeature = witness->side == 1 ? witness->first : witness->second;
     CollisionFeature* face = witness->side == 2 ? witness->first : witness->second;
-    cachedTransformEdge(edge, featureFrame, edgeFeature);
+    collisionTransformEdge(edge, featureFrame, edgeFeature);
     CollisionClip clip;
     collisionClipInitialize(&clip);
     if (collisionClipPlanes(&clip, edge, face->adjacent, face->adjacentCount)) {
@@ -675,76 +631,10 @@ int32_t collisionWitnessEdgeFace(CollisionWitness* witness, const float featureF
     return 0;
 }
 
-// Diagnostic counters (logged with render.collision_solve).
-uint64_t collisionWitnessQueries=0,collisionWitnessIterations=0,collisionWitnessRestarts=0,collisionWitnessExhausted=0;
-double collisionWitnessMilliseconds=0,collisionWitnessWarmMilliseconds=0;
-int collisionWitnessWarmProbe=0;
-// Diagnostic per feature-kind split (Vita sets the clock when probing).
-uint32_t (*collisionWitnessProbeClock)()=nullptr;
-uint32_t (*collisionWitnessClockMicros)()=nullptr;
-uint64_t collisionWitnessKindMicros[9]={},collisionWitnessKindSteps[9]={};
-uint64_t collisionWitnessWarmMismatches=0;
-static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
-                              const float firstPosition[4], const float secondFrame[16],
-                              const float secondPosition[4], uint32_t* randomState,
-                              uint64_t* counters=nullptr, int32_t* predictPending=nullptr);
-// RNG-free prediction (thread-safe, detached counters). *pending: 0 = the
-// witness is the exact query result and no random draw happened; 1 = exact
-// except the terminal restart, whose two vertex draws the caller makes from
-// the real state in order; -1 = a restart before termination (the rest of
-// the query depends on the random state): the witness is garbage.
-int32_t collisionWitnessQueryPredict(CollisionWitness* witness, const float firstFrame[16],
-                              const float firstPosition[4], const float secondFrame[16],
-                              const float secondPosition[4], int32_t* pending, uint64_t counters[4])
-{
-    *pending=0;
-    return collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,nullptr,counters,pending);
-}
-// Thread-safe variant for speculative helpers: no timers, probes or global
-// counters (counters[4] = queries, iterations, restarts, exhausted).
-int32_t collisionWitnessQueryDetached(CollisionWitness* witness, const float firstFrame[16],
-                              const float firstPosition[4], const float secondFrame[16],
-                              const float secondPosition[4], uint32_t* randomState, uint64_t counters[4])
-{
-    return collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState,counters);
-}
 int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState)
 {
-    if(collisionWitnessClockMicros && !collisionWitnessWarmProbe) {
-        // Cheap host microsecond clock (Vita): ~0.4 us vs ~0.75 us per read.
-        const uint32_t started=collisionWitnessClockMicros();
-        const int32_t result=collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState);
-        collisionWitnessMilliseconds+=(double)(collisionWitnessClockMicros()-started)*0.001;
-        return result;
-    }
-    const CollisionWitness before=*witness;
-    const uint32_t randomBefore=*randomState;
-    const auto started=std::chrono::steady_clock::now();
-    const int32_t result=collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState);
-    const auto finished=std::chrono::steady_clock::now();
-    collisionWitnessMilliseconds+=std::chrono::duration<double,std::milli>(finished-started).count();
-    if(collisionWitnessWarmProbe) {
-        // Diagnostic only: rerun the same query on copies with a warm cache.
-        CollisionWitness copy=before;
-        uint32_t random=randomBefore;
-        const uint64_t q=collisionWitnessQueries,i=collisionWitnessIterations,r=collisionWitnessRestarts,e=collisionWitnessExhausted;
-        const auto warmStarted=std::chrono::steady_clock::now();
-        collisionWitnessQueryBody(&copy,firstFrame,firstPosition,secondFrame,secondPosition,&random);
-        collisionWitnessWarmMilliseconds+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-warmStarted).count();
-        collisionWitnessQueries=q;collisionWitnessIterations=i;collisionWitnessRestarts=r;collisionWitnessExhausted=e;
-        if(memcmp(&copy,witness,sizeof(copy))!=0 || random!=*randomState) ++collisionWitnessWarmMismatches;
-    }
-    return result;
-}
-static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
-                              const float firstPosition[4], const float secondFrame[16],
-                              const float secondPosition[4], uint32_t* randomState,
-                              uint64_t* counters, int32_t* predictPending)
-{
-    const bool detached=counters!=nullptr;
-    if(!detached) ++collisionWitnessQueries; else ++counters[0];
     float firstToSecond[16], secondToFirst[16];
     collisionRelativeTransform(firstToSecond, secondFrame, secondPosition, firstFrame, firstPosition);
     collisionRelativeTransform(secondToFirst, firstFrame, firstPosition, secondFrame, secondPosition);
@@ -755,7 +645,6 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
     int32_t iteration = 0, restarts = 0, result = 0;
     do {
         const int firstKind = witness->first->kind, secondKind = witness->second->kind;
-        const uint32_t stepStarted = !detached && collisionWitnessProbeClock ? collisionWitnessProbeClock() : 0;
         if (firstKind == 0 && secondKind == 0) {
             witness->side = 1;
             result = collisionWitnessVertices(witness, firstToSecond, secondToFirst, &firstVertex, &secondVertex);
@@ -781,31 +670,13 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
             witness->side = 2;
             result = collisionWitnessEdgeFace(witness, secondToFirst, firstToSecond, &secondEdge);
         }
-        if (!detached && collisionWitnessProbeClock && firstKind < 3 && secondKind < 3) {
-            collisionWitnessKindMicros[firstKind * 3 + secondKind] += collisionWitnessProbeClock() - stepStarted;
-            ++collisionWitnessKindSteps[firstKind * 3 + secondKind];
-        }
         if (collisionWitnessRemember(witness, firstHistory, secondHistory, iteration)) {
             ++restarts;
             iteration = 0;
-            if (predictPending) {
-                if (result == 0) {*predictPending = -1;return 0;}
-                *predictPending = 1;
-                ++counters[1];
-                break;
-            }
             witness->first = &witness->firstGeometry->vertices[vectorRandomBounded((uint32_t)witness->firstGeometry->vertexCount, randomState)];
             witness->second = &witness->secondGeometry->vertices[vectorRandomBounded((uint32_t)witness->secondGeometry->vertexCount, randomState)];
         } else ++iteration;
-        if (!detached) ++collisionWitnessIterations; else ++counters[1];
     } while (result == 0 && restarts < 3 && iteration < 80);
-    if (!detached) {
-        collisionWitnessRestarts+=(uint64_t)restarts;
-        if (result == 0) ++collisionWitnessExhausted;
-    } else {
-        counters[2]+=(uint64_t)restarts;
-        if (result == 0) ++counters[3];
-    }
     return result;
 }
 
@@ -815,7 +686,7 @@ int32_t collisionWitnessVertices(CollisionWitness* witness, const float featureF
 {
     CollisionFeature* first=witness->side==1 ? witness->first : witness->second;
     CollisionFeature* second=witness->side==2 ? witness->first : witness->second;
-    cachedTransformVertex(feature,featureFrame,first);
+    collisionTransformVertex(feature,featureFrame,first);
     for(int index=0;index<second->adjacentCount;++index) {
         const CollisionPlane* plane=&second->adjacent[index];
         if(dot3(plane->normal,feature->point)-plane->offset<0.0f) {
@@ -824,7 +695,7 @@ int32_t collisionWitnessVertices(CollisionWitness* witness, const float featureF
             return 0;
         }
     }
-    cachedTransformVertex(other,otherFrame,second);
+    collisionTransformVertex(other,otherFrame,second);
     for(int index=0;index<first->adjacentCount;++index) {
         const CollisionPlane* plane=&first->adjacent[index];
         if(dot3(plane->normal,other->point)-plane->offset<0.0f) {
@@ -1000,66 +871,4 @@ float collisionGeometryMaximumViolation(const CollisionGeometry* geometry)
             if(maximum<distance) maximum=distance;
         }
     return maximum;
-}
-
-// On-device witness micro-benchmark (diagnostic, main thread): records the
-// first 256 committed separation queries, then replays them on copies.
-int collisionWitnessBench=0;
-void (*collisionWitnessBenchLog)(const char*)=nullptr;
-namespace {
-struct WitnessBenchCase {CollisionWitness witness;float firstFrame[16],firstPosition[4],secondFrame[16],secondPosition[4];uint32_t state;};
-WitnessBenchCase witnessBenchCases[256];
-unsigned witnessBenchCount=0;
-void runWitnessBench()
-{
-    if(!collisionWitnessClockMicros || !collisionWitnessBenchLog)return;
-    char text[512];
-    uint32_t passMicros[10]={};
-    uint64_t counters[4]={};
-    for(int pass=0;pass<10;++pass) {
-        const uint32_t start=collisionWitnessClockMicros();
-        for(unsigned index=0;index<witnessBenchCount;++index) {
-            const auto& entry=witnessBenchCases[index];
-            CollisionWitness witness=entry.witness;uint32_t state=entry.state;
-            collisionWitnessQueryBody(&witness,entry.firstFrame,entry.firstPosition,entry.secondFrame,entry.secondPosition,&state,counters);
-        }
-        passMicros[pass]=collisionWitnessClockMicros()-start;
-    }
-    uint32_t warm=0;for(int pass=1;pass<10;++pass)warm+=passMicros[pass];
-    std::snprintf(text,sizeof(text),"witness_bench cases=%u first_pass_us_per_query=%.2f warm_us_per_query=%.2f iterations_per_query=%.2f",
-        witnessBenchCount,double(passMicros[0])/witnessBenchCount,double(warm)/9.0/witnessBenchCount,double(counters[1])/(10.0*witnessBenchCount));
-    collisionWitnessBenchLog(text);
-    // Per kind (warm, probe clock overhead included and reported).
-    const uint32_t clockStart=collisionWitnessClockMicros();
-    for(int i=0;i<1000;++i)(void)collisionWitnessClockMicros();
-    const double clockUs=double(collisionWitnessClockMicros()-clockStart)/1000.0;
-    uint64_t kindMicros[9],kindSteps[9];
-    std::memcpy(kindMicros,collisionWitnessKindMicros,sizeof(kindMicros));std::memcpy(kindSteps,collisionWitnessKindSteps,sizeof(kindSteps));
-    const uint64_t q=collisionWitnessQueries,it=collisionWitnessIterations,r=collisionWitnessRestarts,e=collisionWitnessExhausted;
-    auto* savedProbe=collisionWitnessProbeClock;collisionWitnessProbeClock=collisionWitnessClockMicros;
-    std::memset(collisionWitnessKindMicros,0,sizeof(kindMicros));std::memset(collisionWitnessKindSteps,0,sizeof(kindSteps));
-    for(int pass=0;pass<5;++pass)for(unsigned index=0;index<witnessBenchCount;++index) {
-        const auto& entry=witnessBenchCases[index];
-        CollisionWitness witness=entry.witness;uint32_t state=entry.state;
-        collisionWitnessQueryBody(&witness,entry.firstFrame,entry.firstPosition,entry.secondFrame,entry.secondPosition,&state);
-    }
-    int used=std::snprintf(text,sizeof(text),"witness_bench_kinds clock_us=%.3f ",clockUs);
-    for(int pair=0;pair<9;++pair)if(collisionWitnessKindSteps[pair])
-        used+=std::snprintf(text+used,sizeof(text)-used,"k%d%d steps/q=%.2f us=%.3f ",pair/3,pair%3,
-            double(collisionWitnessKindSteps[pair])/(5.0*witnessBenchCount),double(collisionWitnessKindMicros[pair])/collisionWitnessKindSteps[pair]);
-    collisionWitnessBenchLog(text);
-    collisionWitnessProbeClock=savedProbe;
-    std::memcpy(collisionWitnessKindMicros,kindMicros,sizeof(kindMicros));std::memcpy(collisionWitnessKindSteps,kindSteps,sizeof(kindSteps));
-    collisionWitnessQueries=q;collisionWitnessIterations=it;collisionWitnessRestarts=r;collisionWitnessExhausted=e;
-}
-}
-void collisionWitnessBenchRecord(const CollisionWitness* witness,const float firstFrame[16],const float firstPosition[4],
-    const float secondFrame[16],const float secondPosition[4],uint32_t state)
-{
-    if(!collisionWitnessBench || witnessBenchCount>=256)return;
-    auto& entry=witnessBenchCases[witnessBenchCount];
-    entry.witness=*witness;entry.state=state;
-    std::memcpy(entry.firstFrame,firstFrame,sizeof(entry.firstFrame));std::memcpy(entry.secondFrame,secondFrame,sizeof(entry.secondFrame));
-    std::memcpy(entry.firstPosition,firstPosition,sizeof(entry.firstPosition));std::memcpy(entry.secondPosition,secondPosition,sizeof(entry.secondPosition));
-    if(++witnessBenchCount==256) {runWitnessBench();collisionWitnessBench=0;}
 }

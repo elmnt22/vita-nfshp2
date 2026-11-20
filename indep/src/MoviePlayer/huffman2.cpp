@@ -3,15 +3,6 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
-#include <cstdio>
-#include <vector>
-#include "bware/inc/bWare.hpp"
-
-#if defined(__GNUC__)
-#define HP2_HUFFMAN_UNLIKELY(condition) __builtin_expect(!!(condition), 0)
-#else
-#define HP2_HUFFMAN_UNLIKELY(condition) (condition)
-#endif
 
 namespace hp2::movie {
 
@@ -201,7 +192,7 @@ void Huffman::InitDecompress(const std::uint8_t* input, std::size_t bytes) {
 
 // PAL 237428..23765C. Nine-bit lookup, long signed magnitudes and both zero
 // run forms are decoded directly, preserving the source prefetch policy.
-void Huffman::DecompressReference(std::int16_t* output, std::uint32_t count) {
+void Huffman::Decompress(std::int16_t* output, std::uint32_t count) {
     if (count != 0 && output == nullptr)
         throw std::invalid_argument("MV3 Huffman missing output coefficients");
     std::uint32_t at = 0;
@@ -238,89 +229,6 @@ void Huffman::DecompressReference(std::int16_t* output, std::uint32_t count) {
         }
     }
 }
-
-// Same decoder as DecompressReference with the bit cursor held in locals
-// (Refill/GETBITS inlined; identical checks, written back before any throw).
-void Huffman::Decompress(std::int16_t* output, std::uint32_t count) {
-    static unsigned checks = 0, mismatches = 0;
-    const bool check = checks < 300;
-    Huffman reference = *this;
-    std::vector<std::int16_t> expected;
-    if (check) {
-        expected.resize(count);
-        try { reference.DecompressReference(expected.data(), count); }
-        catch (...) { checks = 300; DecompressReference(output, count); return; }
-    }
-    if (count != 0 && output == nullptr)
-        throw std::invalid_argument("MV3 Huffman missing output coefficients");
-    std::uint32_t bits = bits_;
-    std::int32_t bitCount = bitCount_;
-    std::size_t inputAt = inputAt_;
-    const auto* const input = input_;
-    const auto inputBytes = inputBytes_;
-    const auto writeBack = [&] { bits_ = bits; bitCount_ = bitCount; inputAt_ = inputAt; };
-    const auto refill = [&] {
-        while (bitCount < 25) {
-            if (HP2_HUFFMAN_UNLIKELY(bitCount < 0 || inputAt >= inputBytes || input == nullptr)) {
-                writeBack(); throw std::out_of_range("MV3 Huffman truncated input/lookahead");
-            }
-            bits |= static_cast<std::uint32_t>(input[inputAt]) << ((24u - static_cast<std::uint32_t>(bitCount)) & 31u);
-            ++inputAt; bitCount += 8;
-        }
-    };
-    const auto getBits = [&](std::uint32_t n) {
-        if (HP2_HUFFMAN_UNLIKELY(n > 31 || static_cast<std::int32_t>(n) > bitCount)) {
-            writeBack(); throw std::out_of_range("MV3 Huffman invalid buffered-bit request");
-        }
-        const std::uint32_t result = bits >> ((0u - n) & 31u);
-        bits <<= n & 31u; bitCount -= static_cast<std::int32_t>(n);
-        return result;
-    };
-    std::uint32_t at = 0;
-    while (at < count) {
-        refill();
-        const auto entry = movieHuffmanDecodeTable[bits >> 23];
-        if (entry.value == -128) {
-            const std::uint32_t categoryMinusOne = entry.consumedBits;
-            if (categoryMinusOne + 1 >= movieHuffmanCodes.size()) {
-                writeBack(); throw std::out_of_range("MV3 Huffman invalid long category");
-            }
-            const auto prefixLength = movieHuffmanCodes[categoryMinusOne + 1].length;
-            bits <<= prefixLength & 31u;
-            bitCount -= prefixLength;
-            const std::uint32_t negative = getBits(1);
-            const std::uint32_t magnitude = (bits >> ((0u - categoryMinusOne) & 31u)) + (1u << categoryMinusOne);
-            bits <<= categoryMinusOne & 31u;
-            bitCount -= static_cast<std::int32_t>(categoryMinusOne);
-            output[at++] = static_cast<std::int16_t>(negative != 0 ?
-                -static_cast<std::int32_t>(magnitude) : static_cast<std::int32_t>(magnitude));
-        } else if (entry.value == 0) {
-            bits <<= 2;
-            bitCount -= 2;
-            const bool longRun = getBits(1) != 0;
-            const std::uint32_t run = longRun ? getBits(6) + 9 : getBits(3) + 1;
-            if (run > count - at) {
-                writeBack(); throw std::out_of_range("MV3 Huffman zero run exceeds coefficient output");
-            }
-            std::fill_n(output + at, run, static_cast<std::int16_t>(0));
-            at += run;
-        } else {
-            output[at++] = entry.value;
-            bits <<= entry.consumedBits & 31u;
-            bitCount -= entry.consumedBits;
-        }
-    }
-    writeBack();
-    if (check) {
-        if (!SameState(reference) || !std::equal(expected.begin(), expected.end(), output)) ++mismatches;
-        if (++checks == 300) {
-            char text[80];
-            std::snprintf(text, sizeof(text), "calls=300 mismatches=%u", mismatches);
-            platform::RecordSessionEvent("movie.huffman_verify", text);
-        }
-    }
-}
-
 
 // PAL 237660..237684: consume from an already-filled word, without refill.
 std::uint32_t Huffman::GETBITS(std::uint32_t count) {
