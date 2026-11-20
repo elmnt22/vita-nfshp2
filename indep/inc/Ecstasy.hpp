@@ -1928,6 +1928,8 @@ extern int ecstasySceneJobsSerial;
 // Sampled scenery emit split (diagnostic): RenderOpaqueSceneryBatch adds
 // prepare / capture / emit ms here while the caller has sampling enabled.
 inline bool ecstasyEmitSampling=false;
+// Sampled emit census: runs, run-box tests, strip tests, commands, culled models.
+inline std::array<std::uint64_t,5> ecstasyEmitCounters{};
 // Diagnostic-only cost bounds (Vita diag_nocars.txt / diag_noscenery.txt):
 // skip car / scenery rendering entirely. Never set by default.
 inline bool ecstasyDiagSkipCars=false,ecstasyDiagSkipScenery=false;
