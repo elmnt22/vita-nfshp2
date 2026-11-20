@@ -4929,6 +4929,43 @@ void EcstasyFrame::Release() noexcept
     retainedStrips_.clear();
     liveInstances_=0;liveProjections_=0;lastProjection_=nullptr;lastLightContext_=nullptr;
 }
+// Indexed texture fast decode (exact; PC HP2_VERIFY_TEX_DECODE=1 checks it
+// against the per-texel form). 0 = per-texel form only.
+int ecstasyFastTextureDecode=1;
+struct NativeConvertedTexel {std::uint8_t x,y,byte,shift;};
+// Per-format 128-wide page tile of the preconverted stream addressing in
+// DecodeTextureMipRgba: page-relative source word (x,y), byte lane, shift.
+const std::array<NativeConvertedTexel,128*128>& NativeConvertedTextureTile(bool fourBit)
+{
+    static const auto build=[](bool four) {
+        std::array<NativeConvertedTexel,128*128> table{};
+        static constexpr std::uint8_t blocks4[8][4]={
+            {0,2,8,10},{1,3,9,11},{4,6,12,14},{5,7,13,15},
+            {16,18,24,26},{17,19,25,27},{20,22,28,30},{21,23,29,31}};
+        static constexpr std::uint8_t blocks8[4][8]={
+            {0,1,4,5,16,17,20,21},{2,3,6,7,18,19,22,23},
+            {8,9,12,13,24,25,28,29},{10,11,14,15,26,27,30,31}};
+        const std::uint32_t rows=four ? 128u:64u;
+        for(std::uint32_t y=0;y<rows;++y)for(std::uint32_t x=0;x<128u;++x) {
+            const auto blockWidth=four ? 32u:16u;
+            const auto block=four ? blocks4[(y%128u)/16u][(x%128u)/32u]:blocks8[(y%64u)/16u][(x%128u)/16u];
+            const auto column=(y%16u)/4u,cx=x&(blockWidth-1u),cy=y%4u;
+            const auto word=(cx&1u)+((cy&1u)<<1u)+((cx&2u)<<1u)+
+                ((((cx>>2u)&1u)^(cy>>1u)^(column&1u))<<3u);
+            const auto lane=(cx/8u)*2u+cy/2u;
+            const auto blockX=(block&1u)|((block>>1u)&2u)|((block>>2u)&4u);
+            const auto blockY=((block>>1u)&1u)|((block>>2u)&2u);
+            auto& entry=table[y*128u+x];
+            entry.x=static_cast<std::uint8_t>(blockX*8u+(word&1u)+((word>>1u)&6u));
+            entry.y=static_cast<std::uint8_t>(blockY*8u+column*2u+((word>>1u)&1u));
+            entry.byte=static_cast<std::uint8_t>(four ? lane/2u:lane);
+            entry.shift=static_cast<std::uint8_t>(four ? (lane&1u)*4u:0u);
+        }
+        return table;
+    };
+    static const auto four=build(true),eight=build(false);
+    return fourBit ? four:eight;
+}
 std::vector<std::uint8_t> DecodeTextureMipRgba(const TextureInfo& texture,
     std::uint32_t level,std::size_t sourceOffset,std::size_t sourceBytes,
     std::uint32_t& width,std::uint32_t& height,bool repeatedPadding)
@@ -4999,53 +5036,132 @@ std::vector<std::uint8_t> DecodeTextureMipRgba(const TextureInfo& texture,
                 static_cast<std::size_t>(authoredWidth)*4);
             if (psm==1)for (std::uint32_t x=0;x<authoredWidth;++x)destination[x*4+3]=128u;
         }
-    } else
-    for (std::uint32_t y=0;y<authoredHeight;++y)for (std::uint32_t x=0;x<authoredWidth;++x) {
-        const std::size_t pixel=static_cast<std::size_t>(y)*authoredWidth+x;
-        const std::uint8_t* color{};
-        if (psm==0 || psm==1) color=source+pixel*4;
-        else {
-            std::size_t byteOffset=psm==0x13 ? pixel:pixel/2;
-            unsigned shift=psm==0x13 ? 0u:static_cast<unsigned>(pixel&1u)*4u;
-            if(converted) {
-                const auto pages=convertedPages;
-                const auto blockWidth=psm==0x14 ? 32u:16u;
-                // page=x/128+(y/pageHeight)*pages, so page%pages==(x/128)%pages
-                // and page/pages==y/pageHeight+(x/128)/pages.
-                const auto pageColumn=x>>7u;
-                const auto pageX=pageColumn<pages ? pageColumn:pageColumn%pages;
-                const auto pageY=(psm==0x14 ? y>>7u:y>>6u)+(pageColumn<pages ? 0u:pageColumn/pages);
-                const auto block=psm==0x14 ? blocks4[(y%128u)/16u][(x%128u)/32u]:
-                    blocks8[(y%64u)/16u][(x%128u)/16u];
-                const auto column=(y%16u)/4u,cx=x&(blockWidth-1u),cy=y%4u;
-                const auto word=(cx&1u)+((cy&1u)<<1u)+((cx&2u)<<1u)+
-                    ((((cx>>2u)&1u)^(cy>>1u)^(column&1u))<<3u);
-                const auto lane=(cx/8u)*2u+cy/2u;
-                // Invert the32-bit layout to address the retained export
-                // stream directly. This is a format conversion, not VRAM.
-                const auto blockX=(block&1u)|((block>>1u)&2u)|((block>>2u)&4u);
-                const auto blockY=((block>>1u)&1u)|((block>>2u)&2u);
-                const auto sourceX=pageX*64u+blockX*8u+(word&1u)+((word>>1u)&6u);
-                const auto sourceY=pageY*32u+blockY*8u+column*2u+((word>>1u)&1u);
-                byteOffset=(static_cast<std::size_t>(sourceY)*(authoredWidth/2u)+sourceX)*4u+
-                    (psm==0x14 ? lane/2u:lane);
-                shift=psm==0x14 ? (lane&1u)*4u:0u;
-                Require(byteOffset<required,"Preconverted texture addresses outside its actual authored mip");
+    } else {
+        // Reference per-texel form (also the verification oracle).
+        const auto slowIndexed=[&](std::vector<std::uint8_t>& out) {
+        for (std::uint32_t y=0;y<authoredHeight;++y)for (std::uint32_t x=0;x<authoredWidth;++x) {
+            const std::size_t pixel=static_cast<std::size_t>(y)*authoredWidth+x;
+            const std::uint8_t* color{};
+            if (psm==0 || psm==1) color=source+pixel*4;
+            else {
+                std::size_t byteOffset=psm==0x13 ? pixel:pixel/2;
+                unsigned shift=psm==0x13 ? 0u:static_cast<unsigned>(pixel&1u)*4u;
+                if(converted) {
+                    const auto pages=convertedPages;
+                    const auto blockWidth=psm==0x14 ? 32u:16u;
+                    // page=x/128+(y/pageHeight)*pages, so page%pages==(x/128)%pages
+                    // and page/pages==y/pageHeight+(x/128)/pages.
+                    const auto pageColumn=x>>7u;
+                    const auto pageX=pageColumn<pages ? pageColumn:pageColumn%pages;
+                    const auto pageY=(psm==0x14 ? y>>7u:y>>6u)+(pageColumn<pages ? 0u:pageColumn/pages);
+                    const auto block=psm==0x14 ? blocks4[(y%128u)/16u][(x%128u)/32u]:
+                        blocks8[(y%64u)/16u][(x%128u)/16u];
+                    const auto column=(y%16u)/4u,cx=x&(blockWidth-1u),cy=y%4u;
+                    const auto word=(cx&1u)+((cy&1u)<<1u)+((cx&2u)<<1u)+
+                        ((((cx>>2u)&1u)^(cy>>1u)^(column&1u))<<3u);
+                    const auto lane=(cx/8u)*2u+cy/2u;
+                    // Invert the32-bit layout to address the retained export
+                    // stream directly. This is a format conversion, not VRAM.
+                    const auto blockX=(block&1u)|((block>>1u)&2u)|((block>>2u)&4u);
+                    const auto blockY=((block>>1u)&1u)|((block>>2u)&2u);
+                    const auto sourceX=pageX*64u+blockX*8u+(word&1u)+((word>>1u)&6u);
+                    const auto sourceY=pageY*32u+blockY*8u+column*2u+((word>>1u)&1u);
+                    byteOffset=(static_cast<std::size_t>(sourceY)*(authoredWidth/2u)+sourceX)*4u+
+                        (psm==0x14 ? lane/2u:lane);
+                    shift=psm==0x14 ? (lane&1u)*4u:0u;
+                    Require(byteOffset<required,"Preconverted texture addresses outside its actual authored mip");
+                }
+                std::uint32_t index=(source[byteOffset]>>shift)&(psm==0x13 ? 255u:15u);
+                // Imported PSMT8 palettes retain their on-disk CLUT layout;
+                // native-generated movie palettes have no console permutation.
+                if(psm==0x13 && !texture.palette.nativeLinearPalette)
+                    index=(index&~24u)|((index&8u)<<1)|((index&16u)>>1);
+                Require(index<paletteColors,"Vulkan indexed pixel exceeds its authored palette");
+                color=palette+index*4;
             }
-            std::uint32_t index=(source[byteOffset]>>shift)&(psm==0x13 ? 255u:15u);
-            // Imported PSMT8 palettes retain their on-disk CLUT layout;
-            // native-generated movie palettes have no console permutation.
-            if(psm==0x13 && !texture.palette.nativeLinearPalette)
-                index=(index&~24u)|((index&8u)<<1)|((index&16u)>>1);
-            Require(index<paletteColors,"Vulkan indexed pixel exceeds its authored palette");
-            color=palette+index*4;
+            const auto destination=(static_cast<std::size_t>(y)*width+x)*4;
+            std::copy_n(color,3,out.data()+destination);
+            // Retain the original alpha byte. Expanding it to UNORM unity here
+            // rounds authored48 upward and loses all values above128. The shader
+            // converts the sampled byte to the GS128-unit scale before TFX.
+            out[destination+3]=psm==1 ? 128u:color[3];
         }
-        const auto destination=(static_cast<std::size_t>(y)*width+x)*4;
-        std::copy_n(color,3,rgba.data()+destination);
-        // Retain the original alpha byte. Expanding it to UNORM unity here
-        // rounds authored48 upward and loses all values above128. The shader
-        // converts the sampled byte to the GS128-unit scale before TFX.
-        rgba[destination+3]=psm==1 ? 128u:color[3];
+        };
+        if(ecstasyFastTextureDecode) {
+            // Same bytes as slowIndexed: the palette entry each index selects
+            // is resolved once per index (permutation and bound included),
+            // and preconverted addresses come from a per-format tile table
+            // built with the identical per-texel arithmetic. A bad index or
+            // address raises the same error after the loop (output unused).
+            const unsigned indexCount=psm==0x13 ? 256u:16u;
+            std::array<std::uint32_t,256> lookup{};std::array<std::uint8_t,256> valid{};
+            for(unsigned value=0;value<indexCount;++value) {
+                unsigned index=value;
+                if(psm==0x13 && !texture.palette.nativeLinearPalette)
+                    index=(index&~24u)|((index&8u)<<1)|((index&16u)>>1);
+                if(index<paletteColors) {std::memcpy(&lookup[value],palette+index*4,4);valid[value]=1;}
+            }
+            const unsigned mask=psm==0x13 ? 255u:15u;
+            bool badIndex=false,badAddress=false;
+            if(!converted) {
+                for(std::uint32_t y=0;y<authoredHeight;++y) {
+                    auto* destination=rgba.data()+static_cast<std::size_t>(y)*width*4;
+                    const std::size_t row=static_cast<std::size_t>(y)*authoredWidth;
+                    if(psm==0x13) {
+                        const auto* indices=source+row;
+                        for(std::uint32_t x=0;x<authoredWidth;++x) {
+                            const unsigned index=indices[x];
+                            badIndex|=!valid[index];std::memcpy(destination+x*4,&lookup[index],4);
+                        }
+                    } else for(std::uint32_t x=0;x<authoredWidth;++x) {
+                        const std::size_t pixel=row+x;
+                        const unsigned index=(source[pixel/2]>>((pixel&1u)*4u))&mask;
+                        badIndex|=!valid[index];std::memcpy(destination+x*4,&lookup[index],4);
+                    }
+                }
+            } else {
+                const auto& tile=NativeConvertedTextureTile(psm==0x14);
+                const std::uint32_t tileHeight=psm==0x14 ? 128u:64u;
+                const std::size_t halfWidth=authoredWidth/2u;
+                const auto pages=convertedPages;
+                for(std::uint32_t y=0;y<authoredHeight;++y) {
+                    auto* destination=rgba.data()+static_cast<std::size_t>(y)*width*4;
+                    const auto* rowTile=tile.data()+static_cast<std::size_t>(y&(tileHeight-1u))*128u;
+                    const auto rowPage=psm==0x14 ? y>>7u:y>>6u;
+                    for(std::uint32_t x0=0;x0<authoredWidth;x0+=128u) {
+                        const auto pageColumn=x0>>7u;
+                        const auto pageX=pageColumn<pages ? pageColumn:pageColumn%pages;
+                        const auto pageY=rowPage+(pageColumn<pages ? 0u:pageColumn/pages);
+                        const std::size_t base=static_cast<std::size_t>(pageY)*32u*halfWidth+pageX*64u;
+                        const auto end=std::min<std::uint32_t>(authoredWidth,x0+128u);
+                        for(std::uint32_t x=x0;x<end;++x) {
+                            const auto& entry=rowTile[x-x0];
+                            const std::size_t byteOffset=(base+entry.y*halfWidth+entry.x)*4u+entry.byte;
+                            if(byteOffset>=required) {badAddress=true;continue;}
+                            const unsigned index=(source[byteOffset]>>entry.shift)&mask;
+                            badIndex|=!valid[index];std::memcpy(destination+x*4,&lookup[index],4);
+                        }
+                    }
+                }
+            }
+            Require(!badAddress,"Preconverted texture addresses outside its actual authored mip");
+            Require(!badIndex,"Vulkan indexed pixel exceeds its authored palette");
+#if !defined(__vita__) && !defined(__SWITCH__)
+            static const bool verifyDecode=[] {const char* value=std::getenv("HP2_VERIFY_TEX_DECODE");return value && *value=='1';}();
+            if(verifyDecode) {
+                std::vector<std::uint8_t> reference(rgba.size());
+                slowIndexed(reference);
+                static std::uint64_t checks=0,mismatches=0;++checks;
+                const bool same=reference==rgba;
+                if(!same)++mismatches;
+                if((checks&255u)==0 || (!same && mismatches<4)) {
+                    char text[128];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu psm=%02x converted=%d %ux%u",
+                        (unsigned long long)checks,(unsigned long long)mismatches,psm,converted ? 1:0,authoredWidth,authoredHeight);
+                    platform::RecordSessionEvent("render.tex_decode_verify",text);
+                }
+            }
+#endif
+        } else slowIndexed(rgba);
     }
     // Native PC texture conversion: bilinear/mip sampling at a repeated
     // NPOT edge must not mix the last authored texel with fabricated RGBA0.
@@ -6994,6 +7110,9 @@ bool NativeResidentGeometryKey(const VkSolidStripJob& job,VkResidentGeometryKey&
 // snapshotted once per frame; FE and IG variants retain their actual tables.
 // calls, last-input hits, slot hits, lit record builds, unlit builds, dedupe hits
 std::array<std::uint64_t,6> nativeShadingCounters{};
+// Last Gather's resident geometry events: new entries, evictions, source
+// captures (byte copies), variant reuses.
+std::array<std::uint32_t,4> nativeGatherResidentEvents{};
 // Gather solid-path census: template hits, full solid commands, car-shadow
 // commands, scenery run strips, depth-sorted solid commands.
 std::array<std::uint64_t,5> nativeGatherCounters{};
@@ -7372,7 +7491,7 @@ public:
             const bool sameRevision=revision!=0 && revision==source.vertexRevision;
             const bool matches=sameRevision || (compared ? validations_[source.queuedValidation].matches:
                 source.generation && source.Matches(*token));
-            if(!matches)source.Capture(*token);
+            if(!matches) {source.Capture(*token);++nativeGatherResidentEvents[2];}
             source.vertexRevision=revision;
             // Publication stays at the original first used strip. A
             // completed comparison alone never marks source bytes valid.
@@ -7417,15 +7536,16 @@ public:
                     entry.indices[index]=first+topology.indices[index];
 
             }
-            entry.prepared=false;entry.uploaded=false;
+            entry.prepared=false;entry.uploaded=false;++nativeGatherResidentEvents[3];
             Touch(entry);prepare=true;cached=&entry;return &entry;
         }
+        ++nativeGatherResidentEvents[0];
         if(free_.empty()) {
             if(recency_.empty() || entries_[recency_.front()]->lastGather==gather_) {
                 if(!source.variantCount)ForgetSource(token);
                 return nullptr;
             }
-            Evict(recency_.front());
+            Evict(recency_.front());++nativeGatherResidentEvents[1];
         }
         const auto slot=free_.back();free_.pop_back();
         auto owned=std::make_unique<VkResidentGeometryEntry>();auto& entry=*owned;
@@ -7592,7 +7712,12 @@ public:
         auto range=Find(needed);
         while(range==free_.end()) {
             if(entries_.empty() || entries_.front().lastGather==gather_) {return nullptr;}
-            Evict(entries_.begin());range=Find(needed);
+            // No range fitted before this eviction and it changes only the
+            // range it merges into, so first-fit Find can return only that
+            // one: test it instead of rescanning every fragment (quadratic
+            // under pressure: 40-240 ms Gather spikes on Vita).
+            const auto merged=Evict(entries_.begin());
+            if(merged->second>=needed)range=merged;
         }
         // Allocate payload before consuming a free range, so allocation
         // failures cannot leave a partially published GPU index entry.
@@ -7644,7 +7769,7 @@ private:
         const auto candidates=lookup_.equal_range(entry->hash);
         for(auto at=candidates.first;at!=candidates.second;++at)if(at->second==entry) {lookup_.erase(at);return;}
     }
-    void Evict(Entries::iterator entry) {
+    Ranges::iterator Evict(Entries::iterator entry) {
         Require(entry->lastGather!=gather_,"Cannot recycle resident indices referenced by the current frame");
         auto first=entry->first;auto count=entry->allocated;
         auto next=free_.lower_bound(first);
@@ -7656,9 +7781,10 @@ private:
         }
         next=free_.lower_bound(first);
         if(next!=free_.end() && first+count==next->first) {count+=next->second;free_.erase(next);}
-        free_.emplace(first,count);EraseLookup(entry);
+        const auto merged=free_.emplace(first,count).first;EraseLookup(entry);
         if(auto& slot=front_[FrontIndex(entry->hash)];slot.live && slot.entry==entry)slot={};
         entries_.erase(entry);
+        return merged;
     }
     std::uint64_t gather_{};
     std::uint32_t capacity_{};
