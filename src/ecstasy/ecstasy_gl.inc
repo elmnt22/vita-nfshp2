@@ -377,7 +377,7 @@ struct EcstasyVulkanDevice::Storage {
     // Hardware-depth half pass: one fullscreen copy of the scene depth into
     // the half buffer's depth, then particles use the fixed-function LEQUAL
     // test (same compare as the DEPTHTEX discard, no per-fragment discard).
-    GLuint halfDepthCopyProgram{};GLint halfDepthCopyMap{-1};bool halfDepthCopyFailed{},halfHardwareDepth{};
+    bool halfPrewarmed{};GLuint halfDepthCopyProgram{};GLint halfDepthCopyMap{-1};bool halfDepthCopyFailed{},halfHardwareDepth{};
     GLint halfCompositeFlip{-1};
     bool halfCompositeFailed{};
     std::uint64_t halfRuns{},halfBatches{},halfDepthWrites{};
@@ -806,6 +806,7 @@ void GlWriteProgramCache(std::uint32_t key,GLuint program)
 }
 
 int ecstasyAffineUV=1; // Vita affine_off.txt restores the projective divide everywhere
+int ecstasyForceNoVsync=0;
 int ecstasyFragmentMediump=0; // Vita frag_mediump.txt (A/B: GPU fragment cost)
 GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
 {
@@ -1206,6 +1207,19 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED:SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
         }
         bool halfMode=false;
+        // Diagnostic: GL calls between draws that take over 15 ms.
+        const auto slowGl=[&](const char* what,std::uint32_t started) {
+            if(!collisionWitnessClockMicros)return;
+            const std::uint32_t elapsed=collisionWitnessClockMicros()-started;
+            static int logged=0;
+            if(elapsed<15000u || logged>=40)return;
+            ++logged;
+            char detail[128];
+            std::snprintf(detail,sizeof(detail),"what=%s ms=%.2f target=%d offscreen=%d half_divisor=%u frame=%llu",
+                what,elapsed*0.001,static_cast<int>(id),offscreen ? 1:0,halfDivisor,static_cast<unsigned long long>(completedFrameSerial));
+            platform::RecordSessionEvent("renderer.vitagl.slow_gl",detail);
+        };
+        const std::uint32_t bindStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
         GLint height=static_cast<GLint>(packet.height);
         glDisable(GL_SCISSOR_TEST);
         if(offscreen) {
@@ -1221,6 +1235,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);glDepthMask(GL_TRUE);
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
         glEnable(GL_SCISSOR_TEST);
+        slowGl("bind_clear",bindStarted);
         const float yflip=offscreen ? 1.0f:-1.0f;
         const GlProgram* activeProgram{};
         const VkDrawBatch* previous{};
@@ -1431,15 +1446,39 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 std::size_t end=at;
                 while(end<list.size() && halfEligible(batches[list[end]]))++end;
                 if(!lastFrameHalf) {lastFrameHalf=true;++halfFramesTotal;}
+                std::uint32_t halfStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
                 BeginHalfParticles(packet.width,packet.height);
+                slowGl("half_begin",halfStarted);
                 halfMode=true;resetState();
                 for(;at<end;++at)drawOne(list[at]);
                 halfMode=false;
+                halfStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
                 EndHalfParticles(packet.width,packet.height);
+                slowGl("half_end",halfStarted);
                 resetState();
                 continue;
             }
             drawOne(list[at++]);
+        }
+        if(!offscreen && !halfPrewarmed && ecstasyHalfResParticles && !halfCompositeFailed) {
+            // One-time setup of the half and quarter passes (programs, quad,
+            // targets) costs ~340 ms on first use; pay it on the first
+            // displayed frame instead of mid-race. Each target is cleared to
+            // transparent black and composited with ONE/ONE_MINUS_SRC_ALPHA,
+            // which leaves the display unchanged.
+            halfPrewarmed=true;
+            const std::uint32_t prewarmStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+            const auto savedDivisor=halfDivisor;
+            for(const std::uint32_t divisor:{2u,4u}) {
+                halfDivisor=divisor;
+                BeginHalfParticles(packet.width,packet.height);
+                EndHalfParticles(packet.width,packet.height);
+            }
+            halfDivisor=savedDivisor;resetState();
+            if(collisionWitnessClockMicros) {
+                char detail[64];std::snprintf(detail,sizeof(detail),"ms=%.2f",(collisionWitnessClockMicros()-prewarmStarted)*0.001);
+                platform::RecordSessionEvent("renderer.vitagl.halfres_prewarm",detail);
+            }
         }
         glDisable(GL_SCISSOR_TEST);
     };
@@ -1449,7 +1488,20 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         if(state)return;
         state=1;
         for(const auto dependency:targetDependencies[static_cast<std::size_t>(id)])self(self,dependency);
-        if(id==0 || !targetBatches[static_cast<std::size_t>(id)].empty())drawPass(id);
+        if(id==0 || !targetBatches[static_cast<std::size_t>(id)].empty()) {
+            const std::uint32_t passStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+            drawPass(id);
+            if(collisionWitnessClockMicros) {
+                const std::uint32_t elapsed=collisionWitnessClockMicros()-passStarted;
+                static int logged=0;
+                if(elapsed>=40000u && logged<40) {
+                    ++logged;char detail[96];
+                    std::snprintf(detail,sizeof(detail),"target=%d ms=%.2f batches=%u frame=%llu",static_cast<int>(id),elapsed*0.001,
+                        static_cast<unsigned>(targetBatches[static_cast<std::size_t>(id)].size()),static_cast<unsigned long long>(completedFrameSerial));
+                    platform::RecordSessionEvent("renderer.vitagl.slow_pass",detail);
+                }
+            }
+        }
         state=2;
     };
     visit(visit,0);
@@ -1458,11 +1510,20 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     glDisable(GL_SCISSOR_TEST);
     drawnBatches+=drawn;skippedBatches+=skipped;
     // Textures retired by this frame's gather: no later packet refers to them.
+    const std::uint32_t deletesStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+    const auto deleteCount=packet.deletes.size();
     for(auto* texture:packet.deletes) {
         if(texture->name) {glDeleteTextures(1,&texture->name);glLiveTextureBytes-=texture->bytes;--glLiveTextureCount;}
         delete texture;
     }
     packet.deletes.clear();
+    if(collisionWitnessClockMicros && deleteCount) {
+        const std::uint32_t elapsed=collisionWitnessClockMicros()-deletesStarted;
+        if(elapsed>=15000u) {
+            char detail[64];std::snprintf(detail,sizeof(detail),"ms=%.2f count=%u",elapsed*0.001,static_cast<unsigned>(deleteCount));
+            platform::RecordSessionEvent("renderer.vitagl.slow_deletes",detail);
+        }
+    }
     if(nextScreenshot<ecstasyScreenshotFrames.size() && journalFrames+1>=ecstasyScreenshotFrames[nextScreenshot]) {
         SaveScreenshot(packet.width,packet.height,journalFrames+1);++nextScreenshot;
     }
@@ -1795,6 +1856,7 @@ void EcstasyVulkanDevice::Resize(std::uint32_t width,std::uint32_t height)
 }
 void EcstasyVulkanDevice::ConfigurePresentation(bool vsync)
 {
+    if(ecstasyForceNoVsync)vsync=false; // Vita vsync_off.txt (diagnostic: display pacing vs GPU)
     storage_->options.vsync=vsync;
     // Applied by the GL thread before its next swap.
     if(storage_->glThreadStarted_)storage_->vsyncRequest=vsync ? 1:0;
