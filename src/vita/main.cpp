@@ -598,6 +598,18 @@ int main(int, char**)
                 double(a.size()) / std::chrono::duration<double, std::micro>(t2 - t1).count());
             log.Line("vita.diag", detail);
         }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/diag_nocars.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyDiagSkipCars = true;
+            log.Line("vita.diag", "DIAG: car rendering skipped");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/diag_noscenery.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyDiagSkipScenery = true;
+            log.Line("vita.diag", "DIAG: scenery geometry skipped");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/model_runs_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyModelRuns = 0;
+            log.Line("vita.diag", "model strip runs off");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_runs_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryRuns = 0;
             log.Line("vita.diag", "scenery strip runs off");

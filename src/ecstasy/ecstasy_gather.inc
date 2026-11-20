@@ -418,8 +418,9 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // Per-strip remainder of the solid path for a template hit: geometry
     // acquisition, index range, vertex preparation and append. Mirrors the
     // general solid branch below for everything that depends on the strip.
-    const auto continueSolidTemplate=[&](const EcstasyDrawCommand& draw,const SolidTemplate& source) {
-        const auto& strip=*draw.strip;
+    const auto continueSolidTemplate=[&](const EcstasyDrawCommand& draw,const SolidTemplate& source,
+        const EditorMarkerSolidGeometry::Strip* runStrip=nullptr) {
+        const auto& strip=runStrip ? *runStrip:*draw.strip;
         const auto count=strip.positions.size();
         Require(strip.textureCoordinates.size()==count && strip.colors.size()==count,
             "Original strip vertex/color/UV extents differ");
@@ -432,7 +433,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         textureLod[0]=draw.textureQScale;
         textureLod[1]=draw.kind==EcstasyDrawKind::SolidStrip ? static_cast<std::uint8_t>(strip.autoK)*0.0625f:source.lod1;
         glyphBoundsIndex=0;
-        VkSolidStripJob job;job.draw=&draw;
+        VkSolidStripJob job;job.draw=&draw;job.strip=runStrip;
         job.scroll=source.scroll;job.lod=textureLod;
         job.glyphBoundsIndex=0;job.reflection=false;job.targetSample=false;
         job.lineTopology=batch.wireframe;
@@ -480,11 +481,12 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             }
             appendBatch(batch);
         }
-        ++statistics.solidTemplateHits;
+        ++statistics.solidTemplateHits;++nativeGatherCounters[0];
     };
     const auto& sourceCommands=frame.Commands();
     const auto& runStrips=frame.SceneryRunStrips();
     std::uint32_t runResume=0; // next unexpanded strip of sourceCommands[commandAt]
+    const EcstasyDrawCommand* modelRunSingle=nullptr; // first-strip command of the current model run
 #if defined(__GNUC__)
     std::size_t prefetchedCommand=0;
 #endif
@@ -502,7 +504,28 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
                     __builtin_prefetch(reinterpret_cast<const char*>(instance)+line);
         }
 #endif
-        if(current->sceneryRunCount) {
+        if(current->sceneryRunCount && !current->cachedOpaqueScenery) {
+            // Model run (car parts etc.): its first strip takes the general
+            // path as the per-strip command it replaced; later strips reuse
+            // that command's solid template (the same state, another strip).
+            const auto& run=*current;
+            const auto* strip=runStrips[run.sceneryRunFirst+runResume];
+            const bool first=runResume==0;
+            if(++runResume>=run.sceneryRunCount) {runResume=0;++commandAt;}
+            else residentGeometry.Prefetch(runStrips[run.sceneryRunFirst+runResume]);
+            if(!first && modelRunSingle && ecstasySolidTemplate && !verifySolidTemplate) {
+                const auto& slot=solidTemplateSlot(*modelRunSingle);
+                if(slot.draw==modelRunSingle) {
+                    categoryTimer.Enter(run);
+                    continueSolidTemplate(*modelRunSingle,slot,strip);
+                    continue;
+                }
+            }
+            sceneryRunFallbacks.push_back(run);
+            auto& single=sceneryRunFallbacks.back();
+            single.strip=strip;single.sceneryRunCount=0;single.sceneryRunFirst=0;
+            modelRunSingle=&single;current=&single;
+        } else if(current->sceneryRunCount) {
             // Each strip of the run is the per-strip command it replaced.
             // Cached strips need no copy; a strip that leaves the cached
             // path continues below as its own stable per-strip command.
@@ -550,6 +573,11 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             ++statistics.sceneryPacketFallbacks;
         }
         const SolidTemplate* solidMatch=nullptr;
+        if(draw.kind==EcstasyDrawKind::SolidStrip || draw.kind==EcstasyDrawKind::SolidSpecularStrip) {
+            ++nativeGatherCounters[1];
+            if(draw.carShadow!=EcstasyCarShadow::None)++nativeGatherCounters[2];
+            if(draw.depthSorted)++nativeGatherCounters[4];
+        }
         if(ecstasySolidTemplate && solidTemplateEligible(draw)) {
             const auto& slot=solidTemplateSlot(draw);
             if(slot.draw && NativeSolidCommandStateEqual(*slot.draw,draw)) {
