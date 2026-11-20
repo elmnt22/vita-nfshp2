@@ -59,7 +59,7 @@
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
-namespace hp2 { extern std::array<double,4> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
+namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
 extern uint64_t collisionWitnessWarmMismatches;
@@ -1471,9 +1471,9 @@ bool ApplicationRuntime::Tick()
             s.host.RecordSessionEvent("render.capture_detail",detail);
             {
                 const auto& parts=hp2::ecstasyAttachSolidPartMs;
-                std::snprintf(detail,sizeof(detail),"attach_solid_ms=%.3f calls_per_frame=%.2f commands_per_frame=%.1f command_bytes=%u partition_ms=%.3f chains_ms=%.3f priority_ms=%.3f permute_ms=%.3f",
+                std::snprintf(detail,sizeof(detail),"attach_solid_ms=%.3f calls_per_frame=%.2f commands_per_frame=%.1f command_bytes=%u partition_ms=%.3f chains_ms=%.3f priority_ms=%.3f order_ms=%.3f permute_ms=%.3f",
                     hp2::ecstasyAttachSolidMs/count,hp2::ecstasyAttachSolidCalls/count,hp2::ecstasyAttachSolidCommands/count,
-                    static_cast<unsigned>(sizeof(EcstasyDrawCommand)),parts[0]/count,parts[1]/count,parts[2]/count,parts[3]/count);
+                    static_cast<unsigned>(sizeof(EcstasyDrawCommand)),parts[0]/count,parts[1]/count,parts[2]/count,parts[3]/count,parts[4]/count);
                 hp2::ecstasyAttachSolidPartMs={};
                 s.host.RecordSessionEvent("render.attach_solid",detail);
                 hp2::ecstasyAttachSolidMs=0;hp2::ecstasyAttachSolidCalls=0;hp2::ecstasyAttachSolidCommands=0;
