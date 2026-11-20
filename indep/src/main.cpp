@@ -64,6 +64,10 @@ extern uint64_t collisionSplitMicros[8],collisionSplitCounts[8];
 extern std::atomic<uint64_t> collisionPickupMicros,collisionPickupCount,collisionPublishCount;
 extern std::atomic<uint64_t> collisionSlotBatches[2],collisionSlotTasks[2];
 extern uint64_t collisionSpecAborted;
+extern uint64_t collisionPipeZeroKind[6],collisionPipeRelayouts;
+extern uint64_t collisionPipeLong,collisionPipeZeroDraw,collisionPipeBehind[9];
+extern uint64_t collisionPipeMissPair,collisionPipeMissStart,collisionPipeShort,collisionPipeDrawDelta[4];
+extern uint64_t collisionPipeContacts,collisionPipeEntryMisses,collisionPipeBreaks,collisionPipeTasks,collisionPipeUsed,collisionPipePasses;
 namespace hp2 { extern std::uint64_t ecstasyAsyncMirrorStats[12]; }
 namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
@@ -1433,14 +1437,30 @@ bool ApplicationRuntime::Tick()
                     std::snprintf(detail,sizeof(detail),"per_frame_ms queue=%.3f queue_serial=%.3f find=%.3f separate=%.3f resolve=%.3f pairs=%.3f "
                         "per_frame_n queue=%.1f queue_serial=%.1f find=%.1f separate=%.1f resolve=%.1f steps=%.2f "
                         "per_call_us queue=%.1f queue_serial=%.1f find=%.1f separate=%.1f resolve=%.1f "
-                        "batches_per_frame=%.1f picked_frac=%.3f pickup_us=%.1f slot_batch_frac=%.3f/%.3f slot_tasks=%.1f/%.1f aborted=%.1f",
+                        "batches_per_frame=%.1f picked_frac=%.3f pickup_us=%.1f slot_batch_frac=%.3f/%.3f slot_tasks=%.1f/%.1f aborted=%.1f pipe passes=%.1f contacts=%.1f tasks=%.1f used=%.1f breaks=%.2f misses=%.2f miss_pair=%.2f miss_start=%.2f short=%.2f draws_ahead2/behind/other/far=%.2f/%.2f/%.2f/%.2f long=%.2f zero_draw=%.2f behind_by=%.2f/%.2f/%.2f/%.2f/%.2f/%.2f zero_find_r012/sep_r012=%.2f/%.2f/%.2f/%.2f/%.2f/%.2f relayouts=%.2f",
                         t[0]/f,t[1]/f,t[2]/f,t[3]/f,t[4]/f,t[5]/f,
                         n[0]*1000.0/f,n[1]*1000.0/f,n[2]*1000.0/f,n[3]*1000.0/f,n[4]*1000.0/f,n[7]*1000.0/f,
                         per(t[0],n[0]),per(t[1],n[1]),per(t[2],n[2]),per(t[3],n[3]),per(t[4],n[4]),
                         pubs*1000.0/f,per(picks,pubs),per(::collisionPickupMicros.load(),picks),
                         per(::collisionSlotBatches[0].load(),pubs),per(::collisionSlotBatches[1].load(),pubs),
-                        ::collisionSlotTasks[0].load()*1000.0/f,::collisionSlotTasks[1].load()*1000.0/f,::collisionSpecAborted*1000.0/f);
+                        ::collisionSlotTasks[0].load()*1000.0/f,::collisionSlotTasks[1].load()*1000.0/f,::collisionSpecAborted*1000.0/f,
+                        ::collisionPipePasses*1000.0/f,::collisionPipeContacts*1000.0/f,::collisionPipeTasks*1000.0/f,
+                        ::collisionPipeUsed*1000.0/f,::collisionPipeBreaks*1000.0/f,::collisionPipeEntryMisses*1000.0/f,
+                        ::collisionPipeMissPair*1000.0/f,::collisionPipeMissStart*1000.0/f,::collisionPipeShort*1000.0/f,
+                        ::collisionPipeDrawDelta[0]*1000.0/f,::collisionPipeDrawDelta[1]*1000.0/f,::collisionPipeDrawDelta[2]*1000.0/f,::collisionPipeDrawDelta[3]*1000.0/f,
+                        ::collisionPipeLong*1000.0/f,::collisionPipeZeroDraw*1000.0/f,
+                        ::collisionPipeBehind[1]*1000.0/f,::collisionPipeBehind[2]*1000.0/f,::collisionPipeBehind[3]*1000.0/f,
+                        ::collisionPipeBehind[4]*1000.0/f,::collisionPipeBehind[5]*1000.0/f,::collisionPipeBehind[6]*1000.0/f,
+                        ::collisionPipeZeroKind[0]*1000.0/f,::collisionPipeZeroKind[1]*1000.0/f,::collisionPipeZeroKind[2]*1000.0/f,
+                        ::collisionPipeZeroKind[3]*1000.0/f,::collisionPipeZeroKind[4]*1000.0/f,::collisionPipeZeroKind[5]*1000.0/f,
+                        ::collisionPipeRelayouts*1000.0/f);
+                    for (auto& value : ::collisionPipeZeroKind) value=0;
+                    ::collisionPipeRelayouts=0;
+                    ::collisionPipeLong=::collisionPipeZeroDraw=0;for (auto& value : ::collisionPipeBehind) value=0;
+                    ::collisionPipeMissPair=::collisionPipeMissStart=::collisionPipeShort=0;
+                    for (auto& value : ::collisionPipeDrawDelta) value=0;
                     ::collisionSpecAborted=0;
+                    ::collisionPipePasses=::collisionPipeContacts=::collisionPipeTasks=::collisionPipeUsed=::collisionPipeBreaks=::collisionPipeEntryMisses=0;
                     for(int k=0;k<2;++k){::collisionSlotBatches[k]=0;::collisionSlotTasks[k]=0;}
                     s.host.RecordSessionEvent("render.collision_split",detail);
                     std::fill(std::begin(t),std::end(t),0);std::fill(std::begin(n),std::end(n),0);

@@ -769,6 +769,11 @@ int main(int, char**)
             collisionWitnessBenchLog = [](const char* text) { benchLog->Line("vita.witness_bench", text); };
             log.Line("vita.diag", "witness bench armed");
         }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/contact_pipe_off.txt").c_str(), &probe) >= 0) {
+            extern int collisionContactPipeline;
+            collisionContactPipeline = 0;
+            log.Line("vita.diag", "contact pipeline off");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/spec_abort_off.txt").c_str(), &probe) >= 0) {
             extern int collisionSpeculativeAbort;
             collisionSpeculativeAbort = 0;

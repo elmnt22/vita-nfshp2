@@ -674,6 +674,8 @@ int collisionQueuePrediction=[] {
 }(); // Vita queue_pred_off.txt: 0
 namespace {
 struct QueuePrediction {
+    const CollisionSystem* system;
+    int plan;
     CollisionPair* pair;
     const float* frames[4];
     CollisionWitness witness;
@@ -692,6 +694,8 @@ void runQueuePrediction(void* context,unsigned index)
     entry.counters[0]=0;entry.counters[1]=entry.counters[2]=entry.counters[3]=0;
     entry.result=collisionWitnessQueryPredict(&entry.witness,entry.frames[0],entry.frames[2],
         entry.frames[1],entry.frames[3],&entry.pending,entry.counters);
+    if (entry.plan && entry.pending>=0 && entry.result==2)
+        collisionContactPlanPrepare(index,entry.system,entry.pair,entry.witness);
 }
 }
 
@@ -717,11 +721,15 @@ void collisionPairPredictQueue(CollisionSystem* system,CollisionParticipant* con
         }
         if (!collisionParticipantEligible(system,pair->first) || !collisionParticipantEligible(system,pair->second)) continue;
         QueuePrediction entry{};
+        entry.system=system;
         entry.pair=pair;queueFrames(pair,entry.frames);
         queuePredictions.push_back(entry);
     }
     if (queuePredictions.size()<2) return;
     if (queuePredictionSlot.size()<system->pairCapacity) queuePredictionSlot.assign(system->pairCapacity,-1);
+    const bool pipeline=collisionContactPipelineEnabled();
+    if (pipeline) collisionContactPlanReserve(queuePredictions.size());
+    for (auto& entry:queuePredictions) entry.plan=pipeline ? 1:0;
     collisionHelperRun((unsigned)queuePredictions.size(),runQueuePrediction,queuePredictions.data());
     for (size_t index=0;index<queuePredictions.size();++index) {
         auto& entry=queuePredictions[index];
@@ -729,10 +737,36 @@ void collisionPairPredictQueue(CollisionSystem* system,CollisionParticipant* con
         queuePredictionSlot[(size_t)(entry.pair-system->pairs)]=(int32_t)index;
     }
     queuePredictionActive=true;
+    if (pipeline) {
+        // Mirror the queue loop: each pair queued once per matching affected
+        // participant; a second queue of one pair queries serially, so the
+        // layout stops after its first.
+        static std::vector<CollisionPipelineSeed> seeds;
+        seeds.clear();
+        for (size_t index=0;index<queuePredictions.size();++index) {
+            auto& entry=queuePredictions[index];
+            if (!entry.valid) break;
+            size_t calls=1;
+            if (affected) {
+                calls=0;
+                for (size_t at=0;at<affectedCount;++at)
+                    calls+=(entry.pair->first==affected[at] || entry.pair->second==affected[at]) ? 1u:0u;
+            }
+            CollisionShape* first=entry.pair->first->shape;
+            CollisionShape* second=entry.pair->second->shape;
+            const bool suppressed=first->active && second->active &&
+                (collisionParticipantSuppressesResponse(system,entry.pair->first) ||
+                 collisionParticipantSuppressesResponse(system,entry.pair->second));
+            seeds.push_back({entry.pair,entry.pending,&entry.witness,index,entry.result==2 && !suppressed ? 1:0});
+            if (calls>=2) break;
+        }
+        collisionContactPipelineStart(system,seeds.data(),seeds.size());
+    }
 }
 
 void collisionPairPredictQueueEnd(CollisionSystem* system)
 {
+    collisionContactPipelineEnd();
     if (!queuePredictionActive) return;
     for (const auto& entry:queuePredictions) queuePredictionSlot[(size_t)(entry.pair-system->pairs)]=-1;
     queuePredictionActive=false;

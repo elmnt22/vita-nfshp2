@@ -93,4 +93,21 @@ static inline void collisionResponseInterpolatePose(const CollisionShape* shape,
 }
 #endif
 
+#ifdef __cplusplus
+struct CollisionPair;
+struct CollisionWitness;
+// Contact pipeline (contact.cpp): one queue pass's exact queries at once.
+struct CollisionPipelineSeed {
+    CollisionPair* pair;
+    int32_t queuePending;
+    const CollisionWitness* queueWitness;
+    size_t plan;
+    int contact;
+};
+bool collisionContactPipelineEnabled();
+void collisionContactPlanReserve(size_t count);
+void collisionContactPlanPrepare(size_t index,const CollisionSystem* system,CollisionPair* pair,const CollisionWitness& converged);
+void collisionContactPipelineStart(CollisionSystem* system,const CollisionPipelineSeed* seeds,size_t count);
+void collisionContactPipelineEnd();
+#endif
 #endif
