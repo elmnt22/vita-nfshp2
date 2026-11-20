@@ -299,6 +299,15 @@ private:
 };
 }
 
+// Generic use of the collision helpers outside the collision solve (the
+// async rear-view scenery capture): publish, claim the rest, close (waits).
+unsigned collisionHelperPoolSize() {return CollisionHelperPool::Instance().Helpers();}
+void collisionHelperPublish(unsigned count,void (*function)(void*,unsigned),void* context)
+{
+    CollisionHelperPool::Instance().Publish(count,function,context);
+}
+bool collisionHelperClaim(unsigned& index) {return CollisionHelperPool::Instance().ClaimOne(index);}
+void collisionHelperClose() {CollisionHelperPool::Instance().Close();}
 unsigned collisionHelperCount()
 {
     return collisionSpeculationMode==0 ? 0u:CollisionHelperPool::Instance().Helpers();

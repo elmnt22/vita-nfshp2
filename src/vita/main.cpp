@@ -54,7 +54,7 @@ extern int collisionWitnessWarmProbe;
 extern int collisionQueuePrediction;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
+namespace hp2 { extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -769,6 +769,14 @@ int main(int, char**)
             collisionWitnessBenchLog = [](const char* text) { benchLog->Line("vita.witness_bench", text); };
             log.Line("vita.diag", "witness bench armed");
         }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/async_mirror.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyAsyncMirrorScenery = 1;
+            log.Line("vita.diag", "async mirror scenery on");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/async_mirror_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyAsyncMirrorScenery = 0;
+            log.Line("vita.diag", "async mirror scenery off");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/witness_cache_off.txt").c_str(), &probe) >= 0) {
             extern int collisionWitnessTransformCache;
             collisionWitnessTransformCache = 0;
@@ -814,8 +822,8 @@ int main(int, char**)
                 if (now != last) { last = now; quiet = 0; continue; }
                 if (++quiet >= 3) {
                     char detail[128];
-                    std::snprintf(detail, sizeof(detail), "frames=%u main_stage=%d render_stage=%d quiet_s=%d",
-                        now, g_mainStage.load(), hp2::EcstasyVulkanDevice::RenderStage(), quiet);
+                    std::snprintf(detail, sizeof(detail), "frames=%u main_stage=%d render_stage=%d quiet_s=%d mirror=%d",
+                        now, g_mainStage.load(), hp2::EcstasyVulkanDevice::RenderStage(), quiet, hp2::ecstasyAsyncMirrorPhase.load());
                     log.Line("vita.watchdog", detail);
                     // After the first frames, a long stall: record it and exit
                     // (watchdog_dump.txt: a full system core dump instead).
