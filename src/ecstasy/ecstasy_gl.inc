@@ -701,6 +701,18 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
     const bool linear=options.textureFilter!=EcstasyTextureFilter::Authored ||
         minification==1 || minification>=4 || wire[0x6f];
     ++statistics.textureUploads;statistics.textureUploadBytes+=static_cast<std::size_t>(width)*height*4u;
+    if(platform::nativeDiagnosticsEnabled) {
+        // Diagnostic: which images are decoded when (first-use hitches).
+        static unsigned logged=0;
+        if(logged<800) {
+            ++logged;
+            char detail[160];
+            std::snprintf(detail,sizeof(detail),"frame=%llu key=%08x pack=%p size=%ux%u psm=%02x levels=%u reupload=%d",
+                static_cast<unsigned long long>(completedFrameSerial),texture.descriptor->key,
+                static_cast<const void*>(texture.pack),width,height,wire[0x4a],levels,textures[index].generation ? 1:0);
+            platform::RecordSessionEvent("renderer.vitagl.texture_upload",detail);
+        }
+    }
     pendingDecodes.push_back({&texture,building->uploads.size(),baseBytes,repeatedPadding});
     building->uploads.push_back({handle,{},width,height,linear ? GL_LINEAR:GL_NEAREST,
         (wire[0x4c]&1u) ? GL_REPEAT:GL_CLAMP_TO_EDGE,(wire[0x4c]&2u) ? GL_REPEAT:GL_CLAMP_TO_EDGE});
@@ -1011,6 +1023,9 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
                 (unsigned long long)nativeShadingCounters[3],(unsigned long long)nativeShadingCounters[4],(unsigned long long)nativeShadingCounters[5]);
             nativeShadingCounters={};
             platform::RecordSessionEvent("renderer.vitagl.gather_steps",detail);
+            std::snprintf(detail,sizeof(detail),"per_sampled_frame template_ms=%.2f template_acquire_ms=%.2f template_timed=%.0f runs=%.1f run_strips=%.1f run_template_strips=%.1f",
+                8*steps[10]/n,8*steps[11]/n,steps[12]/n,steps[13]/n,steps[14]/n,steps[15]/n);
+            platform::RecordSessionEvent("renderer.vitagl.gather_templates",detail);
             std::snprintf(detail,sizeof(detail),"per_frame template_hits=%.1f solid_commands=%.1f shadow_commands=%.1f sorted_commands=%.1f",
                 nativeGatherCounters[0]/300.0,nativeGatherCounters[1]/300.0,nativeGatherCounters[2]/300.0,nativeGatherCounters[4]/300.0);
             nativeGatherCounters={};
@@ -1455,7 +1470,28 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     const auto vsync=vsyncRequest.exchange(-1);
     if(vsync>=0)vglWaitVblankStart(vsync ? GL_TRUE:GL_FALSE);
     glRenderStage=4;
+    const auto swapStarted=Clock::now();
     vglSwapBuffers(GL_FALSE);
+    {
+        // Diagnostic: swap time, and (one frame in 16) how long the GPU
+        // still needs after the swap returns. sceGxmFinish stalls only that
+        // sampled frame's pipelining.
+        static double swapSum=0,finishSum=0;static unsigned swapCount=0,finishCount=0,finishPhase=0;
+        const auto swapped=Clock::now();
+        swapSum+=milliseconds(swapped-swapStarted);++swapCount;
+        if(platform::nativeDiagnosticsEnabled && (finishPhase++%16u)==0) {
+            sceGxmFinish(gxm_context);
+            finishSum+=milliseconds(Clock::now()-swapped);++finishCount;
+        }
+        if(swapCount>=300) {
+            char detail[160];
+            std::snprintf(detail,sizeof(detail),"swap_ms=%.2f gpu_after_swap_ms=%.2f finish_samples=%u submit_ms=%.2f vsync=%d",
+                swapSum/swapCount,finishCount ? finishSum/finishCount:0.0,finishCount,
+                milliseconds(submitDone-renderBegin),options.vsync ? 1:0);
+            platform::RecordSessionEvent("renderer.vitagl.gpu_probe",detail);
+            swapSum=finishSum=0;swapCount=finishCount=0;
+        }
+    }
     // dshots.txt "N": after N frames that used the half pass, copy the next
     // 8 displayed frames (each written as soon as it is taken).
     if(!ecstasyDisplayShotFrames.empty() && nextDisplayShot<8 && halfFramesTotal>=ecstasyDisplayShotFrames[0] &&

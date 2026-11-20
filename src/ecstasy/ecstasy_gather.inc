@@ -17,7 +17,10 @@ std::array<float,2> nativeUiCanvasScale(float width,float height)
 // Diagnostic (sampled frames): solid-draw gather steps, milliseconds summed
 // since the last read: 0 preamble, 1 shading, 2 resident acquire, 3 rest of
 // the solid branch, 4 batch append, 5 non-solid draws; [6] = sampled frames.
-std::array<double,10> nativeGatherStepMilliseconds{};
+// [10] template continuation total, [11] its resident acquire (one call in
+// eight timed), [12] timed continuations, [13] model runs, [14] run strips,
+// [15] run strips continued through the template.
+std::array<double,16> nativeGatherStepMilliseconds{};
 // Diagnostic: generic solid draws by kind (plain, reflection, specular,
 // shadow), resident misses, resident re-prepares.
 std::array<double,6> nativeSolidKinds{};
@@ -389,7 +392,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     Clock::time_point stepMark{};
     // Time one draw in eight (scaled at report) so clock reads do not
     // dominate the sampled frame; [7] counts timed segments for calibration.
-    std::uint32_t stepDrawIndex=0;bool timeDraw=false;
+    std::uint32_t stepDrawIndex=0;bool timeDraw=false;std::uint32_t templateTimeIndex=0;
     const auto step=[&](std::size_t index) {
         if(!timeDraw)return;
         nativeGatherStepMilliseconds[7]+=1.0;
@@ -425,6 +428,16 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // general solid branch below for everything that depends on the strip.
     const auto continueSolidTemplate=[&](const EcstasyDrawCommand& draw,const SolidTemplate& source,
         const EditorMarkerSolidGeometry::Strip* runStrip=nullptr) {
+        const bool timeTemplate=sampleCategories && (templateTimeIndex++&7u)==0;
+        const auto templateStarted=timeTemplate ? Clock::now():Clock::time_point{};
+        struct TemplateTimer {
+            bool active;Clock::time_point started;
+            ~TemplateTimer() {
+                if(!active)return;
+                nativeGatherStepMilliseconds[10]+=std::chrono::duration<double,std::milli>(Clock::now()-started).count();
+                nativeGatherStepMilliseconds[12]+=1.0;
+            }
+        } templateTimer{timeTemplate,templateStarted};
         const auto& strip=runStrip ? *runStrip:*draw.strip;
         const auto count=strip.positions.size();
         Require(strip.textureCoordinates.size()==count && strip.colors.size()==count,
@@ -442,7 +455,9 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         job.scroll=source.scroll;job.lod=textureLod;
         job.glyphBoundsIndex=0;job.reflection=false;job.targetSample=false;
         job.lineTopology=batch.wireframe;
+        const auto acquireStarted=timeTemplate ? Clock::now():Clock::time_point{};
         bool prepare=false;auto* resident=residentGeometry.Acquire(job,prepare);
+        if(timeTemplate)nativeGatherStepMilliseconds[11]+=std::chrono::duration<double,std::milli>(Clock::now()-acquireStarted).count();
         nativeSolidKinds[draw.kind==EcstasyDrawKind::SolidSpecularStrip ? 2:draw.carShadow!=EcstasyCarShadow::None ? 3:0]+=1;
         if(!resident)nativeSolidKinds[4]+=1; else if(prepare)nativeSolidKinds[5]+=1;
         VkSolidTopology topology;
@@ -518,9 +533,11 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             const bool first=runResume==0;
             if(++runResume>=run.sceneryRunCount) {runResume=0;++commandAt;}
             else residentGeometry.Prefetch(runStrips[run.sceneryRunFirst+runResume]);
+            if(sampleCategories) {nativeGatherStepMilliseconds[14]+=1.0;if(first)nativeGatherStepMilliseconds[13]+=1.0;}
             if(!first && modelRunSingle && ecstasySolidTemplate && !verifySolidTemplate) {
                 const auto& slot=solidTemplateSlot(*modelRunSingle);
                 if(slot.draw==modelRunSingle) {
+                    if(sampleCategories)nativeGatherStepMilliseconds[15]+=1.0;
                     categoryTimer.Enter(run);
                     continueSolidTemplate(*modelRunSingle,slot,strip);
                     continue;
