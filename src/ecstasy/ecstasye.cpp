@@ -188,8 +188,6 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
 // Scene jobs are short owner-blocking bursts (the caller waits for them), so
 // they may preempt the long-running gather/GL threads on cores 1-2.
 int ecstasySceneWorkerPriority=0; // 0 keeps the default priority
-int ecstasySceneJobsSerial=0;
-int ecstasyParallelSceneryPrepare=1; // Vita scenery_prep_serial.txt: 0
 void ConfigureNativeSceneWorker() noexcept
 {
     (void)sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_1|SCE_KERNEL_CPU_MASK_USER_2);
@@ -3465,7 +3463,40 @@ int ecstasyParallelSceneryEmit=[] {
     return 1;
 }();
 std::array<double,8> ecstasyWorldSplitMs{},ecstasyDiscardWorldSplitMs{};
+int ecstasySceneJobsSerial=0; // Vita default 1 (main.cpp)
+int ecstasyParallelSceneryPrepare=1;
 int ecstasySceneryFastMerge=1; // run union-box cull + template merge (Vita fastmerge_off.txt)
+// Solid strip template: a solid command equal to an earlier one of this
+// Gather in every field but its strip reuses that command's batch state
+// (texture, material, raster, depth range, transform, shading). Only the
+// strip's geometry, mip K and index range are resolved per strip.
+// PC HP2_SOLID_TEMPLATE=0 disables; HP2_VERIFY_SOLID_TEMPLATE=1 compares.
+int ecstasySolidTemplate=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_SOLID_TEMPLATE"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 1;
+}();
+static bool NativeSolidCommandStateEqual(const EcstasyDrawCommand& a,const EcstasyDrawCommand& b) noexcept
+{
+    const auto bits=[](float value) {std::uint32_t result;std::memcpy(&result,&value,sizeof(result));return result;};
+    return a.kind==b.kind && a.instance==b.instance && a.texture==b.texture && a.model==b.model &&
+        a.lightMaterial==b.lightMaterial && a.clipToScreen==b.clipToScreen && a.view==b.view &&
+        a.target==b.target && a.drawFlags==b.drawFlags && bits(a.alphaScale)==bits(b.alphaScale) &&
+        bits(a.textureQScale)==bits(b.textureQScale) && a.rasterState==b.rasterState &&
+        a.nativeRenderEggState==b.nativeRenderEggState && a.zWriteEnabled==b.zWriteEnabled &&
+        a.depthSorted==b.depthSorted && a.alphaGroup==b.alphaGroup && a.carShadow==b.carShadow &&
+        a.orderingTexture==b.orderingTexture && a.sampledTarget==b.sampledTarget &&
+        a.sampledPreviousFrame==b.sampledPreviousFrame && a.showcaseEnvironmentBlend==b.showcaseEnvironmentBlend &&
+        a.cachedOpaqueScenery==b.cachedOpaqueScenery && a.sceneryRunCount==b.sceneryRunCount &&
+        a.sceneryRunFirst==b.sceneryRunFirst && a.clipClass==b.clipClass && a.layer==b.layer &&
+        a.uiPlacement==b.uiPlacement && a.polygon==b.polygon && a.particleGroup==b.particleGroup &&
+        a.worldStrip==b.worldStrip && a.depthPalette==b.depthPalette && a.focus==b.focus &&
+        a.feedbackGroup==b.feedbackGroup && a.vertexOrder==b.vertexOrder &&
+        a.screenFilter.color==b.screenFilter.color && a.screenFilter.blend==b.screenFilter.blend &&
+        a.screenFilter.enabled==b.screenFilter.enabled && a.screenFilter.fixedAlpha==b.screenFilter.fixedAlpha &&
+        a.screenFilter.textureFunction==b.screenFilter.textureFunction;
+}
 int ecstasySceneryRunFastPath=[] {
 #if !defined(__vita__)
     if(const char* value=std::getenv("HP2_SCENERY_RUN_FAST"))return std::atoi(value)!=0 ? 1:0;

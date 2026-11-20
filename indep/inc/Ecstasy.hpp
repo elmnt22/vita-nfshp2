@@ -1308,7 +1308,7 @@ struct EcstasyVulkanFrameStatistics {
     std::uint64_t textureVariantHits{},textureValidations{},textureUploads{},textureUploadBytes{},textureStagingAllocations{};
     std::uint64_t pipelineCreations{},pendingPipelineDraws{},drawBatches{},particles{},gpuWorldVertices{};
     std::uint64_t sceneryPipelineHits{};
-    std::uint64_t sceneryPacketHits{},sceneryPacketMisses{},sceneryPacketFallbacks{};
+    std::uint64_t sceneryPacketHits{},sceneryPacketMisses{},sceneryPacketFallbacks{},solidTemplateHits{};
     // Actual CPU budget and distinct threads that recorded draw commands.
     // These are work diagnostics, not an estimate of physical GPU speed.
     std::uint32_t availableCpuThreads{},commandRecordingThreads{},commandRecordingChunks{};
