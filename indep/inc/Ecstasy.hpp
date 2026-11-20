@@ -366,6 +366,9 @@ typedef struct EditorMarkerLightMaterial {
     const uint8_t* authoredRecord{};
     std::array<std::array<float,kNativeResponseSamples>,2> nativeSpecularResponse{};
     bool nativeSpecularReady{};
+    // Set with the tables by prepareNativeMaterial: every response sample is
+    // finite (the GPU table copy then needs no per-sample check).
+    bool nativeSpecularFinite{};
     // PAL10A754..10A770 selects the authored FE/IG bank from InGameFlag.
     // Each decoded variant owns its precomputed response; both original
     // coefficient arrays stay intact and no material is rewritten per frame.

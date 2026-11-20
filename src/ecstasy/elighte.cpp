@@ -307,6 +307,9 @@ void prepareNativeMaterial(EditorMarkerLightMaterial& material)
             material.nativeSpecularResponse[table][index]=amplitude*std::pow(input,exponent);
         }
     }
+    bool finite=true;
+    for(const auto& table:material.nativeSpecularResponse)for(const auto value:table)finite=finite && std::isfinite(value);
+    material.nativeSpecularFinite=finite;
     material.nativeSpecularReady=true;
 }
 
