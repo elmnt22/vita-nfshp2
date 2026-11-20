@@ -33,6 +33,7 @@
 #include <pthread.h>
 #include "crash.hpp"
 #include "audio.hpp"
+extern int bMatrixNeonEnabled;
 namespace vita_selftest { void Run(void (*log)(const char*, const char*)); }
 #include <atomic>
 #include <fstream>
@@ -50,9 +51,10 @@ unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 
 namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern std::atomic<int> debugDemoStarted; extern int debugBenchMirror; }
 extern int collisionWitnessWarmProbe;
+extern int collisionQueuePrediction;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
+namespace hp2 { extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -522,6 +524,14 @@ int main(int, char**)
         }
     }
     vita_selftest::Run([](const char* event, const char* detail) { if (g_log) g_log->Line(event, detail); });
+    {
+        // Diagnostic A/B: scalar VFP matrix paths (identical results under FZ).
+        SceIoStat neonProbe{};
+        if (sceIoGetstat((std::string(kDataDirectory) + "/neon_matrix_off.txt").c_str(), &neonProbe) >= 0) {
+            bMatrixNeonEnabled = 0;
+            if (g_log) g_log->Line("vita.diag", "neon matrix off");
+        }
+    }
     hp2::platform::BindSessionSink([](const char* event, const char* detail) noexcept {
         if (g_log && std::strcmp(event, "file.open") != 0) g_log->Line(event, detail);
     });
@@ -621,6 +631,10 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/model_runs_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyModelRuns = 0;
             log.Line("vita.diag", "model strip runs off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_fast_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyFastSceneryCapture = 0;
+            log.Line("vita.diag", "scenery fast capture off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_runs_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryRuns = 0;
@@ -731,6 +745,14 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/worker_prio.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneWorkerPriority = 140;
             log.Line("vita.diag", "scene worker priority 140");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/emit_twice.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyDiagEmitTwice = true;
+            log.Line("vita.diag", "scenery emit twice (diagnostic)");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/queue_pred_off.txt").c_str(), &probe) >= 0) {
+            collisionQueuePrediction = 0;
+            log.Line("vita.diag", "collision queue prediction off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/witness_probe.txt").c_str(), &probe) >= 0) {
             collisionWitnessWarmProbe = 1;

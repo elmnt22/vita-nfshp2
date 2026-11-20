@@ -644,7 +644,19 @@ uint64_t collisionWitnessWarmMismatches=0;
 static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState,
-                              uint64_t* counters=nullptr);
+                              uint64_t* counters=nullptr, int32_t* predictPending=nullptr);
+// RNG-free prediction (thread-safe, detached counters). *pending: 0 = the
+// witness is the exact query result and no random draw happened; 1 = exact
+// except the terminal restart, whose two vertex draws the caller makes from
+// the real state in order; -1 = a restart before termination (the rest of
+// the query depends on the random state): the witness is garbage.
+int32_t collisionWitnessQueryPredict(CollisionWitness* witness, const float firstFrame[16],
+                              const float firstPosition[4], const float secondFrame[16],
+                              const float secondPosition[4], int32_t* pending, uint64_t counters[4])
+{
+    *pending=0;
+    return collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,nullptr,counters,pending);
+}
 // Thread-safe variant for speculative helpers: no timers, probes or global
 // counters (counters[4] = queries, iterations, restarts, exhausted).
 int32_t collisionWitnessQueryDetached(CollisionWitness* witness, const float firstFrame[16],
@@ -686,7 +698,7 @@ int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[
 static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState,
-                              uint64_t* counters)
+                              uint64_t* counters, int32_t* predictPending)
 {
     const bool detached=counters!=nullptr;
     if(!detached) ++collisionWitnessQueries; else ++counters[0];
@@ -733,6 +745,12 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
         if (collisionWitnessRemember(witness, firstHistory, secondHistory, iteration)) {
             ++restarts;
             iteration = 0;
+            if (predictPending) {
+                if (result == 0) {*predictPending = -1;return 0;}
+                *predictPending = 1;
+                ++counters[1];
+                break;
+            }
             witness->first = &witness->firstGeometry->vertices[vectorRandomBounded((uint32_t)witness->firstGeometry->vertexCount, randomState)];
             witness->second = &witness->secondGeometry->vertices[vectorRandomBounded((uint32_t)witness->secondGeometry->vertexCount, randomState)];
         } else ++iteration;

@@ -228,6 +228,14 @@ private:
 };
 }
 
+unsigned collisionHelperCount()
+{
+    return collisionSpeculationMode==0 ? 0u:CollisionHelperPool::Instance().Helpers();
+}
+void collisionHelperRun(unsigned count,void (*function)(void*,unsigned),void* context)
+{
+    CollisionHelperPool::Instance().Run(count,function,context);
+}
 void collisionSpeculationArm(int on)
 {
     if(collisionSpeculationMode==0)return;
