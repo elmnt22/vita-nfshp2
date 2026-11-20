@@ -17,7 +17,7 @@
 #include <set>
 
 namespace { int32_t currentZoneNumber=-1; } // PAL3302B0.
-namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; }
+namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelSceneryPrepare; }
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
 
 SceneryInstance* sceneryFindInstanceByIndex(const Scenery* scenery,int32_t section,int32_t instance)
@@ -699,6 +699,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     const auto sectionCapacity=distanceScale>1.0f ?
         std::max<std::size_t>(128,loadedSections_.size()+74u):128u;
     const auto* selectedZone=CollectSections(view,sectionScratch_,sectionCapacity,&nativeRenderStatistics_.sourceSections);
+    const auto splitCollected=std::chrono::steady_clock::now();
     const auto sourceSections=nativeRenderStatistics_.sourceSections;
     nativeRenderStatistics_.extendedSections=sectionScratch_.size()-sourceSections;
     std::size_t preparationWork=0,validSections=0;
@@ -724,6 +725,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             preparationWork+=std::min<std::size_t>(512-preparationWork,section.instanceCount);
         }
     }
+    const auto splitRooted=std::chrono::steady_clock::now();
     const auto prepareSection=[&](const SectionStorage& storage,std::size_t ordinal,std::int32_t rootClip,
         std::vector<RenderDraw>& output,std::vector<RenderNode>& stack,
         std::vector<std::uint8_t>& nearState,std::size_t& visited,
@@ -813,7 +815,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             }
         }
     };
-    if(preparationWork<512 || validSections<2 || NativeSceneEffectiveHardwareConcurrency()<2) {
+    if(!hp2::ecstasyParallelSceneryPrepare || preparationWork<512 || validSections<2 || NativeSceneEffectiveHardwareConcurrency()<2) {
         // Preserve direct owner execution for a small workload or one CPU:
         // no chunk copies, thread wakeups or temporary hysteresis arrays.
         for(std::size_t ordinal=0;ordinal<sectionScratch_.size();++ordinal) {
@@ -876,6 +878,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         }
     }
     nativeRenderStatistics_.drawnInstances=draws.size();
+    const auto splitTraversed=std::chrono::steady_clock::now();
     // The view still publishes culling/LOD hysteresis on discarded frames.
     // Lighting and GPU packet capture have no consumer on those frames.
     if(!emitGeometry)return;
@@ -1065,7 +1068,8 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     };
     const bool parallelCandidate=cachedScenery && hp2::ecstasyParallelSceneryEmit && hp2::ecstasySceneryRuns &&
         draws.size()>=2*emitChunkDraws && NativeSceneEffectiveHardwareConcurrency()>1;
-    if(parallelCandidate && !verifyParallelEmit && parallelEmit(true)) {
+    const bool parallelDone=parallelCandidate && !verifyParallelEmit && parallelEmit(true);
+    if(parallelDone) {
         ++parallelEmitViews_;
     } else {
     const bool verifying=parallelCandidate && verifyParallelEmit && parallelEmit(false);
@@ -1135,9 +1139,13 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     }
     {
         // Diagnostic: prepare / light / emit split per view (logged every 300 renders).
-        static std::array<double,5> split{};static std::array<double,9> counts{};static unsigned renders=0;
-        const auto now=std::chrono::steady_clock::now();
         const auto ms=[](auto a,auto b){return std::chrono::duration<double,std::milli>(b-a).count();};
+        static std::array<double,5> split{};static std::array<double,9> counts{};static unsigned renders=0;
+        static std::array<double,4> stages{};static double parallelViews=0,candidateViews=0;
+        stages[0]+=ms(splitStarted,splitCollected);stages[1]+=ms(splitCollected,splitRooted);
+        stages[2]+=ms(splitRooted,splitTraversed);stages[3]+=ms(splitTraversed,splitPrepared);
+        parallelViews+=parallelDone;candidateViews+=parallelCandidate;
+        const auto now=std::chrono::steady_clock::now();
         split[0]+=ms(splitStarted,splitPrepared);split[1]+=ms(splitPrepared,splitLit);split[2]+=ms(splitLit,now);
         counts[0]+=draws.size();counts[1]+=splitBatched;counts[2]+=lightJobs.size();counts[3]+=splitInlineLights;
         split[3]+=splitInlineLightMs;split[4]+=splitModelMs;
@@ -1149,6 +1157,10 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 split[0]/300,split[1]/300,split[2]/300,split[3]/300,split[4]/300,counts[0]/300,counts[1]/300,counts[2]/300,counts[3]/300,
                 counts[4]/300,counts[5]/300,counts[6]/300,counts[7]/300,counts[8]/300);
             platform::RecordSessionEvent("render.scenery_split",text);
+            std::snprintf(text,sizeof(text),"collect_ms=%.3f roots_ms=%.3f traverse_ms=%.3f dedupe_ms=%.3f parallel_emit=%.2f candidates=%.2f",
+                stages[0]/300,stages[1]/300,stages[2]/300,stages[3]/300,parallelViews/300,candidateViews/300);
+            platform::RecordSessionEvent("render.scenery_prepare",text);
+            stages={};parallelViews=candidateViews=0;
             split={};counts={};renders=0;
         }
     }
