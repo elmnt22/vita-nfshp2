@@ -65,7 +65,11 @@ extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitn
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
 extern uint64_t collisionWitnessWarmMismatches;
 extern int collisionSpeculationMode;
+#include <atomic>
+extern std::atomic<uint64_t> collisionPoolHelperTasks,collisionPoolHelperMicros;
+extern uint64_t collisionPoolMainMicros;
 extern uint64_t collisionSpecSeparations,collisionSpecAccepted,collisionSpecWasted,collisionSpecMispredicts,
+    collisionPoolMainTasks,collisionPoolRuns,collisionPoolRunMicros,collisionPoolWaitMicros,
     collisionSpecRounds,collisionSpecVerified,collisionSpecMismatches,collisionFindQueries,collisionSeparateQueries,collisionSeparateCalls;
 extern uint64_t collisionQueuePredicted,collisionQueueFallbacks,collisionQueueChecks,collisionQueueMismatches;
 extern uint32_t (*collisionWitnessProbeClock)();
@@ -1415,6 +1419,17 @@ bool ApplicationRuntime::Tick()
                 ::collisionFindQueries=::collisionSeparateCalls=::collisionSeparateQueries=0;
                 ::collisionSpecSeparations=::collisionSpecRounds=::collisionSpecAccepted=::collisionSpecWasted=::collisionSpecMispredicts=0;
                 s.host.RecordSessionEvent("render.collision_solve",detail);
+                {
+                    const double runs=::collisionPoolRuns ? static_cast<double>(::collisionPoolRuns):1.0;
+                    std::snprintf(detail,sizeof(detail),"runs_per_frame=%.1f main_tasks=%.1f helper_tasks=%.1f run_us=%.1f wait_us=%.1f main_task_us=%.1f helper_task_us=%.1f",
+                        ::collisionPoolRuns/count,::collisionPoolMainTasks/count,::collisionPoolHelperTasks.load()/count,
+                        ::collisionPoolRunMicros/runs,::collisionPoolWaitMicros/runs,
+                        ::collisionPoolMainTasks ? double(::collisionPoolMainMicros)/::collisionPoolMainTasks:0.0,
+                        ::collisionPoolHelperTasks.load() ? double(::collisionPoolHelperMicros.load())/::collisionPoolHelperTasks.load():0.0);
+                    ::collisionPoolMainMicros=0;::collisionPoolHelperMicros=0;
+                    s.host.RecordSessionEvent("render.collision_pool",detail);
+                    ::collisionPoolRuns=::collisionPoolMainTasks=::collisionPoolRunMicros=::collisionPoolWaitMicros=0;::collisionPoolHelperTasks=0;
+                }
                 std::snprintf(detail,sizeof(detail),"predicted_per_frame=%.1f fallbacks_per_frame=%.1f checks=%llu mismatches=%llu",
                     ::collisionQueuePredicted/count,::collisionQueueFallbacks/count,
                     static_cast<unsigned long long>(::collisionQueueChecks),static_cast<unsigned long long>(::collisionQueueMismatches));
