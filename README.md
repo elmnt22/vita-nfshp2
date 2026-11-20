@@ -1,6 +1,6 @@
 # Need for Speed: Hot Pursuit 2 — Native Port
 
-Nintendo Switch and Nintendo Switch 2 port of the PlayStation 2 game engine.
+A native PlayStation Vita port of Need for Speed: Hot Pursuit 2, based on a decomp of the original game for the Nintendo Switch.
 
 **Game data required: PlayStation 2 PAL version 1.00 (SLES-50731).** Use the original `ZDIR.BIN` and `ZZDATA.BIN` from the disc's `NFSHP2` directory. Game data is not included.
 
