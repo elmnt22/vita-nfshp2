@@ -18,6 +18,7 @@
 // denormals; the Vita host enables this only after confirming FPSCR.FZ and a
 // bit-exact self-test (vita/selftest.cpp), otherwise the scalar path runs.
 int bMatrixNeonEnabled = 0;
+int bFastRoundEnabled = 0;
 #define NFSHP2_NATIVE_NEON 1
 #else
 #define NFSHP2_NATIVE_NEON 0

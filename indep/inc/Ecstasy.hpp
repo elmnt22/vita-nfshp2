@@ -1949,10 +1949,10 @@ inline std::array<std::uint64_t,9> ecstasyCarCensus{};
 inline std::array<double,3> ecstasyEmitSampleMs{};
 template<class Task>
 void RunNativeSceneJobs(std::size_t count,Task&& task,
-    std::size_t minimumParallelJobs=512,unsigned requestedWorkers=0)
+    std::size_t minimumParallelJobs=512,unsigned requestedWorkers=0,bool ignoreSerial=false)
 {
     if(!count)return;
-    if(ecstasySceneJobsSerial) {for(std::size_t index=0;index<count;++index)task(index);return;}
+    if(ecstasySceneJobsSerial && !ignoreSerial) {for(std::size_t index=0;index<count;++index)task(index);return;}
     const unsigned effective=NativeSceneEffectiveHardwareConcurrency();
     const unsigned budget=requestedWorkers ? std::min(effective,requestedWorkers):effective;
     const unsigned workers=static_cast<unsigned>(std::min<std::size_t>(count,std::max(1u,budget)));
