@@ -1097,13 +1097,13 @@ std::size_t renderCarSunShadow(CarAppearance& render,Car* car,const CarCinematic
     };
     constexpr float edgeU=0.1550000011920929f;std::size_t submitted=0;
     for(std::size_t i=0;i+1<(count&~std::size_t{1});i+=2) {
-        frame.RenderWorldStrip({vertex(smooth[i],edgeU),vertex(center,0.0f),
-            vertex(smooth[i+1],edgeU),vertex(smooth[(i+2)%count],edgeU)},
-            *texture,eMathIdentityMatrix,view,hp2::EcstasyCarShadow::Sun);++submitted;
+        const hp2::frontend::FlailerPolyVertex fan[4]={vertex(smooth[i],edgeU),vertex(center,0.0f),
+            vertex(smooth[i+1],edgeU),vertex(smooth[(i+2)%count],edgeU)};
+        frame.RenderWorldStrip(fan,4,*texture,eMathIdentityMatrix,view,hp2::EcstasyCarShadow::Sun);++submitted;
     }
     if(count&1u) {
-        frame.RenderWorldStrip({vertex(smooth.back(),edgeU),vertex(center,0.0f),vertex(smooth.front(),edgeU)},
-            *texture,eMathIdentityMatrix,view,hp2::EcstasyCarShadow::Sun);++submitted;
+        const hp2::frontend::FlailerPolyVertex fan[3]={vertex(smooth.back(),edgeU),vertex(center,0.0f),vertex(smooth.front(),edgeU)};
+        frame.RenderWorldStrip(fan,3,*texture,eMathIdentityMatrix,view,hp2::EcstasyCarShadow::Sun);++submitted;
     }
     const auto third=count/3;
     std::vector<hp2::frontend::FlailerPolyVertex> strip;strip.reserve((third+3)*2);
