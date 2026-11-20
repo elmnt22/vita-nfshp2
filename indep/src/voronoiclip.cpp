@@ -1,3 +1,4 @@
+#include <atomic>
 #include "indep/inc/VoronoiClip.hpp"
 #include "indep/inc/Contact.hpp"
 #include "indep/inc/Polyhedra.hpp"
@@ -70,6 +71,46 @@ void collisionTransformEdge(CollisionTransformedEdge* output, const float frame[
     vectorMatrixTransformPoint(output->second, frame, secondPoint);
     memcpy(output->direction, output->first, sizeof(output->direction));
     for (int lane = 0; lane < 3; ++lane) output->direction[lane] = output->first[lane] - output->second[lane];
+}
+
+// Per-query transformed-feature reuse (exact). Each scratch slot of a query
+// is only ever filled from one frame (firstVertex/firstEdge: firstToSecond,
+// secondVertex/secondEdge: secondToFirst) and the frames and geometry are
+// fixed for the query, so a slot that already holds a feature holds exactly
+// what transforming it again would compute. Vita witness_cache_off.txt: 0;
+// PC HP2_VERIFY_WITNESS_CACHE=1 recomputes every reuse and counts mismatches.
+int collisionWitnessTransformCache=1;
+std::atomic<uint64_t> collisionWitnessCacheChecks{0},collisionWitnessCacheMismatches{0};
+static const bool verifyWitnessCache=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    const char* value=getenv("HP2_VERIFY_WITNESS_CACHE");return value && *value=='1';
+#else
+    return false;
+#endif
+}();
+static inline void cachedTransformVertex(CollisionTransformedVertex* slot,const float frame[16],const CollisionFeature* vertex)
+{
+    if(collisionWitnessTransformCache && slot->feature==vertex) {
+        if(verifyWitnessCache) {
+            CollisionTransformedVertex fresh;collisionTransformVertex(&fresh,frame,vertex);
+            ++collisionWitnessCacheChecks;
+            if(memcmp(&fresh,slot,sizeof(fresh))!=0) ++collisionWitnessCacheMismatches;
+        }
+        return;
+    }
+    collisionTransformVertex(slot,frame,vertex);
+}
+static inline void cachedTransformEdge(CollisionTransformedEdge* slot,const float frame[16],const CollisionFeature* edge)
+{
+    if(collisionWitnessTransformCache && slot->feature==edge) {
+        if(verifyWitnessCache) {
+            CollisionTransformedEdge fresh;collisionTransformEdge(&fresh,frame,edge);
+            ++collisionWitnessCacheChecks;
+            if(memcmp(&fresh,slot,sizeof(fresh))!=0) ++collisionWitnessCacheMismatches;
+        }
+        return;
+    }
+    collisionTransformEdge(slot,frame,edge);
 }
 
 CollisionClip* collisionClipInitialize(CollisionClip* clip)
@@ -359,7 +400,7 @@ int32_t collisionWitnessVertexEdge(CollisionWitness* witness,const float feature
 {
     CollisionFeature* first=witness->side==1?witness->first:witness->second;
     CollisionFeature* second=witness->side==2?witness->first:witness->second;
-    collisionTransformVertex(vertex,featureFrame,first);
+    cachedTransformVertex(vertex,featureFrame,first);
     for(int index=0;index<4;++index) {
         const CollisionPlane* plane=&second->adjacent[index];
         if(dot3(plane->normal,vertex->point)-plane->offset<0.0f) {
@@ -367,7 +408,7 @@ int32_t collisionWitnessVertexEdge(CollisionWitness* witness,const float feature
             return 0;
         }
     }
-    collisionTransformEdge(edge,otherFrame,second);
+    cachedTransformEdge(edge,otherFrame,second);
     CollisionClip clip;collisionClipInitialize(&clip);
     const float point[4]={first->vector[0],first->vector[1],first->vector[2],0.0f};
     CollisionFeature* changed=collisionClipVertex(&clip,edge,point,first->adjacent,first->adjacentCount);
@@ -420,7 +461,7 @@ int32_t collisionWitnessVertexFace(CollisionWitness* witness, const float featur
 {
     CollisionFeature* vertex = witness->side == 1 ? witness->first : witness->second;
     CollisionFeature* face = witness->side == 2 ? witness->first : witness->second;
-    collisionTransformVertex(transformed, featureFrame, vertex);
+    cachedTransformVertex(transformed, featureFrame, vertex);
     float minimum = 0.0f;
     int32_t violated = -1;
     for (int index = 0; index < face->adjacentCount; ++index) {
@@ -561,10 +602,10 @@ int32_t collisionWitnessEdges(CollisionWitness* witness, const float featureFram
 {
     CollisionFeature* firstFeature = witness->side == 1 ? witness->first : witness->second;
     CollisionFeature* secondFeature = witness->side == 2 ? witness->first : witness->second;
-    collisionTransformEdge(first, featureFrame, firstFeature);
+    cachedTransformEdge(first, featureFrame, firstFeature);
     int32_t result = collisionWitnessEdgeRegions(witness, first, secondFeature, 2);
     if (result != 1) return result;
-    collisionTransformEdge(second, otherFrame, secondFeature);
+    cachedTransformEdge(second, otherFrame, secondFeature);
     result = collisionWitnessEdgeRegions(witness, second, firstFeature, 1);
     if (result != 1) return result;
     float* firstPoint = witness->side == 1 ? witness->firstPoint : witness->secondPoint;
@@ -587,7 +628,7 @@ int32_t collisionWitnessEdgeFace(CollisionWitness* witness, const float featureF
 {
     CollisionFeature* edgeFeature = witness->side == 1 ? witness->first : witness->second;
     CollisionFeature* face = witness->side == 2 ? witness->first : witness->second;
-    collisionTransformEdge(edge, featureFrame, edgeFeature);
+    cachedTransformEdge(edge, featureFrame, edgeFeature);
     CollisionClip clip;
     collisionClipInitialize(&clip);
     if (collisionClipPlanes(&clip, edge, face->adjacent, face->adjacentCount)) {
@@ -774,7 +815,7 @@ int32_t collisionWitnessVertices(CollisionWitness* witness, const float featureF
 {
     CollisionFeature* first=witness->side==1 ? witness->first : witness->second;
     CollisionFeature* second=witness->side==2 ? witness->first : witness->second;
-    collisionTransformVertex(feature,featureFrame,first);
+    cachedTransformVertex(feature,featureFrame,first);
     for(int index=0;index<second->adjacentCount;++index) {
         const CollisionPlane* plane=&second->adjacent[index];
         if(dot3(plane->normal,feature->point)-plane->offset<0.0f) {
@@ -783,7 +824,7 @@ int32_t collisionWitnessVertices(CollisionWitness* witness, const float featureF
             return 0;
         }
     }
-    collisionTransformVertex(other,otherFrame,second);
+    cachedTransformVertex(other,otherFrame,second);
     for(int index=0;index<first->adjacentCount;++index) {
         const CollisionPlane* plane=&first->adjacent[index];
         if(dot3(plane->normal,other->point)-plane->offset<0.0f) {
