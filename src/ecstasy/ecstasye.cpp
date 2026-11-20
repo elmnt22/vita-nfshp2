@@ -7049,7 +7049,7 @@ class VkNativeFrameShading {
     };
 public:
     void Clear() {
-        materials_.clear();recordCount_=0;lastIndex_=0;
+        materials_.clear();lastMaterial_=nullptr;lastMaterialIndex_=0;recordCount_=0;lastIndex_=0;
         std::fill(records_.begin(),records_.end(),RecordSlot{});
         for(auto& input:inputs_)input.valid=false;
         lastInput_=inputs_.size();
@@ -7165,7 +7165,11 @@ private:
         records_.swap(next);
     }
     std::uint32_t Material(const EditorMarkerLightMaterial& material,std::vector<std::array<float,4>>& data) {
-        const auto found=materials_.find(&material);if(found!=materials_.end())return found->second;
+        // Consecutive lit strips usually share one material (exact: the map
+        // value for a key never changes until Clear resets both).
+        if(&material==lastMaterial_)return lastMaterialIndex_;
+        const auto found=materials_.find(&material);
+        if(found!=materials_.end()) {lastMaterial_=&material;lastMaterialIndex_=found->second;return found->second;}
         constexpr std::size_t tableVectors=(EditorMarkerLightMaterial::kNativeResponseSamples+3)/4;
         constexpr std::size_t materialVectors=5+2*tableVectors;
         static_assert(EditorMarkerLightMaterial::kNativeResponseSamples==1025 && tableVectors==257,
@@ -7179,15 +7183,23 @@ private:
             data[first+index/4][index%4]=coefficients[index];
         }
         data[first+4][0]=material.nativeSpecularReady ? 1.0f:0.0f;
-        if(material.nativeSpecularReady)for(std::size_t table=0;table<2;++table)
+        static_assert(sizeof(std::array<float,4>)==4*sizeof(float),"Shading rows are not packed float4");
+        if(material.nativeSpecularReady && material.nativeSpecularFinite) {
+            // Same bytes as the loop below: each table fills consecutive
+            // float4 rows from row first+5+table*257 (rest stay zero).
+            for(std::size_t table=0;table<2;++table)
+                std::memcpy(data[first+5+table*tableVectors].data(),material.nativeSpecularResponse[table].data(),
+                    sizeof(material.nativeSpecularResponse[table]));
+        } else if(material.nativeSpecularReady)for(std::size_t table=0;table<2;++table)
             for(std::size_t index=0;index<EditorMarkerLightMaterial::kNativeResponseSamples;++index) {
                 const auto value=material.nativeSpecularResponse[table][index];
                 if(!std::isfinite(value))throw std::runtime_error("Native GPU specular response sample is nonfinite");
                 data[first+5+table*tableVectors+index/4][index%4]=value;
             }
-        materials_.emplace(&material,first);return first;
+        materials_.emplace(&material,first);lastMaterial_=&material;lastMaterialIndex_=first;return first;
     }
     std::unordered_map<const EditorMarkerLightMaterial*,std::uint32_t> materials_;
+    const EditorMarkerLightMaterial* lastMaterial_{};std::uint32_t lastMaterialIndex_{};
     std::vector<RecordSlot> records_;
     std::size_t recordCount_{};
     std::array<Input,256> inputs_{};
@@ -7526,7 +7538,7 @@ public:
     const std::vector<VkResidentIndexEntry*>& Active() const noexcept {return active_;}
     void Begin(std::uint64_t gather) {
         if(gather<=gather_) {
-            entries_.clear();lookup_.clear();free_.clear();
+            entries_.clear();lookup_.clear();free_.clear();front_.fill({});
             if(capacity_)free_.emplace(0,capacity_);
         }
         gather_=gather;active_.clear();
@@ -7552,6 +7564,20 @@ public:
         }
 #endif
         if(!indices || indices>capacity_) {return nullptr;}
+        // Direct-mapped front: a slot only names a live entry (Evict and a
+        // full clear drop it) and live entries have unique token sequences,
+        // so a verified slot hit is the entry the map lookup would return.
+        auto& slot=front_[FrontIndex(hash)];
+        if(slot.live && slot.hash==hash && slot.count==count) {
+            bool equal;
+            if(count==1)equal=slot.token==tokens[first];
+            else {
+                const auto& entryTokens=slot.entry->tokens;equal=true;
+                for(std::size_t at=0;at<count;++at)
+                    if(entryTokens[at]!=tokens[first+at]) {equal=false;break;}
+            }
+            if(equal) {Touch(slot.entry);return &*slot.entry;}
+        }
         const auto candidates=lookup_.equal_range(hash);
         for(auto found=candidates.first;found!=candidates.second;++found) {
             auto entry=found->second;
@@ -7560,7 +7586,7 @@ public:
             for(std::size_t at=0;at<count;++at)
                 if(entry->tokens[at]!=tokens[first+at]) {equal=false;break;}
             if(!equal)continue;
-            Touch(entry);return &*entry;
+            SetFront(entry);Touch(entry);return &*entry;
         }
         const auto needed=(static_cast<std::uint32_t>(indices)+63u)&~std::uint32_t(63);
         auto range=Find(needed);
@@ -7585,7 +7611,7 @@ public:
                 EraseLookup(entry);entries_.erase(entry);throw;
             }
         }
-        free_.erase(range);Touch(entry);
+        free_.erase(range);SetFront(entry);Touch(entry);
         return &*entry;
     }
     void InvalidateUploads() {for(auto& entry:entries_)entry.uploaded=false;}
@@ -7595,6 +7621,17 @@ public:
 private:
     using Entries=std::list<VkResidentIndexEntry>;
     using Ranges=std::map<std::uint32_t,std::uint32_t>;
+    struct FrontSlot {std::uint64_t hash{};std::uint64_t token{};Entries::iterator entry{};std::uint32_t count{};bool live{};};
+    static constexpr std::size_t FrontSize=4096;
+    static std::size_t FrontIndex(std::uint64_t hash) noexcept {
+        return static_cast<std::size_t>((hash^(hash>>32))&(FrontSize-1));
+    }
+    void SetFront(Entries::iterator entry) noexcept {
+        auto& slot=front_[FrontIndex(entry->hash)];
+        slot.hash=entry->hash;slot.entry=entry;slot.live=true;
+        slot.count=static_cast<std::uint32_t>(entry->tokens.size());
+        slot.token=entry->tokens.empty() ? 0:entry->tokens.front();
+    }
     Ranges::iterator Find(std::uint32_t count) {
         return std::find_if(free_.begin(),free_.end(),[&](const auto& range){return range.second>=count;});
     }
@@ -7619,13 +7656,16 @@ private:
         }
         next=free_.lower_bound(first);
         if(next!=free_.end() && first+count==next->first) {count+=next->second;free_.erase(next);}
-        free_.emplace(first,count);EraseLookup(entry);entries_.erase(entry);
+        free_.emplace(first,count);EraseLookup(entry);
+        if(auto& slot=front_[FrontIndex(entry->hash)];slot.live && slot.entry==entry)slot={};
+        entries_.erase(entry);
     }
     std::uint64_t gather_{};
     std::uint32_t capacity_{};
     Entries entries_;
     Ranges free_;
     std::unordered_multimap<std::uint64_t,Entries::iterator> lookup_;
+    std::array<FrontSlot,FrontSize> front_{};
     std::vector<VkResidentIndexEntry*> active_;
 };
 
