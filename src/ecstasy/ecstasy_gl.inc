@@ -522,6 +522,7 @@ struct EcstasyVulkanDevice::Storage {
     }
     void BeginGather()
     {
+        pendingDecodes.clear();
         if(++gatherSerial==0) {
             for(auto& texture:textures)texture.validatedGather=0;
             for(auto& palette:depthPaletteCache)palette.gathered=0;
@@ -602,6 +603,12 @@ struct EcstasyVulkanDevice::Storage {
             options.width,options.height,4096u);
     }
     void UploadTexture(const TextureInfo& texture,std::size_t index,bool repeatedPadding);
+    // Base-level decodes recorded by UploadTexture during Gather and run
+    // after its command loop (in parallel when several): the same decode of
+    // the same sealed-frame bytes into the same pending upload.
+    struct PendingDecode {const TextureInfo* texture{};std::size_t upload{},baseBytes{};bool repeatedPadding{};};
+    std::vector<PendingDecode> pendingDecodes;
+    void RunPendingDecodes();
     void LogReupload(const VkDrawTexture& old,const TextureInfo& texture);
     std::uint64_t reuploads{};
     SceUInt64 lastReuploadLog{};
@@ -675,11 +682,12 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
             current=VkDrawTexture{};current.variants=std::move(variants);
         }
     }
-    std::uint32_t width{},height{};std::size_t sourceBytes{};
-    std::vector<std::uint8_t> base;
+    std::size_t sourceBytes{};
     // Only level 0 is uploaded and decoded. The retained source range (and
-    // so the cache comparison) still spans every authored level.
-    base=DecodeTextureMipRgba(texture,0,0,baseBytes,width,height,repeatedPadding);
+    // so the cache comparison) still spans every authored level. The decode
+    // itself is deferred (RunPendingDecodes); its extent is TEX0's level 0.
+    Require(wire[0x48]<=14 && wire[0x49]<=14,"Invalid authored texture log dimensions");
+    const std::uint32_t width=1u<<wire[0x48],height=1u<<wire[0x49];
     for(std::uint32_t level=0;level<levels;++level)sourceBytes+=baseBytes>>(2u*level);
     Require(sourceBytes<=texture.pixels.size,"vitaGL texture lost part of its authored mip chain");
     if(textures[index].generation)LogReupload(textures[index],texture);
@@ -690,8 +698,9 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
     const auto minification=wire[0x70];
     const bool linear=options.textureFilter!=EcstasyTextureFilter::Authored ||
         minification==1 || minification>=4 || wire[0x6f];
-    ++statistics.textureUploads;statistics.textureUploadBytes+=base.size();
-    building->uploads.push_back({handle,std::move(base),width,height,linear ? GL_LINEAR:GL_NEAREST,
+    ++statistics.textureUploads;statistics.textureUploadBytes+=static_cast<std::size_t>(width)*height*4u;
+    pendingDecodes.push_back({&texture,building->uploads.size(),baseBytes,repeatedPadding});
+    building->uploads.push_back({handle,{},width,height,linear ? GL_LINEAR:GL_NEAREST,
         (wire[0x4c]&1u) ? GL_REPEAT:GL_CLAMP_TO_EDGE,(wire[0x4c]&2u) ? GL_REPEAT:GL_CLAMP_TO_EDGE});
     target.source=&texture;target.repeatedPadding=repeatedPadding;target.uploadCompleted=false;
     const auto psm=wire[0x4a];
@@ -706,6 +715,24 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
     target.lastReferencedFrame=completedFrameSerial;
     Require(nextTextureGeneration!=UINT64_MAX,"Native texture generation exhausted");
     target.generation=++nextTextureGeneration;
+}
+
+void EcstasyVulkanDevice::Storage::RunPendingDecodes()
+{
+    if(pendingDecodes.empty())return;
+    auto& uploads=building->uploads;
+    auto decode=[&](std::size_t index) {
+        const auto& pending=pendingDecodes[index];
+        auto& upload=uploads[pending.upload];
+        std::uint32_t width{},height{};
+        upload.rgba=DecodeTextureMipRgba(*pending.texture,0,0,pending.baseBytes,width,height,pending.repeatedPadding);
+        Require(width==upload.width && height==upload.height,"vitaGL deferred texture decode changed its extent");
+    };
+    // Gather-thread pool (cores 1/2): largest decodes are seconds-scale
+    // rare first sights, so even two decodes are worth splitting.
+    try {RunNativeSceneJobs(pendingDecodes.size(),decode,2,2,true);}
+    catch(...) {pendingDecodes.clear();throw;}
+    pendingDecodes.clear();
 }
 
 #include "src/ecstasy/ecstasy_gather.inc"
@@ -905,6 +932,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     const auto gatherBegin=Clock::now();
     glRenderStage=2;
     Gather(*frame,data,elementIndices,batches);
+    RunPendingDecodes();
     glRenderStage=3;
     statistics.gatherMilliseconds=milliseconds(Clock::now()-gatherBegin);
 
