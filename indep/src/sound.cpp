@@ -1309,24 +1309,21 @@ static WorldAudioResult finishAudioRequest(WorldAudioRequestQueue* queue,
     // checks plus list walks cost ~30 us per acknowledgement on Vita.
     if (queue->instanceCapacity && queue->instances &&
         queue->instanceCapacity<=SIZE_MAX/sizeof(WorldAudioInstance)) {
-        bool idle=false;
-        if (queue->library) {
+        // retiringStopPending==0 proves no slot holds retiring==2 (only
+        // worldAudioRetireVoice stores 2, and it sets the hint first).
+        bool idle=!queue->retiringStopPending;
+        if (idle && queue->library)
             idle=queue->library->Driver()==queue && queue->instances==queue->library->SampleAt(0) &&
-                queue->instanceCapacity==queue->library->SampleCapacity() &&
-                !queue->library->AnySampleRetiring(2);
-        } else {
-            idle=true;
-            for (size_t index=0;index<queue->instanceCapacity && idle;++index)
-                idle=!(queue->instances[index].occupied && queue->instances[index].retiring==2);
-        }
+                queue->instanceCapacity==queue->library->SampleCapacity();
         if (idle) return queue->result = failed ? WORLD_AUDIO_BACKEND_FAILURE:WORLD_AUDIO_OK;
     }
+    bool stopsLeft=false;
     for (size_t index=0;index<queue->instanceCapacity;++index) {
         auto* current=worldAudioInstanceAt(queue,index);
         if (!current) return queue->result=WORLD_AUDIO_INVALID_BINDING;
         auto& instance=*current;
         if (!instance.occupied || instance.retiring!=2)continue;
-        if (reserveRequests(queue,1)!=WORLD_AUDIO_OK)break;
+        if (reserveRequests(queue,1)!=WORLD_AUDIO_OK) {stopsLeft=true;break;}
         auto* stop=appendRequest(queue,instance.bank,instance.cue,&instance,WORLD_AUDIO_STOP);
         stop->releaseDeviceVoice=1;
         instance.playing=0;
@@ -1335,6 +1332,7 @@ static WorldAudioResult finishAudioRequest(WorldAudioRequestQueue* queue,
         instance.retiring=1;
         if (queue->library)queue->library->Voices().ReleaseSample(worldAudioVoiceReference(&instance));
     }
+    if (!stopsLeft)queue->retiringStopPending=0;
     return queue->result = failed ? WORLD_AUDIO_BACKEND_FAILURE:WORLD_AUDIO_OK;
 }
 
@@ -1686,6 +1684,7 @@ WorldAudioResult worldAudioRetireVoice(WorldAudioRequestQueue* queue, WorldAudio
             voice.instance->completionSample=nullptr;
             voice.instance->completionKind=WORLD_AUDIO_COMPLETION_NONE;
             voice.instance->retiring=2;
+            queue->retiringStopPending=1;
             return queue->result=WORLD_AUDIO_OK;
         }
     }
