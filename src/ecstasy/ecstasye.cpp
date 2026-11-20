@@ -2675,15 +2675,14 @@ void EcstasyFrame::RenderScreenPolygon(const frontend::FlailerPoly& polygon,
     Require(phase_==Phase::Building && view.target && view.target->enabled &&
         view.matricesCalculated && texture->pixels.Data(),"Screen polygon lost its loaded texture or view");
     if(texture->requiresDepthSort && view.target->opaqueOnly)return;
-    auto owned=std::make_unique<frontend::FlailerPoly>(polygon);
+    auto* owned=TakeWorldPolygon(polygon);
     if(owned->rasterState[1]&0x00ff0000u)owned->rasterState[1]&=~0xff000000u;
     EcstasyDrawCommand command;command.kind=EcstasyDrawKind::ScreenPolygon;
-    command.polygon=owned.get();command.texture=texture;command.view=&view;command.target=view.target;
+    command.polygon=owned;command.texture=texture;command.view=&view;command.target=view.target;
     command.rasterState=owned->rasterState;command.zWriteEnabled=zWriteEnabled_;
     command.depthSorted=texture->requiresDepthSort;command.sortDepth=polygon.vertices[0].position[2];
     command.clipToScreen=&CaptureProjection(view).matrices[0];
-    worldPolygons_.push_back(std::move(owned));
-    try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
+    try {commands_.push_back(command);}catch(...) {--liveWorldPolygons_;throw;}
 }
 
 void EcstasyFrame::TransferZBufferRect(std::shared_ptr<SunDepthSamples> destination,
@@ -2865,7 +2864,7 @@ void EcstasyFrame::OverlayRVMImages(const CarCinematicServices& views,ResourceRe
     for(const auto* descriptor:{info,mask}) {
         const auto* texture=textureInfoForDescriptor(descriptor);
         Require(texture && texture->pixels.Data(),"Rear-view overlay texture pixels are not loaded");
-        auto polygon=std::make_unique<frontend::FlailerPoly>();
+        auto* polygon=TakeWorldPolygon(frontend::FlailerPoly{});
         polygon->rasterState={{0x01000100u,0x80u,0,0}};
         for(std::size_t index=0;index<4;++index) {
             auto& vertex=polygon->vertices[index];
@@ -2874,12 +2873,11 @@ void EcstasyFrame::OverlayRVMImages(const CarCinematicServices& views,ResourceRe
             vertex.color=0x80808080u;
         }
         EcstasyDrawCommand command;command.kind=EcstasyDrawKind::MirrorOverlayPolygon;
-        command.polygon=polygon.get();command.texture=texture;command.view=&rear;command.target=rear.target;
+        command.polygon=polygon;command.texture=texture;command.view=&rear;command.target=rear.target;
         command.clipToScreen=&CaptureProjection(rear).matrices[0];
         command.rasterState=polygon->rasterState;command.zWriteEnabled=zWriteEnabled_;
         command.depthSorted=texture->requiresDepthSort;command.sortDepth=maximum;
-        worldPolygons_.push_back(std::move(polygon));
-        try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
+        try {commands_.push_back(command);}catch(...) {--liveWorldPolygons_;throw;}
     }
 }
 
@@ -2979,7 +2977,7 @@ void EcstasyFrame::DisplayRVMs(const CarCinematicServices& views,const CarCinema
         rear.target->id==7 && rear.target->width==256 && rear.target->height==64 &&
         sourceDisplayExtent_[0]==512 && (sourceDisplayExtent_[1]==448 || sourceDisplayExtent_[1]==512),
         "Rear-view composition lacks its original source/destination target or captured display extent");
-    auto polygon=std::make_unique<frontend::FlailerPoly>();
+    auto* polygon=TakeWorldPolygon(frontend::FlailerPoly{});
     // Original ePoly constructor: neutral128-unit color and source alpha
     // equation. DisplayRVMs alone clears ScaleCoordinates (byte97).
     polygon->rasterState={{0x01000100u,0x00000080u,0,0}};
@@ -2996,12 +2994,11 @@ void EcstasyFrame::DisplayRVMs(const CarCinematicServices& views,const CarCinema
         vertex.color=0x80808080u;
     }
     EcstasyDrawCommand command;command.kind=EcstasyDrawKind::RenderTargetPolygon;
-    command.polygon=polygon.get();command.view=&destination;command.target=destination.target;
+    command.polygon=polygon;command.view=&destination;command.target=destination.target;
     command.clipToScreen=&CaptureProjection(destination).matrices[0];
     command.sampledTarget=rear.target;command.zWriteEnabled=zWriteEnabled_;
     command.rasterState=polygon->rasterState;
-    worldPolygons_.push_back(std::move(polygon));
-    try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
+    try {commands_.push_back(command);}catch(...) {--liveWorldPolygons_;throw;}
 }
 
 static std::array<hp2::frontend::FlailerPoly,4> radialBlurPolygons(
@@ -3100,14 +3097,13 @@ void EcstasyFrame::DisplayRadialBlur(const CarCinematicServices& views)
         const auto polygons=radialBlurPolygons(*view.target,views.radialBlur->firstAmount[index-1],
             views.radialBlur->secondAmount[index-1]);
         for(const auto& polygon:polygons) {
-            auto owned=std::make_unique<frontend::FlailerPoly>(polygon);
+            auto* owned=TakeWorldPolygon(polygon);
             EcstasyDrawCommand command;command.kind=EcstasyDrawKind::ScreenFilterPolygon;
-            command.polygon=owned.get();command.texture=view.radialBlurTexture;
+            command.polygon=owned;command.texture=view.radialBlurTexture;
             command.view=&view;command.target=view.target;command.rasterState=polygon.rasterState;
             command.zWriteEnabled=zWriteEnabled_;
             command.clipToScreen=&CaptureProjection(view).matrices[0];
-            worldPolygons_.push_back(std::move(owned));
-            try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
+            try {commands_.push_back(command);}catch(...) {--liveWorldPolygons_;throw;}
         }
         AttachSolidPolys(); // PAL10F4A0 calls10BB20: mask solid chain only.
     }
@@ -3124,7 +3120,7 @@ void EcstasyFrame::DisplayBlendPrevious(const CarCinematicServices& views)
         Require(view.matricesCalculated && previous->width>0 && previous->height>0 &&
             sourceDisplayExtent_[0] && sourceDisplayExtent_[1],"History blend lacks its display projection");
         const auto& target=*view.target;
-        auto polygon=std::make_unique<frontend::FlailerPoly>();
+        auto* polygon=TakeWorldPolygon(frontend::FlailerPoly{});
         polygon->rasterState={{0x01010100u,0x00010080u,0,0}};
         const float left=static_cast<float>(target.left),top=static_cast<float>(target.top);
         const float right=left+static_cast<float>(target.width),bottom=top+static_cast<float>(target.height);
@@ -3145,12 +3141,11 @@ void EcstasyFrame::DisplayBlendPrevious(const CarCinematicServices& views)
             polygon->vertices[vertex].color=0x80808080u;
         }
         EcstasyDrawCommand command;command.kind=EcstasyDrawKind::ScreenFilterPolygon;
-        command.polygon=polygon.get();command.view=&view;command.target=view.target;
+        command.polygon=polygon;command.view=&view;command.target=view.target;
         command.sampledTarget=previous;command.sampledPreviousFrame=true;
         command.zWriteEnabled=zWriteEnabled_;command.rasterState=polygon->rasterState;
         command.clipToScreen=&CaptureProjection(view).matrices[0];
-        worldPolygons_.push_back(std::move(polygon));
-        try {commands_.push_back(command);}catch(...) {worldPolygons_.pop_back();throw;}
+        try {commands_.push_back(command);}catch(...) {--liveWorldPolygons_;throw;}
         AttachSolidPolys(); // PAL10F670 calls10BB20: history solid chain only.
     }
 }
@@ -3189,9 +3184,9 @@ void EcstasyFrame::RenderPolygon3D(const frontend::FlailerPoly& polygon,
     Require(localToWorld && view.target && view.target->enabled &&
         view.target->width>0 && view.target->height>0 && texture->pixels.Data(),
         "World polygon lacks its actual target, matrix or loaded texture");
-    auto owned=std::make_unique<frontend::FlailerPoly>(polygon);
+    auto* owned=TakeWorldPolygon(polygon);
     EcstasyDrawCommand command;command.zWriteEnabled=zWriteEnabled_;
-    command.kind=EcstasyDrawKind::WorldPolygon;command.polygon=owned.get();
+    command.kind=EcstasyDrawKind::WorldPolygon;command.polygon=owned;
     command.textureQScale=view.pixelScale;
     command.clipToScreen=&CaptureMaterialProjection(*texture,CaptureProjection(view));
     command.texture=texture;command.view=&view;command.target=view.target;
@@ -3204,10 +3199,15 @@ void EcstasyFrame::RenderPolygon3D(const frontend::FlailerPoly& polygon,
         float depth[4];eMulVector3(depth,view.matrices.worldToView,polygon.vertices[0].position.data());
         command.sortDepth=depth[2];
     }
-    worldPolygons_.push_back(std::move(owned));
-    try {commands_.push_back(command);}catch (...) {worldPolygons_.pop_back();throw;}
+    try {commands_.push_back(command);}catch (...) {--liveWorldPolygons_;throw;}
 }
 
+frontend::FlailerPoly* EcstasyFrame::TakeWorldPolygon(const frontend::FlailerPoly& polygon)
+{
+    if(liveWorldPolygons_==worldPolygons_.size())worldPolygons_.push_back(std::make_unique<frontend::FlailerPoly>());
+    auto* owned=worldPolygons_[liveWorldPolygons_].get();*owned=polygon;++liveWorldPolygons_;
+    return owned;
+}
 std::vector<frontend::FlailerPolyVertex>* EcstasyFrame::TakeWorldStrip(
     const frontend::FlailerPolyVertex* vertices,std::size_t count)
 {
@@ -4896,7 +4896,7 @@ void EcstasyFrame::BeginNextFrame()
     Require(phase_==Phase::Complete,"Only a completed graphics frame can be reused");
     Require(commands_.empty() && pendingAlphaIndices_.empty() && order_.empty() &&
         visibleScratch_.empty() && modelStripScratch_.empty() && modelTextureScratch_.empty() && depthTransfers_.empty() &&
-        retainedStrips_.empty() && worldPolygons_.empty() && liveWorldStrips_==0 &&
+        retainedStrips_.empty() && liveWorldPolygons_==0 && liveWorldStrips_==0 &&
         animatedStrips_.empty() && liveParticleGroups_==0 && !textureAnimationResources_ &&
         liveInstances_==0 && liveProjections_==0 && !lastProjection_,
         "Completed graphics frame still owns a submitted borrower");
@@ -4931,7 +4931,7 @@ void EcstasyFrame::Release() noexcept
     for(auto& chunk:modelCaptureScratch_) {
         chunk.commands.clear();chunk.animatedStrips.clear();chunk.alphaGroups=0;
     }
-    worldPolygons_.clear();
+    liveWorldPolygons_=0;
     for(std::size_t index=0;index<liveParticleGroups_;++index)particleGroups_[index]->clear();
     liveParticleGroups_=0;
     liveWorldStrips_=0;

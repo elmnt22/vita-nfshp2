@@ -1175,7 +1175,10 @@ private:
     std::vector<ModelCaptureChunk> modelCaptureScratch_;
     std::vector<EcstasyDepthTransfer> depthTransfers_;
     std::vector<frontend::FlailerStrip*> retainedStrips_;
+    // Pooled like worldStrips_ (capacity survives completion).
     std::vector<std::unique_ptr<frontend::FlailerPoly>> worldPolygons_;
+    std::size_t liveWorldPolygons_{};
+    frontend::FlailerPoly* TakeWorldPolygon(const frontend::FlailerPoly& polygon);
     // Capacity only survives completion. The next frame overwrites each used
     // group before publication, and no resource borrower lives in these quads.
     std::vector<std::unique_ptr<std::vector<EcstasyParticleQuad>>> particleGroups_;
