@@ -1117,13 +1117,30 @@ private:
     std::size_t liveInstances_{},liveProjections_{};
     const EcstasyDrawProjection* lastProjection_{};
     std::uint32_t nextFeedbackGroup_{};
-    std::vector<EcstasyDrawCommand> pendingAlphaCommands_;
-    std::vector<std::uint64_t> attachPermuteScratch_; // raw command bytes (AttachSolidPolys)
-    std::vector<EcstasyDrawCommand> attachSwap_; // spare command buffer (AttachSolidPolys swap)
+    // Building: commands_ is append-only storage. The logical command
+    // sequence is order_ (store indices) followed by the unflushed tail
+    // commands_[orderTail_..]. Solid/alpha ordering permutes 4-byte indices;
+    // Seal() copies each command once into the final order (Vita memory
+    // bandwidth made per-flush 168-byte moves the dominant cost).
+    std::vector<std::uint32_t> order_;
+    std::size_t orderTail_{};
+    std::vector<std::uint32_t> pendingAlphaIndices_;
+    std::vector<std::uint32_t> orderScratch_;
+    std::vector<EcstasyDrawCommand> attachSwap_; // materialization buffer (Seal swap)
+    void SyncOrder();
+    void MarkCommandBoundary();
+    void MaterializeOrder();
+#if !defined(__vita__) && !defined(__SWITCH__)
+    std::vector<EcstasyDrawCommand> LogicalCommands() const;
+    std::vector<EcstasyDrawCommand> PendingAlphaValues() const;
+#endif
+    // AttachSolidPolys chain lookup, generation-tagged (no per-flush clear).
+    struct AttachChainSlot {const TextureInfo* texture{};const EcstasyRenderTarget* sampled{};std::size_t chain{};std::uint32_t generation{};};
+    std::array<AttachChainSlot,1024> attachChainTable_{};
+    std::uint32_t attachChainGeneration_{};
     std::vector<const EditorMarkerSolidGeometry::Strip*> sceneryRunStrips_;
     // Native temporary capacity only. Neither scratch list survives a call
     // with live elements, so it cannot retain a track/texture borrower.
-    std::vector<EcstasyDrawCommand> orderingScratch_;
     std::vector<EcstasyVisibleStrip> visibleScratch_;
     std::vector<ModelStripSource> modelStripScratch_;
     std::vector<const TextureInfo*> modelTextureScratch_;

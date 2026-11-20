@@ -1332,17 +1332,23 @@ int32_t ecstasyClassifyBounds(const float minimum[3],const float maximum[3],cons
     const float32x4_t corners[4]={base,vaddq_f32(base,xStep),
         vaddq_f32(vaddq_f32(base,xStep),yStep),vaddq_f32(base,yStep)};
     static const uint32x4_t positiveBits={1u,4u,16u,0u},negativeBits={2u,8u,32u,0u};
-    std::uint32_t any=0,common=63;
+    // All eight corners stay in NEON registers: per-corner NEON->ARM lane
+    // moves stall the Cortex-A9 pipeline. 'any' only gains bits and
+    // 'common' only loses them, so the source early exit (any && !common)
+    // cannot change the final classification; reduce once at the end.
+    uint32x4_t anyBits=vdupq_n_u32(0),commonBits=vdupq_n_u32(63u);
     for(int layer=0;layer<2;++layer)for(int corner=0;corner<4;++corner) {
         const auto point=layer ? vaddq_f32(corners[corner],zStep):corners[corner];
-        const auto limit=vdupq_n_f32(std::fabs(vgetq_lane_f32(point,3)));
+        const auto limit=vabsq_f32(vdupq_lane_f32(vget_high_f32(point),1));
         const auto bits=vorrq_u32(vandq_u32(vcgtq_f32(point,limit),positiveBits),
             vandq_u32(vcltq_f32(point,vnegq_f32(limit)),negativeBits));
-        const auto pair=vorr_u32(vget_low_u32(bits),vget_high_u32(bits));
-        const auto flags=vget_lane_u32(pair,0)|vget_lane_u32(pair,1);
-        any|=flags;common&=flags;
-        if(any && !common)return 1;
+        // Fold the three component lanes into every lane of 'flags'.
+        const auto lanes=vorr_u32(vget_low_u32(bits),vget_high_u32(bits));
+        const auto folded=vorr_u32(lanes,vrev64_u32(lanes));
+        const auto flags=vcombine_u32(folded,folded);
+        anyBits=vorrq_u32(anyBits,flags);commonBits=vandq_u32(commonBits,flags);
     }
+    const std::uint32_t any=vgetq_lane_u32(anyBits,0),common=vgetq_lane_u32(commonBits,0);
     return any==0 ? 2:common==0 ? 1:0;
 #else
     float base[4],xStep[4],yStep[4],zStep[4];
@@ -1427,7 +1433,7 @@ void classifyStrips(std::vector<EcstasyVisibleStrip>& output,const EditorMarkerM
     // The final loop never assigns its previous-class register after
     // resetting it to-1. Preserve every original one-strip run and its
     // index order; only the independent bound/cone calculations run apart.
-    if(strips.size()<512 || hp2::NativeSceneEffectiveHardwareConcurrency()<2) {
+    if(strips.size()<512 || hp2::NativeSceneEffectiveHardwareConcurrency()<2 || hp2::ecstasySceneJobsSerial) {
         for(std::size_t index=0;index<strips.size();++index) {
             const auto classification=classify(index);
             if(classification)output.push_back({index,1,classification});
@@ -2154,7 +2160,7 @@ void EcstasyFrame::AddPolygon(const frontend::FlailerPoly& polygon,
 
 // Diagnostic: solid flush cost (logged with render.capture_detail).
 double ecstasyAttachSolidMs=0;
-std::array<double,4> ecstasyAttachSolidPartMs{};
+std::array<double,5> ecstasyAttachSolidPartMs{};
 std::uint64_t ecstasyAttachSolidCalls=0,ecstasyAttachSolidCommands=0;
 #if !defined(__vita__)
 namespace {
@@ -2344,10 +2350,59 @@ const bool verifyAttachSolid=[] {const char* value=std::getenv("HP2_VERIFY_ATTAC
 std::uint64_t verifyAttachCalls=0,verifyAttachMismatches=0;
 }
 #endif
+void EcstasyFrame::SyncOrder()
+{
+    Require(commands_.size()<=UINT32_MAX,"Native command store exceeds 32-bit indices");
+    for(auto index=orderTail_;index<commands_.size();++index)order_.push_back(static_cast<std::uint32_t>(index));
+    orderTail_=commands_.size();
+}
+void EcstasyFrame::MarkCommandBoundary()
+{
+    SyncOrder();pendingAlphaBegin_=order_.size();
+}
+void EcstasyFrame::MaterializeOrder()
+{
+    SyncOrder();
+    Require(pendingAlphaIndices_.empty() && order_.size()==commands_.size(),"Sealed native command order lost a command");
+    bool identity=true;
+    for(std::size_t index=0;identity && index<order_.size();++index)identity=order_[index]==index;
+    if(!identity) {
+        attachSwap_.clear();attachSwap_.reserve(commands_.capacity());
+        const auto count=order_.size();
+        for(std::size_t index=0;index<count;++index) {
+#if defined(__GNUC__)
+            // Main RAM is latency bound on Vita: request upcoming sources.
+            if(index+4<count) {
+                const auto* ahead=reinterpret_cast<const char*>(&commands_[order_[index+4]]);
+                for(std::size_t line=0;line<sizeof(EcstasyDrawCommand);line+=32)__builtin_prefetch(ahead+line);
+            }
+#endif
+            attachSwap_.push_back(commands_[order_[index]]);
+        }
+        commands_.swap(attachSwap_);attachSwap_.clear();
+    }
+    order_.clear();orderTail_=commands_.size();
+}
+#if !defined(__vita__) && !defined(__SWITCH__)
+std::vector<EcstasyDrawCommand> EcstasyFrame::LogicalCommands() const
+{
+    std::vector<EcstasyDrawCommand> result;result.reserve(order_.size()+commands_.size()-orderTail_);
+    for(const auto index:order_)result.push_back(commands_[index]);
+    for(auto index=orderTail_;index<commands_.size();++index)result.push_back(commands_[index]);
+    return result;
+}
+std::vector<EcstasyDrawCommand> EcstasyFrame::PendingAlphaValues() const
+{
+    std::vector<EcstasyDrawCommand> result;result.reserve(pendingAlphaIndices_.size());
+    for(const auto index:pendingAlphaIndices_)result.push_back(commands_[index]);
+    return result;
+}
+#endif
+
 void EcstasyFrame::AttachSolidPolys()
 {
     const auto attachStarted=std::chrono::steady_clock::now();
-    ++ecstasyAttachSolidCalls;ecstasyAttachSolidCommands+=commands_.size()-pendingAlphaBegin_;
+    ++ecstasyAttachSolidCalls;ecstasyAttachSolidCommands+=order_.size()+(commands_.size()-orderTail_)-pendingAlphaBegin_;
     struct AttachTimer {
         std::chrono::steady_clock::time_point start;
         ~AttachTimer() {ecstasyAttachSolidMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();}
@@ -2369,9 +2424,11 @@ void EcstasyFrame::AttachSolidPolys()
         }
         return result;
     };
+    SyncOrder();
     if(verifyAttachSolid) {
-        verifyCommands=expand(commands_,commands_.size());verifyAlpha=pendingAlphaCommands_;
-        verifyBegin=expand(commands_,pendingAlphaBegin_).size();
+        const auto logical=LogicalCommands();
+        verifyCommands=expand(logical,logical.size());verifyAlpha=PendingAlphaValues();
+        verifyBegin=expand(logical,pendingAlphaBegin_).size();
     }
     struct VerifyAttach {
         EcstasyFrame* frame;std::vector<EcstasyDrawCommand>* commands;std::vector<EcstasyDrawCommand>* alpha;std::size_t* begin;
@@ -2379,13 +2436,14 @@ void EcstasyFrame::AttachSolidPolys()
         ~VerifyAttach() {
             if(!verifyAttachSolid)return;
             ReferenceAttachSolidPolys(*commands,*begin,*alpha);
-            const auto actual=(*expandCommands)(frame->commands_,frame->commands_.size());
-            const auto actualBegin=(*expandCommands)(frame->commands_,frame->pendingAlphaBegin_).size();
+            const auto logical=frame->LogicalCommands();
+            const auto actual=(*expandCommands)(logical,logical.size());
+            const auto actualBegin=(*expandCommands)(logical,frame->pendingAlphaBegin_).size();
             ++verifyAttachCalls;
             const auto same=[](const std::vector<EcstasyDrawCommand>& a,const std::vector<EcstasyDrawCommand>& b) {
                 return a.size()==b.size() && (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(EcstasyDrawCommand))==0);
             };
-            if(*begin!=actualBegin || !same(*commands,actual) || !same(*alpha,frame->pendingAlphaCommands_))
+            if(*begin!=actualBegin || !same(*commands,actual) || !same(*alpha,frame->PendingAlphaValues()))
                 ++verifyAttachMismatches;
             if((verifyAttachCalls&4095u)==0 || verifyAttachMismatches==1) {
                 char text[96];std::snprintf(text,sizeof(text),"calls=%llu mismatches=%llu",
@@ -2394,6 +2452,8 @@ void EcstasyFrame::AttachSolidPolys()
             }
         }
     } verifyAttach{this,&verifyCommands,&verifyAlpha,&verifyBegin,&expand};
+#else
+    SyncOrder();
 #endif
     // PAL10BB20 walks only the solid texture chains. The alpha arena/list
     // survives this call, including the two display calls1134A4/1135B8
@@ -2401,13 +2461,15 @@ void EcstasyFrame::AttachSolidPolys()
     // Alpha commands leave in their original order. Solid commands stay at
     // their source slots until the single ordered permutation below, so
     // each is moved once (previously compacted here, then permuted).
-    const auto rangeBegin=pendingAlphaBegin_,rangeEnd=commands_.size();
+    // Positions below are logical (order_) positions; order_ holds the
+    // store index of each command.
+    const auto rangeBegin=pendingAlphaBegin_,rangeEnd=order_.size();
     std::size_t alphaCount=0;
-    for(auto index=rangeBegin;index<rangeEnd;++index)alphaCount+=commands_[index].depthSorted ? 1u:0u;
+    for(auto index=rangeBegin;index<rangeEnd;++index)alphaCount+=commands_[order_[index]].depthSorted ? 1u:0u;
     if(alphaCount) {
-        pendingAlphaCommands_.reserve(pendingAlphaCommands_.size()+alphaCount);
+        pendingAlphaIndices_.reserve(pendingAlphaIndices_.size()+alphaCount);
         for(auto index=rangeBegin;index<rangeEnd;++index)
-            if(commands_[index].depthSorted)pendingAlphaCommands_.push_back(std::move(commands_[index]));
+            if(commands_[order_[index]].depthSorted)pendingAlphaIndices_.push_back(order_[index]);
     }
     const auto output=rangeEnd-alphaCount;
     auto partMark=attachStarted;
@@ -2417,7 +2479,7 @@ void EcstasyFrame::AttachSolidPolys()
         partMark=now;
     };
     part(0);
-    if(output==pendingAlphaBegin_) {commands_.resize(output);return;}
+    if(output==pendingAlphaBegin_) {order_.resize(output);return;}
     // AddTexturesSorted PAL109358..109488 groups the first-use texture
     // list into priorities0..7. Linked textures insert immediately after
     // their parent's first anchor when both priorities match; later siblings
@@ -2448,9 +2510,10 @@ void EcstasyFrame::AttachSolidPolys()
     std::pmr::vector<TextureChain> chains{&scratch};
     std::pmr::map<std::pair<const TextureInfo*,const EcstasyRenderTarget*>,std::size_t> active{&scratch};
     // Generation-tagged so the table needs no clearing per flush.
-    struct ChainSlot {const TextureInfo* texture{};const EcstasyRenderTarget* sampled{};std::size_t chain{};std::uint32_t generation{};};
-    static thread_local std::array<ChainSlot,1024> chainTable{};
-    static thread_local std::uint32_t chainGeneration=0;
+    // Frame-owned (one capturing thread): Vita thread_local is emulated
+    // TLS, a library call per access.
+    auto& chainTable=attachChainTable_;
+    auto& chainGeneration=attachChainGeneration_;
     if(++chainGeneration==0) {for(auto& slot:chainTable)slot.generation=0;chainGeneration=1;}
     const auto generation=chainGeneration;
     std::size_t chainTableUsed=0;
@@ -2461,7 +2524,7 @@ void EcstasyFrame::AttachSolidPolys()
     const EcstasyRenderTarget* previousSampled=nullptr;
     std::size_t previousChain=noCommand;
     for(auto index=rangeBegin;index<rangeEnd;++index) {
-        const auto& command=commands_[index];
+        const auto& command=commands_[order_[index]];
         if(alphaCount && command.depthSorted)continue;
         const auto* texture=command.orderingTexture ? command.orderingTexture:command.texture;
         const auto* sampled=texture ? nullptr:command.sampledTarget;
@@ -2561,61 +2624,14 @@ void EcstasyFrame::AttachSolidPolys()
                 order.push_back(index-rangeBegin);
     }
     Require(order.size()==output-rangeBegin,"Native solid command order lost a source command");
-    if(alphaCount)
-        for(auto index=rangeBegin;index<rangeEnd;++index)
-            if(commands_[index].depthSorted)order.push_back(index-rangeBegin);
-    static_assert(std::is_nothrow_move_constructible<EcstasyDrawCommand>::value &&
-        std::is_nothrow_move_assignable<EcstasyDrawCommand>::value,
-        "In-place native command ordering requires nonthrowing value moves");
-    if constexpr(std::is_trivially_copyable<EcstasyDrawCommand>::value) {
-        // Out of place: one sequential copy, then independent reads with
-        // sequential writes. The in-place cycle walk was a dependent chain of
-        // random 152-byte moves (~2 ms/frame on Vita). Same final order.
-        std::size_t first=0;
-        while(first<order.size() && order[first]==first)++first;
-        if(first<order.size() && rangeBegin+first<order.size()-first) {
-            // Small prefix: write prefix + permuted range into the spare
-            // buffer and swap (one copy of the range instead of two).
-            const auto keep=rangeBegin+first;
-            attachSwap_.resize(rangeBegin+order.size());
-            std::memcpy(static_cast<void*>(attachSwap_.data()),commands_.data(),keep*sizeof(EcstasyDrawCommand));
-            const auto* source=&commands_[rangeBegin];
-            auto* destination=&attachSwap_[rangeBegin];
-            for(std::size_t index=first;index<order.size();++index)
-                std::memcpy(static_cast<void*>(destination+index),static_cast<const void*>(source+order[index]),
-                    sizeof(EcstasyDrawCommand));
-            if(attachSwap_.capacity()<commands_.capacity())attachSwap_.reserve(commands_.capacity());
-            commands_.swap(attachSwap_);
-        } else if(first<order.size()) {
-            const auto count=order.size()-first;
-            const auto words=(count*sizeof(EcstasyDrawCommand)+sizeof(std::uint64_t)-1)/sizeof(std::uint64_t);
-            if(attachPermuteScratch_.size()<words)attachPermuteScratch_.resize(words);
-            std::memcpy(static_cast<void*>(attachPermuteScratch_.data()),&commands_[rangeBegin+first],count*sizeof(EcstasyDrawCommand));
-            auto* destination=&commands_[rangeBegin];
-            const auto* source=reinterpret_cast<const EcstasyDrawCommand*>(attachPermuteScratch_.data());
-            for(std::size_t index=first;index<order.size();++index) {
-                const auto from=order[index];
-                // Every source before 'first' is already in place.
-                std::memcpy(static_cast<void*>(destination+index),
-                    from>=first ? static_cast<const void*>(source+(from-first)):static_cast<const void*>(destination+from),
-                    sizeof(EcstasyDrawCommand));
-            }
-        }
-    } else
-    for(std::size_t start=0;start<order.size();++start) {
-        if(order[start]==start)continue;
-        auto saved=std::move(commands_[rangeBegin+start]);
-        auto destination=start;
-        while(order[destination]!=start) {
-            const auto source=order[destination];
-            commands_[rangeBegin+destination]=std::move(commands_[rangeBegin+source]);
-            order[destination]=destination;destination=source;
-        }
-        commands_[rangeBegin+destination]=std::move(saved);
-        order[destination]=destination;
-    }
-    commands_.resize(output);
     part(3);
+    // Permute store indices only; no command moves until Seal().
+    auto& indices=orderScratch_;
+    indices.resize(order.size());
+    for(std::size_t index=0;index<order.size();++index)indices[index]=order_[rangeBegin+order[index]];
+    std::copy(indices.begin(),indices.end(),order_.begin()+static_cast<std::ptrdiff_t>(rangeBegin));
+    order_.resize(output);
+    part(4);
     pendingAlphaBegin_=output;
 }
 
@@ -2665,6 +2681,40 @@ void EcstasyFrame::TransferZBufferRect(std::shared_ptr<SunDepthSamples> destinat
     depthTransfers_.push_back(request);
 }
 
+#if !defined(__vita__) && !defined(__SWITCH__)
+// PC HP2_VERIFY_ALPHA=1 reference: the previous value-moving alpha ordering.
+static void ReferenceAlphaSort(std::vector<EcstasyDrawCommand>& commands,std::size_t begin)
+{
+    struct Packet {std::size_t begin{},end{};std::int32_t target{};std::uint32_t priority{},key{},bits{};};
+    std::vector<Packet> alpha;
+    for(auto index=begin;index<commands.size();++index) {
+        const auto& command=commands[index];
+        if(!command.depthSorted)continue;
+        const auto* texture=command.orderingTexture ? command.orderingTexture:command.texture;
+        Packet packet;packet.begin=index;packet.end=index+1;packet.target=command.target->id;
+        const auto priority=texture->descriptor->authoredRecord[0x29];
+        packet.priority=priority<8 ? priority:7;
+        std::memcpy(&packet.bits,&command.sortDepth,sizeof(packet.bits));
+        packet.key=(packet.bits&0x80000000u) ? ~packet.bits:packet.bits^0x80000000u;
+        if(command.alphaGroup) {
+            while(packet.end<commands.size() && commands[packet.end].alphaGroup==command.alphaGroup)++packet.end;
+            index=packet.end-1;
+        }
+        alpha.push_back(packet);
+    }
+    if(alpha.empty())return;
+    std::sort(alpha.begin(),alpha.end(),[](const Packet& a,const Packet& b) {
+        if(a.target!=b.target)return a.target<b.target;
+        if(a.priority!=b.priority)return a.priority<b.priority;
+        if(a.key!=b.key)return a.key>b.key;
+        return (a.bits&0x80000000u) ? a.begin<b.begin:a.begin>b.begin;
+    });
+    std::vector<EcstasyDrawCommand> ordered;
+    for(auto index=begin;index<commands.size();++index)if(!commands[index].depthSorted)ordered.push_back(commands[index]);
+    for(const auto& packet:alpha)for(auto index=packet.begin;index<packet.end;++index)ordered.push_back(commands[index]);
+    std::copy(ordered.begin(),ordered.end(),commands.begin()+static_cast<std::ptrdiff_t>(begin));
+}
+#endif
 void EcstasyFrame::AttachAlphaPolys()
 {
     Require(phase_==Phase::Building,"Cannot attach alpha lists in a sealed graphics frame");
@@ -2675,12 +2725,32 @@ void EcstasyFrame::AttachAlphaPolys()
     // Earlier solid-only boundaries may have retained alpha packets. Insert
     // them before newer pending packets to preserve source insertion order,
     // including equal-key and grouped material-pass tie behavior below.
-    if(!pendingAlphaCommands_.empty()) {
-        commands_.insert(commands_.begin()+static_cast<std::ptrdiff_t>(pendingAlphaBegin_),
-            std::make_move_iterator(pendingAlphaCommands_.begin()),
-            std::make_move_iterator(pendingAlphaCommands_.end()));
-        pendingAlphaCommands_.clear();
+    SyncOrder();
+    if(!pendingAlphaIndices_.empty()) {
+        order_.insert(order_.begin()+static_cast<std::ptrdiff_t>(pendingAlphaBegin_),
+            pendingAlphaIndices_.begin(),pendingAlphaIndices_.end());
+        pendingAlphaIndices_.clear();
     }
+#if !defined(__vita__) && !defined(__SWITCH__)
+    static const bool verifyAlpha=[] {const char* value=std::getenv("HP2_VERIFY_ALPHA");return value && *value=='1';}();
+    std::vector<EcstasyDrawCommand> referenceAlpha;
+    if(verifyAlpha) {referenceAlpha=LogicalCommands();ReferenceAlphaSort(referenceAlpha,pendingAlphaBegin_);}
+    struct VerifyAlpha {
+        EcstasyFrame* frame;std::vector<EcstasyDrawCommand>* reference;
+        ~VerifyAlpha() {
+            if(!verifyAlpha)return;
+            static std::uint64_t checks=0,mismatches=0;
+            const auto actual=frame->LogicalCommands();++checks;
+            if(actual.size()!=reference->size() || (!actual.empty() &&
+                std::memcmp(actual.data(),reference->data(),actual.size()*sizeof(EcstasyDrawCommand))!=0))++mismatches;
+            if((checks&1023u)==0 || mismatches==1) {
+                char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
+                    static_cast<unsigned long long>(checks),static_cast<unsigned long long>(mismatches));
+                platform::RecordSessionEvent("render.alpha_verify",text);
+            }
+        }
+    } verifyAlphaGuard{this,&referenceAlpha};
+#endif
     // PAL10B838 flushes one list per target after the solid lists. Its
     // SortAlphaKeys1055B0/RadixSortAlphaKeys1051D8 use integer float keys:
     // priority0..7, then far-to-near; the final reverse walk reverses equal
@@ -2695,9 +2765,9 @@ void EcstasyFrame::AttachAlphaPolys()
     std::array<std::byte,16384> localStorage;
     std::pmr::monotonic_buffer_resource scratch(localStorage.data(),localStorage.size());
     std::pmr::vector<Packet> alpha{&scratch};
-    alpha.reserve(commands_.size()-pendingAlphaBegin_);
-    for(auto index=pendingAlphaBegin_;index<commands_.size();++index) {
-        const auto& command=commands_[index];
+    alpha.reserve(order_.size()-pendingAlphaBegin_);
+    for(auto index=pendingAlphaBegin_;index<order_.size();++index) {
+        const auto& command=commands_[order_[index]];
         if(!command.depthSorted)continue;
         const auto* texture=command.orderingTexture ? command.orderingTexture:command.texture;
         Require(texture && texture->descriptor && command.target &&
@@ -2709,8 +2779,8 @@ void EcstasyFrame::AttachAlphaPolys()
         std::memcpy(&packet.bits,&command.sortDepth,sizeof(packet.bits));
         packet.key=(packet.bits&0x80000000u) ? ~packet.bits:packet.bits^0x80000000u;
         if(command.alphaGroup) {
-            while(packet.end<commands_.size() && commands_[packet.end].alphaGroup==command.alphaGroup) {
-                const auto& member=commands_[packet.end];
+            while(packet.end<order_.size() && commands_[order_[packet.end]].alphaGroup==command.alphaGroup) {
+                const auto& member=commands_[order_[packet.end]];
                 const auto* memberTexture=member.orderingTexture ? member.orderingTexture:member.texture;
                 Require(member.depthSorted && memberTexture==texture && member.target==command.target,
                     "Alpha group no longer represents one original direct packet");
@@ -2727,18 +2797,17 @@ void EcstasyFrame::AttachAlphaPolys()
             if(a.key!=b.key)return a.key>b.key;
             return (a.bits&0x80000000u) ? a.begin<b.begin:a.begin>b.begin;
         });
-        auto& ordered=orderingScratch_;
-        struct ClearScratch {std::vector<EcstasyDrawCommand>& value;~ClearScratch(){value.clear();}} clear{ordered};
+        auto& ordered=orderScratch_;
         ordered.clear();
-        ordered.reserve(commands_.size()-pendingAlphaBegin_);
-        for(auto index=pendingAlphaBegin_;index<commands_.size();++index)
-            if(!commands_[index].depthSorted)ordered.push_back(std::move(commands_[index]));
+        ordered.reserve(order_.size()-pendingAlphaBegin_);
+        for(auto index=pendingAlphaBegin_;index<order_.size();++index)
+            if(!commands_[order_[index]].depthSorted)ordered.push_back(order_[index]);
         for(const auto& packet:alpha)
             for(auto index=packet.begin;index<packet.end;++index)
-                ordered.push_back(std::move(commands_[index]));
-        std::move(ordered.begin(),ordered.end(),commands_.begin()+static_cast<std::ptrdiff_t>(pendingAlphaBegin_));
+                ordered.push_back(order_[index]);
+        std::copy(ordered.begin(),ordered.end(),order_.begin()+static_cast<std::ptrdiff_t>(pendingAlphaBegin_));
     }
-    pendingAlphaBegin_=commands_.size();
+    pendingAlphaBegin_=order_.size();
 }
 
 void EcstasyFrame::OverlayRVMImages(const CarCinematicServices& views,ResourceRegistry& resources)
@@ -2985,7 +3054,7 @@ void EcstasyFrame::DisplayFilter(const CarCinematicServices& views,ResourceRegis
         command.screenFilter=filter;command.feedbackGroup=group;command.zWriteEnabled=false;
         commands_.push_back(command);
     }
-    pendingAlphaBegin_=commands_.size();
+    MarkCommandBoundary();
 }
 
 void EcstasyFrame::DisplayRadialBlur(const CarCinematicServices& views)
@@ -3464,7 +3533,12 @@ int ecstasyParallelSceneryEmit=[] {
     return 1;
 }();
 std::array<double,8> ecstasyWorldSplitMs{},ecstasyDiscardWorldSplitMs{};
+#if defined(__vita__) || defined(__SWITCH__)
 int ecstasySceneJobsSerial=0; // Vita default 1 (main.cpp)
+#else
+// PC HP2_SCENE_JOBS_SERIAL=1 exercises the Vita serial paths.
+int ecstasySceneJobsSerial=[] {const char* value=std::getenv("HP2_SCENE_JOBS_SERIAL");return value && *value=='1' ? 1:0;}();
+#endif
 int ecstasyParallelSceneryPrepare=1;
 int ecstasySceneryFastMerge=1; // run union-box cull + template merge (Vita fastmerge_off.txt)
 // Solid strip template: a solid command equal to an earlier one of this
@@ -3810,7 +3884,9 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         count>=static_cast<std::size_t>(ecstasyParallelSkinStrips);
     const std::size_t stripsPerChunk=boneMatrices ? 8:64;
     const bool parallel=(skinParallel || count>=static_cast<std::size_t>(ecstasyParallelModelStrips)) &&
-        NativeSceneEffectiveHardwareConcurrency()>1;
+        NativeSceneEffectiveHardwareConcurrency()>1 &&
+        // Serial jobs (Vita default): chunk capture is only extra copies.
+        !ecstasySceneJobsSerial;
     auto& preposed=preposedScratch_;
     if(parallel) {
         // LookupDescriptor can rebuild a lazy resource index. Resolve every
@@ -4374,13 +4450,13 @@ void EcstasyFrame::MarkSceneHistoryBoundary(const EcstasyRenderTarget& display,b
     AttachAlphaPolys();
     EcstasyDrawCommand command;command.kind=source ? EcstasyDrawKind::SceneHistorySource:EcstasyDrawKind::SceneHistoryBoundary;
     command.target=&display;commands_.push_back(command);
-    pendingAlphaBegin_=commands_.size();
+    MarkCommandBoundary();
 }
 
 void EcstasyFrame::Seal()
 {
     Require(phase_==Phase::Building,"Graphics frame was already sealed");
-    AttachAlphaPolys();phase_=Phase::Ready;
+    AttachAlphaPolys();MaterializeOrder();phase_=Phase::Ready;
 }
 void EcstasyFrame::MarkSubmitted()
 {
@@ -4403,7 +4479,7 @@ void EcstasyFrame::CancelBeforeSubmit()
 void EcstasyFrame::BeginNextFrame()
 {
     Require(phase_==Phase::Complete,"Only a completed graphics frame can be reused");
-    Require(commands_.empty() && pendingAlphaCommands_.empty() && orderingScratch_.empty() &&
+    Require(commands_.empty() && pendingAlphaIndices_.empty() && order_.empty() &&
         visibleScratch_.empty() && modelStripScratch_.empty() && modelTextureScratch_.empty() && depthTransfers_.empty() &&
         retainedStrips_.empty() && worldPolygons_.empty() && worldStrips_.empty() &&
         animatedStrips_.empty() && liveParticleGroups_==0 && !textureAnimationResources_ &&
@@ -4435,7 +4511,7 @@ void EcstasyFrame::ReturnPosedStrip(std::unique_ptr<EditorMarkerSolidGeometry::S
 void EcstasyFrame::Release() noexcept
 {
     textureAnimationResources_=nullptr;environmentCameraFaces_=0;
-    commands_.clear();sceneryRunStrips_.clear();pendingAlphaCommands_.clear();orderingScratch_.clear();visibleScratch_.clear();depthTransfers_.clear();
+    commands_.clear();sceneryRunStrips_.clear();pendingAlphaIndices_.clear();order_.clear();orderTail_=0;orderScratch_.clear();attachSwap_.clear();visibleScratch_.clear();depthTransfers_.clear();
     modelStripScratch_.clear();modelTextureScratch_.clear();
     for(auto& chunk:modelCaptureScratch_) {
         chunk.commands.clear();chunk.animatedStrips.clear();chunk.alphaGroups=0;
