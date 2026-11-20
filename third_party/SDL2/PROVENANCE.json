@@ -1,0 +1,474 @@
+{
+  "library": "SDL2",
+  "version": "2.32.10",
+  "source": "https://www.libsdl.org/release/SDL2-devel-2.32.10-VC.zip",
+  "archive_sha256": "af347939395a58b365846aaea27391e69f9ec9d4dd650d6ac40802159b418a6e",
+  "files_unmodified": true,
+  "files": [
+    {
+      "path": "LICENSE.txt",
+      "bytes": 884,
+      "sha256": "97f35b302b361680ec1e891e95d2d52097bb95abff361434916d99dc1305f127"
+    },
+    {
+      "path": "include/begin_code.h",
+      "bytes": 5664,
+      "sha256": "9803dab29fb4522ce3500ab789260e9622df6307ce90f92ad20c1808e19c4e7b"
+    },
+    {
+      "path": "include/close_code.h",
+      "bytes": 1486,
+      "sha256": "4599e9cedba7451ff07a6306f0b7531beed05b1c5a65b1a2613d1b771be43fda"
+    },
+    {
+      "path": "include/SDL.h",
+      "bytes": 8111,
+      "sha256": "952e89e1dc4e0dd1a7bea6a153df632b8cdb6e433a9b3b0702c5ffe15b9b9360"
+    },
+    {
+      "path": "include/SDL_assert.h",
+      "bytes": 12808,
+      "sha256": "32fc342e0a5f3a55ea1ce2a5d9195e77215edcb6f4595c0dc3674dcca1cc81d8"
+    },
+    {
+      "path": "include/SDL_atomic.h",
+      "bytes": 14496,
+      "sha256": "c561ce8f94de18ccb4f708bda45880ba6d3c9f052e166beb5dadc5544f35221e"
+    },
+    {
+      "path": "include/SDL_audio.h",
+      "bytes": 59559,
+      "sha256": "047afc29591ac43a90f06169f67ee7d99a6256c6bbe5efe5de79a52565bb6853"
+    },
+    {
+      "path": "include/SDL_bits.h",
+      "bytes": 3405,
+      "sha256": "63d22d1c8fe0d83bba5a49aba9bb700592f14462f7f7bf87e5838064047e3fa9"
+    },
+    {
+      "path": "include/SDL_blendmode.h",
+      "bytes": 9048,
+      "sha256": "1985f81b886d9bc681821af4f23d28e6e51bf51f21e5ef28ccc13bc8c7cdfbae"
+    },
+    {
+      "path": "include/SDL_clipboard.h",
+      "bytes": 4307,
+      "sha256": "3e8c73fb9b3ca5a544b70b66b683b78db53e1a187e066912a068c0ed7bb3e8ce"
+    },
+    {
+      "path": "include/SDL_config.h",
+      "bytes": 1971,
+      "sha256": "58fae866960dd4b2591ef3b0ae516fcca7cb6c9dcd9cd16c2c47f767b6c88dd7"
+    },
+    {
+      "path": "include/SDL_config_android.h",
+      "bytes": 4930,
+      "sha256": "f8671288ff74ec2cf7a61fa4d897e5e24134f3ae7751268c04a64f8506480484"
+    },
+    {
+      "path": "include/SDL_config_emscripten.h",
+      "bytes": 5414,
+      "sha256": "9296c3e11f6c01d39045bbe4d70c55c1df91e43d449651af0d6f1ffdb202716c"
+    },
+    {
+      "path": "include/SDL_config_iphoneos.h",
+      "bytes": 5743,
+      "sha256": "e4e2402ff8b4e6c9175dc099a908ec6d5323e1c39fdbfe2846a0cf1a735d84f1"
+    },
+    {
+      "path": "include/SDL_config_macosx.h",
+      "bytes": 7198,
+      "sha256": "72d7fe03718acfb37101b1c41f07f5a720e3bf1272c1b0f82f51d9fb807bf98b"
+    },
+    {
+      "path": "include/SDL_config_minimal.h",
+      "bytes": 2932,
+      "sha256": "f085d153c84913e126f3425f99577d7468beca8b922fb67fc17ce565cfd2cd7f"
+    },
+    {
+      "path": "include/SDL_config_ngage.h",
+      "bytes": 2857,
+      "sha256": "dcc3832a97069bcc83ad7ddace4ab1ca1afaefa8d048a3bad901d908f4131908"
+    },
+    {
+      "path": "include/SDL_config_os2.h",
+      "bytes": 5055,
+      "sha256": "d2e6e2840dfb114233986f467e3b8aea1b786d4a140e8748e4ba7b0d2c278a31"
+    },
+    {
+      "path": "include/SDL_config_pandora.h",
+      "bytes": 3527,
+      "sha256": "759a9794ba650ae3d64d0444b3b587fcc18bc94270f0f2c84fcd228ec003f70b"
+    },
+    {
+      "path": "include/SDL_config_windows.h",
+      "bytes": 8910,
+      "sha256": "71b3e9c5e56f0e2f4f70fb65210676bf6a757adddc40dda7181f199aa4be7b31"
+    },
+    {
+      "path": "include/SDL_config_wingdk.h",
+      "bytes": 6636,
+      "sha256": "570a40d525eadaca0a46e1b0fe35e740617b81d73826d4315ac75db5a8a7fbe5"
+    },
+    {
+      "path": "include/SDL_config_winrt.h",
+      "bytes": 5516,
+      "sha256": "3e09bb53551a0ec9650f11903708f1e28059d3383f60327867d317177884e30b"
+    },
+    {
+      "path": "include/SDL_config_xbox.h",
+      "bytes": 6416,
+      "sha256": "5a84683243e05257ca63fdc3067d3b1b1ddfeda7077b606d950d7622d3d625a1"
+    },
+    {
+      "path": "include/SDL_copying.h",
+      "bytes": 939,
+      "sha256": "3f90be470c18f99f4aef39444e9374edba166cfeb1b90f99f35286cc33924642"
+    },
+    {
+      "path": "include/SDL_cpuinfo.h",
+      "bytes": 17785,
+      "sha256": "fee0c489ed4364c21fe0b726a47f72df167fbcbf42cf569807b2bbf77dc30c54"
+    },
+    {
+      "path": "include/SDL_egl.h",
+      "bytes": 108847,
+      "sha256": "72c119f4f7ec30f13b03d3e33d2266cb012ee103f0ad1973786d84d538a0b53d"
+    },
+    {
+      "path": "include/SDL_endian.h",
+      "bytes": 10896,
+      "sha256": "7907cb3ab7b8d7bc99274f5aef5294bef215b01ea49d97226cbe6e911de557d5"
+    },
+    {
+      "path": "include/SDL_error.h",
+      "bytes": 5177,
+      "sha256": "0931656a5825e5f1f319f2cd3f573fc527393bb02fa7a1ed3f7fae6c790328be"
+    },
+    {
+      "path": "include/SDL_events.h",
+      "bytes": 48349,
+      "sha256": "ceb7bc717342e652e2c432fd1dd08a5508575cea6bd8615fb4ddea63c071ddc4"
+    },
+    {
+      "path": "include/SDL_filesystem.h",
+      "bytes": 5526,
+      "sha256": "dcfaa010c73150e7b0d56f50f5adb3fc2e35621091a55bc5436b2fb85fe71675"
+    },
+    {
+      "path": "include/SDL_gamecontroller.h",
+      "bytes": 41726,
+      "sha256": "c77c1d8287ee441843b9d8be87b71252bdb1ce76b7bfc4fcff46889ad8e9cfec"
+    },
+    {
+      "path": "include/SDL_gesture.h",
+      "bytes": 3420,
+      "sha256": "a5a8f8bb8efb26860faa9694189aaf76df1cdb7755ccd30a8599b46b237a5d82"
+    },
+    {
+      "path": "include/SDL_guid.h",
+      "bytes": 3365,
+      "sha256": "da8fef1d047b31e55d1b167de301a806481b6948e7c2497779fd71934c45d5db"
+    },
+    {
+      "path": "include/SDL_haptic.h",
+      "bytes": 42573,
+      "sha256": "4267b6f039bea7ad0f5cb37c37d63d0704af84f73a36d2680684ff302f49f153"
+    },
+    {
+      "path": "include/SDL_hidapi.h",
+      "bytes": 16663,
+      "sha256": "489a83d1073e528f82e821c23c515af8b5a59357ec5ab132c854bb588648f59f"
+    },
+    {
+      "path": "include/SDL_hints.h",
+      "bytes": 120275,
+      "sha256": "96c1056e0734f019b1dafed5129d4a9d36253559ed8c7577a23c188bb75a48c1"
+    },
+    {
+      "path": "include/SDL_joystick.h",
+      "bytes": 39540,
+      "sha256": "a39fc5da97edc94eabff8616a413cf850efb35d1daf437a8cc16caa837766482"
+    },
+    {
+      "path": "include/SDL_keyboard.h",
+      "bytes": 11377,
+      "sha256": "f68dfa4f784f0b22949a8df94f3c3653ea01a03ae02297d17579eb9e7ea94054"
+    },
+    {
+      "path": "include/SDL_keycode.h",
+      "bytes": 15615,
+      "sha256": "291c769a05bc3e1ead011db3e07cb52415e1aa306f484904d203e94cbb3186cd"
+    },
+    {
+      "path": "include/SDL_loadso.h",
+      "bytes": 3898,
+      "sha256": "8d3653b7b774b406a289519c74ae695eb5b52d71060712a88fce4c72d82b1bd3"
+    },
+    {
+      "path": "include/SDL_locale.h",
+      "bytes": 3808,
+      "sha256": "c4a663ce8ea4ca22f961796cae644a04fc521fa2d0681333f7da8a581909560c"
+    },
+    {
+      "path": "include/SDL_log.h",
+      "bytes": 11775,
+      "sha256": "3342cb31280c2dbf0e5809b03e5499f0cf5edf193efa5e3c5b17814526a92033"
+    },
+    {
+      "path": "include/SDL_main.h",
+      "bytes": 8994,
+      "sha256": "622ffcd0e7fe0c755a987c5eb9dad6b3672774026b8250b66ad3c40d3a4dda9a"
+    },
+    {
+      "path": "include/SDL_messagebox.h",
+      "bytes": 6878,
+      "sha256": "65df549cab0a515145ae55325c447159ae1d60171331a7508eac06034d25c972"
+    },
+    {
+      "path": "include/SDL_metal.h",
+      "bytes": 3367,
+      "sha256": "1f3d0251522b735b0e37677eb1a0594440599fbbb2af86bbb508606cca001a06"
+    },
+    {
+      "path": "include/SDL_misc.h",
+      "bytes": 2834,
+      "sha256": "5d5e4b42481a5ef44ec9d66159e88426be5632262731a3c3b223277771d30006"
+    },
+    {
+      "path": "include/SDL_mouse.h",
+      "bytes": 17031,
+      "sha256": "66b5353387d011a54b232931e86121cb5551e251b9491b9ed15afe293d5856ff"
+    },
+    {
+      "path": "include/SDL_mutex.h",
+      "bytes": 16751,
+      "sha256": "c5ef9a8aeb056422ef878672770e1f60ae965933693df6d8ebd53d0e514a1794"
+    },
+    {
+      "path": "include/SDL_name.h",
+      "bytes": 1155,
+      "sha256": "fdc6c648734220285056ad8b8273511c75d5be00d17fc1ea3eb4c06526b13fa3"
+    },
+    {
+      "path": "include/SDL_opengl.h",
+      "bytes": 81038,
+      "sha256": "c4d2857e757b2b2a83d7531cbeda19c383ad6d16648ab9b7544fc0a74eb2ff13"
+    },
+    {
+      "path": "include/SDL_opengles.h",
+      "bytes": 1225,
+      "sha256": "0542791816fcdd84b74d98347ac1b00a97bc6c2cdf31334cd9083789ffb6594a"
+    },
+    {
+      "path": "include/SDL_opengles2.h",
+      "bytes": 1576,
+      "sha256": "73a3b042f7b3d296904bff91268730d5180638f4ec1836d57258fe53ee60df8b"
+    },
+    {
+      "path": "include/SDL_opengles2_gl2.h",
+      "bytes": 42938,
+      "sha256": "d6ec44b1d73f3afce3a20ac6976db7fb3dac656c5190f0b563e4ce90d79a15aa"
+    },
+    {
+      "path": "include/SDL_opengles2_gl2ext.h",
+      "bytes": 241221,
+      "sha256": "4fc5b0034dcde9c125922e3e70d01489a6b335076856ee660294e1a6305a3719"
+    },
+    {
+      "path": "include/SDL_opengles2_gl2platform.h",
+      "bytes": 646,
+      "sha256": "4779be999acd1904458238f09c86983b7960ac40e612e05db2db97db615f1e0f"
+    },
+    {
+      "path": "include/SDL_opengles2_khrplatform.h",
+      "bytes": 11131,
+      "sha256": "7b1e01aaa7ad8f6fc34b5c7bdf79ebf5189bb09e2c4d2e79fc5d350623d11e83"
+    },
+    {
+      "path": "include/SDL_opengl_glext.h",
+      "bytes": 864070,
+      "sha256": "1abb28891c9b0661b6ff3749de2671da5fe12beb5bcb1833b2d6bdf5c89ecdf8"
+    },
+    {
+      "path": "include/SDL_pixels.h",
+      "bytes": 26252,
+      "sha256": "fee61aee337a3823e832f5c26b3000315d6eb95da91ba20d4fb0b5bac9d4967a"
+    },
+    {
+      "path": "include/SDL_platform.h",
+      "bytes": 7129,
+      "sha256": "9ce62823791d7a16b9ad17ad11f4de8dcbcde7918f67bf6d1dd4fc625b69e50c"
+    },
+    {
+      "path": "include/SDL_power.h",
+      "bytes": 3238,
+      "sha256": "fbbdf3ff13b21095623edfc5659c1b76c6dbb1364a4dd14d8f9e5cf329048784"
+    },
+    {
+      "path": "include/SDL_quit.h",
+      "bytes": 1982,
+      "sha256": "9c902abaea7560f98fc546bd35a04629a205d047df5433fc30b0c1d81af58b21"
+    },
+    {
+      "path": "include/SDL_rect.h",
+      "bytes": 12890,
+      "sha256": "01db368d4b7736e2358cd29eec0d187d964cfd6182cffab57a938adf73b6a418"
+    },
+    {
+      "path": "include/SDL_render.h",
+      "bytes": 74566,
+      "sha256": "a0cf0db1a13d0dd0d8bfdc01ffb371e2b19be36326f85058200ac9481876c7f0"
+    },
+    {
+      "path": "include/SDL_revision.h",
+      "bytes": 127,
+      "sha256": "0e7e24c76cda00d1128cdb800d384ec8f87742e90a64c46f52b21c0e8f2f211e"
+    },
+    {
+      "path": "include/SDL_rwops.h",
+      "bytes": 28219,
+      "sha256": "10da91c08e96e5fca452e06e11029908a6f237356e4db11af1ad13ffa2e57a47"
+    },
+    {
+      "path": "include/SDL_scancode.h",
+      "bytes": 16910,
+      "sha256": "eb14f3cedde58358f6456d185f473d7551e8234de260151ad0319861ff1444c2"
+    },
+    {
+      "path": "include/SDL_sensor.h",
+      "bytes": 10733,
+      "sha256": "f4dabf5bae217fa6370d8af73abdcbba99aea626f35e17a381b636afe01bb81b"
+    },
+    {
+      "path": "include/SDL_shape.h",
+      "bytes": 5880,
+      "sha256": "cbdcdd8ead6d61a7bfa09bc4c538cc598919d1c060d70524c0828d3af7418667"
+    },
+    {
+      "path": "include/SDL_stdinc.h",
+      "bytes": 30995,
+      "sha256": "33edc0b35512b86162d1affe9df95165b4bc514a90b17238420efe85d24ca8a1"
+    },
+    {
+      "path": "include/SDL_surface.h",
+      "bytes": 36909,
+      "sha256": "92299233370d645f78d9c655ce7f102c16f9d4ddde28a59bd82a962c49b51d94"
+    },
+    {
+      "path": "include/SDL_system.h",
+      "bytes": 21435,
+      "sha256": "ffc5f3662a85f795c0b2e2b87b9fbf493bceeda4aacf7721a68225c5e318ca67"
+    },
+    {
+      "path": "include/SDL_syswm.h",
+      "bytes": 11505,
+      "sha256": "34fec1a5f1089bd395ee11c3a25ad0fc10e7abc56d4a77cc6f17eb9e4e8a9607"
+    },
+    {
+      "path": "include/SDL_test.h",
+      "bytes": 1999,
+      "sha256": "55e453735fb6a14cf350f663e8c7bc9aa273db95bb31bcf3abbfb5b3a91a414e"
+    },
+    {
+      "path": "include/SDL_test_assert.h",
+      "bytes": 3226,
+      "sha256": "fe826feb054929284764718c67ae95b920729ae1336ffeec88a23d611e6498f0"
+    },
+    {
+      "path": "include/SDL_test_common.h",
+      "bytes": 6862,
+      "sha256": "b619cc3020ffdc8f8a12f5d9d4af8b83e9b7c6c3bfc05c6502933c4b3f0103de"
+    },
+    {
+      "path": "include/SDL_test_compare.h",
+      "bytes": 2161,
+      "sha256": "713af284d8520e910d94090396bfd2db2b2292096edd93e4d60aa69163b9c510"
+    },
+    {
+      "path": "include/SDL_test_crc32.h",
+      "bytes": 3380,
+      "sha256": "74cb4c2f7f7130d6048a2c716260d6403620f0e358fa928136ed3560bf71a378"
+    },
+    {
+      "path": "include/SDL_test_font.h",
+      "bytes": 5421,
+      "sha256": "b0b7e6ac8bcf7b9e5bf28695b05d3a084cd530c90322cbc9a0b198114b174231"
+    },
+    {
+      "path": "include/SDL_test_fuzzer.h",
+      "bytes": 13176,
+      "sha256": "494e0e49882a9c2745d07da7b04761d8d992dd90a7a29dd34b605051ed8dcee5"
+    },
+    {
+      "path": "include/SDL_test_harness.h",
+      "bytes": 4629,
+      "sha256": "30b9ccb36e07ff0442429a27540f6a796aee073355b538bd50ef0b98cc47982e"
+    },
+    {
+      "path": "include/SDL_test_images.h",
+      "bytes": 2213,
+      "sha256": "35e7ad856a201fbaafe7ec3fc48db47fb5d9452c292267f8936aec5e5c77b81d"
+    },
+    {
+      "path": "include/SDL_test_log.h",
+      "bytes": 1951,
+      "sha256": "3a8736e6d757666420616f83e7929493fcbe816a0cddf10347f3446818870be8"
+    },
+    {
+      "path": "include/SDL_test_md5.h",
+      "bytes": 4626,
+      "sha256": "be73865b584b5eb207cab3d8dcff6ad057286b75053b547b0238df275e282491"
+    },
+    {
+      "path": "include/SDL_test_memory.h",
+      "bytes": 1784,
+      "sha256": "556f676637fbb1a85f1998545c59addca358b8b95c71812337b370184f27483f"
+    },
+    {
+      "path": "include/SDL_test_random.h",
+      "bytes": 3152,
+      "sha256": "1d8c7987ae39b74d83f40fb54394fd32c61037716c77ebcaf7ce87788934c035"
+    },
+    {
+      "path": "include/SDL_thread.h",
+      "bytes": 17410,
+      "sha256": "0e546047dd407ca0e1d2d686cf2650ac77a987047184e3645f6ba2ec958ddc5c"
+    },
+    {
+      "path": "include/SDL_timer.h",
+      "bytes": 7291,
+      "sha256": "d0497ad3d75701613a227134d63fdcbc62ed72f645153d52753e386ee4b498c7"
+    },
+    {
+      "path": "include/SDL_touch.h",
+      "bytes": 4506,
+      "sha256": "4e5d7a083bbf5237daf5ccf06faed3fae81b1caa693e27841ebf4ec9bf8ff769"
+    },
+    {
+      "path": "include/SDL_types.h",
+      "bytes": 982,
+      "sha256": "ed0c92bed5eec2648f744e8451f3ac5140c1ef11510175fa1b726273dbded9ed"
+    },
+    {
+      "path": "include/SDL_version.h",
+      "bytes": 6839,
+      "sha256": "ee97570d0d6507b4687076336c07fd4a7fa1f5e7986c9b61893a279950febce8"
+    },
+    {
+      "path": "include/SDL_video.h",
+      "bytes": 85653,
+      "sha256": "82ab63ff37834cd4bfcee490b8e37fb892bbb0b31a1a7913ec13c329271ca5ff"
+    },
+    {
+      "path": "include/SDL_vulkan.h",
+      "bytes": 8688,
+      "sha256": "98ed6b3d354191019ae208fc861799237ba8ffb11fa6bd41b3569e6ce05555b8"
+    },
+    {
+      "path": "lib/x64/SDL2.dll",
+      "bytes": 1586176,
+      "sha256": "b37740a72a7a9706216df9f0134894bb7a850b356fd149398c67d874cbcfacb4"
+    }
+  ]
+}

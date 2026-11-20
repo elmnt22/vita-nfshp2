@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="bsound"><UniqueIdentifier>{267EDF0D-21FD-561E-9812-7215A603FC19}</UniqueIdentifier></Filter>
+    <Filter Include="bsound\include"><UniqueIdentifier>{4E4E827C-3745-525E-AFB3-79749455F898}</UniqueIdentifier></Filter>
+    <Filter Include="bware"><UniqueIdentifier>{B55D6808-29A0-5C78-A310-F71934DB23C0}</UniqueIdentifier></Filter>
+    <Filter Include="bware\inc"><UniqueIdentifier>{135C9706-6AF6-577C-8386-85DAB0D0B850}</UniqueIdentifier></Filter>
+    <Filter Include="indep"><UniqueIdentifier>{EC9E7042-BC37-5DF5-8C5E-5FDB714D7E34}</UniqueIdentifier></Filter>
+    <Filter Include="indep\inc"><UniqueIdentifier>{D6D6DE97-11A4-5794-B225-D353A8036A14}</UniqueIdentifier></Filter>
+    <Filter Include="src"><UniqueIdentifier>{D86D78F2-BB49-5DF7-B292-A5D6079CCE0B}</UniqueIdentifier></Filter>
+    <Filter Include="src\game"><UniqueIdentifier>{70883CA8-3C92-5CAB-B6A7-6F4C15E49C2E}</UniqueIdentifier></Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\platform.cpp"><Filter>src</Filter></ClCompile>
+    <ClInclude Include="..\indep\inc\QuickSpline.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Spline.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\HeliSheet.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\bsound\include\bRegion.h"><Filter>bsound\include</Filter></ClInclude>
+    <ClInclude Include="..\bsound\include\bSample.h"><Filter>bsound\include</Filter></ClInclude>
+    <ClInclude Include="..\bsound\include\bSound.h"><Filter>bsound\include</Filter></ClInclude>
+    <ClInclude Include="..\bsound\include\bVoice.h"><Filter>bsound\include</Filter></ClInclude>
+    <ClInclude Include="..\bware\inc\bChunk.hpp"><Filter>bware\inc</Filter></ClInclude>
+    <ClInclude Include="..\bware\inc\bFile.hpp"><Filter>bware\inc</Filter></ClInclude>
+    <ClInclude Include="..\bware\inc\bWare.hpp"><Filter>bware\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Aerodynamics.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\AnimatedDriver.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\CameraMover.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Car.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\CarDriver.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\CarInfo.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\CarMover.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\CarState.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\CollisionBody.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\ComponentPhysics.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\DeliveryMover.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Ecstasy.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Engine.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\EventTree.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Flags.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Fred.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Joylog.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\MellowMover.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\PhysicsCar.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Point.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Polyhedra.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\RaceParameters.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\RigidBody.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Skids.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Suspension.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Table.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\TerrainType.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Timer.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Track.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\TrackPath.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\TrackRoute.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\TrafficCar.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\Wheel.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\bRepeat.hpp"><Filter>indep\inc</Filter></ClInclude>
+    <ClInclude Include="..\indep\inc\eLight.hpp"><Filter>indep\inc</Filter></ClInclude>
+  </ItemGroup>
+</Project>

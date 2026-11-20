@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Install Need for Speed: Hot Pursuit 2 on Nintendo Switch or Switch 2 using your PS2 PAL 1.00 ISO.">
+  <title>NFS Hot Pursuit 2 — Switch Installer</title>
+  <link rel="icon" href="./icon.png">
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <img src="./icon.png" width="88" height="88" alt="Hot Pursuit 2 cover">
+      <div><p class="eyebrow">Nintendo Switch / Switch 2</p><h1>Hot Pursuit 2</h1><p class="subtitle">From your PS2 disc to the starting line.</p></div>
+    </header>
+    <section class="setup" aria-label="Game installer">
+      <div class="step"><div><span class="number">01</span><h2>Choose your console</h2></div>
+        <div class="consoles">
+          <label><input type="radio" name="console" value="switch" checked><span>Nintendo Switch<small>720p</small></span></label>
+          <label><input type="radio" name="console" value="switch2"><span>Nintendo Switch 2<small>1080p · up to 120 FPS</small></span></label>
+        </div>
+      </div>
+      <div class="step"><div><span class="number">02</span><h2>Select your game ISO</h2><p>PS2 PAL version 1.00 · SLES-50731</p></div>
+        <label class="file"><span>Choose ISO</span><input id="iso" type="file" accept=".iso" aria-label="PS2 PAL 1.00 ISO"></label>
+        <p id="source-label" class="selection">No ISO selected.</p>
+      </div>
+      <div class="action"><p>Your ISO stays on this device.<br><small>Extract the ZIP onto your SD card root.</small></p>
+        <div class="buttons"><button id="zip" class="primary" type="button" disabled>Download ZIP</button></div>
+      </div>
+    </section>
+    <section id="result" class="result" aria-label="Installation progress" hidden><p id="status" role="status" aria-live="polite"></p><progress id="progress" max="1" value="0" aria-label="Installation progress"></progress></section>
+    <p class="output">Output: <code id="output-path">switch/NFSHP2-Switch/</code><span id="version"></span></p>
+    <footer><span>Port by HDErick</span><a href="https://github.com/HDErick/NFSHP2_Switch_Port/releases/latest">Download NROs</a><a href="https://github.com/HDErick/NFSHP2_Switch_Port">Source &amp; instructions</a></footer>
+    <noscript>This installer requires JavaScript. You can also download an NRO from GitHub and extract the archives manually.</noscript>
+  </main>
+</body>
+</html>

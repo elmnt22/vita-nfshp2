@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="tools"><UniqueIdentifier>{619979A1-F0D9-54B9-B81E-E5F83ECF7EBF}</UniqueIdentifier></Filter>
+    <Filter Include="tools\archive"><UniqueIdentifier>{18997741-CB75-53C5-A236-8BAC4276A525}</UniqueIdentifier></Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\tools\archive\ArchiveTool.cpp"><Filter>tools\archive</Filter></ClCompile>
+    <ClInclude Include="..\tools\archive\KnownNames.inc"><Filter>tools\archive</Filter></ClInclude>
+    <ClInclude Include="..\tools\archive\LegacyPalNames.inc"><Filter>tools\archive</Filter></ClInclude>
+    <ClInclude Include="..\tools\archive\Sha256.hpp"><Filter>tools\archive</Filter></ClInclude>
+  </ItemGroup>
+</Project>

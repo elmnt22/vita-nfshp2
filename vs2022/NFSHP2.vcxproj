@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{A7857066-2105-43AD-BA17-DA58CC49FE43}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword><VCProjectVersion>17.0</VCProjectVersion>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <RootNamespace>NFSHP2</RootNamespace>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="PropertySheets"><Import Project="Dependencies.props" /><Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" /></ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <LanguageStandard>stdcpp17</LanguageStandard><LanguageStandard_C>stdc11</LanguageStandard_C>
+      <FloatingPointModel>Strict</FloatingPointModel>
+      <ExceptionHandling>SyncCThrow</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;UNICODE;_UNICODE;HP2_ENABLE_VULKAN=1;HP2_APPLICATION_ENTRY=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\src;$(ProjectDir)..;$(ProjectDir)..\indep\inc;$(HP2VulkanRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <Optimization>MaxSpeed</Optimization>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <LanguageStandard>stdcpp17</LanguageStandard><LanguageStandard_C>stdc11</LanguageStandard_C>
+      <FloatingPointModel>Precise</FloatingPointModel>
+      <ExceptionHandling>SyncCThrow</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>NDEBUG;_CRT_SECURE_NO_WARNINGS;UNICODE;_UNICODE;HP2_ENABLE_VULKAN=1;HP2_APPLICATION_ENTRY=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\src;$(ProjectDir)..;$(ProjectDir)..\indep\inc;$(HP2VulkanRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\platform.cpp"><ObjectFileName>$(IntDir)src_platform.obj</ObjectFileName></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="..\src\resources\NFSHP2.rc" />
+    <Image Include="..\src\resources\NFSHP2.ico" />
+    <ClInclude Include="..\src\resources\NativeAppResources.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\indep\inc\QuickSpline.hpp" />
+    <ClInclude Include="..\indep\inc\Spline.hpp" />
+    <ClInclude Include="..\indep\inc\HeliSheet.hpp" />
+    <ClInclude Include="..\bsound\include\bRegion.h" />
+    <ClInclude Include="..\bsound\include\bSample.h" />
+    <ClInclude Include="..\bsound\include\bSound.h" />
+    <ClInclude Include="..\bsound\include\bVoice.h" />
+    <ClInclude Include="..\bware\inc\bChunk.hpp" />
+    <ClInclude Include="..\bware\inc\bFile.hpp" />
+    <ClInclude Include="..\bware\inc\bWare.hpp" />
+    <ClInclude Include="..\indep\inc\Aerodynamics.hpp" />
+    <ClInclude Include="..\indep\inc\AnimatedDriver.hpp" />
+    <ClInclude Include="..\indep\inc\CameraMover.hpp" />
+    <ClInclude Include="..\indep\inc\Car.hpp" />
+    <ClInclude Include="..\indep\inc\CarDriver.hpp" />
+    <ClInclude Include="..\indep\inc\CarInfo.hpp" />
+    <ClInclude Include="..\indep\inc\CarMover.hpp" />
+    <ClInclude Include="..\indep\inc\CarState.hpp" />
+    <ClInclude Include="..\indep\inc\CollisionBody.hpp" />
+    <ClInclude Include="..\indep\inc\ComponentPhysics.hpp" />
+    <ClInclude Include="..\indep\inc\DeliveryMover.hpp" />
+    <ClInclude Include="..\indep\inc\Ecstasy.hpp" />
+    <ClInclude Include="..\indep\inc\Engine.hpp" />
+    <ClInclude Include="..\indep\inc\EventTree.hpp" />
+    <ClInclude Include="..\indep\inc\Flags.hpp" />
+    <ClInclude Include="..\indep\inc\Fred.hpp" />
+    <ClInclude Include="..\indep\inc\Joylog.hpp" />
+    <ClInclude Include="..\indep\inc\MellowMover.hpp" />
+    <ClInclude Include="..\indep\inc\PhysicsCar.hpp" />
+    <ClInclude Include="..\indep\inc\Point.hpp" />
+    <ClInclude Include="..\indep\inc\Polyhedra.hpp" />
+    <ClInclude Include="..\indep\inc\RaceParameters.hpp" />
+    <ClInclude Include="..\indep\inc\RigidBody.hpp" />
+    <ClInclude Include="..\indep\inc\Skids.hpp" />
+    <ClInclude Include="..\indep\inc\Suspension.hpp" />
+    <ClInclude Include="..\indep\inc\Table.hpp" />
+    <ClInclude Include="..\indep\inc\TerrainType.hpp" />
+    <ClInclude Include="..\indep\inc\Timer.hpp" />
+    <ClInclude Include="..\indep\inc\Track.hpp" />
+    <ClInclude Include="..\indep\inc\TrackPath.hpp" />
+    <ClInclude Include="..\indep\inc\TrackRoute.hpp" />
+    <ClInclude Include="..\indep\inc\TrafficCar.hpp" />
+    <ClInclude Include="..\indep\inc\Wheel.hpp" />
+    <ClInclude Include="..\indep\inc\bRepeat.hpp" />
+    <ClInclude Include="..\indep\inc\eLight.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="NFSHP2Engine.vcxproj">
+      <Project>{B019B104-2AD3-476E-831F-BE92D9C8C08E}</Project>
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="NFSHP2Core.vcxproj">
+      <Project>{83C7D1D8-039C-49C2-8D21-F0DD4DFE25A8}</Project>
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemDefinitionGroup>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\src\resources;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Link><SubSystem>Windows</SubSystem>
+      <AdditionalLibraryDirectories>$(HP2VulkanRoot)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>vulkan-1.lib;xaudio2.lib;ole32.lib;uuid.lib;shell32.lib;user32.lib;comctl32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CopyNativeInputRuntime" AfterTargets="Build">
+    <Copy SourceFiles="$(ProjectDir)..\third_party\SDL2\lib\x64\SDL2.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(ProjectDir)..\third_party\SDL2\LICENSE.txt" DestinationFiles="$(OutDir)SDL2-LICENSE.txt" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

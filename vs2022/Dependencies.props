@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <HP2VulkanRoot>$(MSBuildThisFileDirectory)..\third_party\vulkan</HP2VulkanRoot>
+  </PropertyGroup>
+  <Target Name="RequireVulkanBuildFiles" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(Platform)'!='x64'" Text="The native Windows port requires the x64 configuration." />
+    <Error Condition="!Exists('$(HP2VulkanRoot)\include\vulkan\vulkan.h') Or !Exists('$(HP2VulkanRoot)\lib\x64\vulkan-1.lib')"
+           Text="The pinned third_party/vulkan build dependency is missing from this checkout." />
+  </Target>
+</Project>

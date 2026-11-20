@@ -1,0 +1,30 @@
+/build-nx/
+
+# Local game data, captures, profiles and generated artifacts
+*.iso
+*.ISO
+/ZDIR.BIN
+/ZZDATA.BIN
+/@ZZDATA/
+/NFSHP2_log.txt
+/NFSHP2_error.txt
+/Saves/
+/pgo/
+*.nro
+*.elf
+*.gcda
+*.gcno
+*.stream
+
+# External graphics SDKs/drivers must never be vendored or pushed.
+**/mesa*/
+*mesa*.zip
+*mesa*.tar.*
+*.a
+*.so
+*.so.*
+*.dll.a
+
+# Generated installer snapshots and downloaded release binaries
+/_site/
+/installer/release/

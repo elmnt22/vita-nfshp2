@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{83C7D1D8-039C-49C2-8D21-F0DD4DFE25A8}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword><VCProjectVersion>17.0</VCProjectVersion>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <RootNamespace>NFSHP2Core</RootNamespace>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="PropertySheets"><Import Project="Dependencies.props" /><Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" /></ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <LanguageStandard>stdcpp17</LanguageStandard><LanguageStandard_C>stdc11</LanguageStandard_C>
+      <FloatingPointModel>Strict</FloatingPointModel>
+      <ExceptionHandling>SyncCThrow</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;UNICODE;_UNICODE;HP2_ENABLE_VULKAN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\src;$(ProjectDir)..;$(ProjectDir)..\indep\inc;$(HP2VulkanRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <Optimization>MaxSpeed</Optimization>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <LanguageStandard>stdcpp17</LanguageStandard><LanguageStandard_C>stdc11</LanguageStandard_C>
+      <FloatingPointModel>Precise</FloatingPointModel>
+      <ExceptionHandling>SyncCThrow</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>NDEBUG;_CRT_SECURE_NO_WARNINGS;UNICODE;_UNICODE;HP2_ENABLE_VULKAN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\src;$(ProjectDir)..;$(ProjectDir)..\indep\inc;$(HP2VulkanRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\bware\src\bFile.cpp"><ObjectFileName>$(IntDir)bware_src_bFile.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bware\src\bFileE.cpp"><ObjectFileName>$(IntDir)bware_src_bFileE.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\lzcompress.cpp"><ObjectFileName>$(IntDir)indep_src_lzcompress.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bware\src\bMemory.cpp"><ObjectFileName>$(IntDir)bware_src_bMemory.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\platform.cpp"><ObjectFileName>$(IntDir)src_platform.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bware\src\Strings.cpp"><ObjectFileName>$(IntDir)bware_src_Strings.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bware\src\bDebug.cpp"><ObjectFileName>$(IntDir)bware_src_bDebug.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\brepeat.cpp"><ObjectFileName>$(IntDir)indep_src_brepeat.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\ecstasy\ecstasye.cpp"><ObjectFileName>$(IntDir)src_ecstasy_ecstasye.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\ecstasy\eenvmape.cpp"><ObjectFileName>$(IntDir)src_ecstasy_eenvmape.obj</ObjectFileName></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\indep\inc\QuickSpline.hpp" />
+    <ClInclude Include="..\indep\inc\Spline.hpp" />
+    <ClInclude Include="..\indep\inc\HeliSheet.hpp" />
+    <ClInclude Include="..\bsound\include\bRegion.h" />
+    <ClInclude Include="..\bsound\include\bSample.h" />
+    <ClInclude Include="..\bsound\include\bSound.h" />
+    <ClInclude Include="..\bsound\include\bVoice.h" />
+    <ClInclude Include="..\bware\inc\bChunk.hpp" />
+    <ClInclude Include="..\bware\inc\bFile.hpp" />
+    <ClInclude Include="..\bware\inc\bMath.hpp" />
+    <ClInclude Include="..\bware\inc\bWare.hpp" />
+    <ClInclude Include="..\indep\inc\AICarController.hpp" />
+    <ClInclude Include="..\indep\inc\AIPlan.hpp" />
+    <ClInclude Include="..\indep\inc\AcidFX.hpp" />
+    <ClInclude Include="..\indep\inc\Aerodynamics.hpp" />
+    <ClInclude Include="..\indep\inc\AnimatedDriver.hpp" />
+    <ClInclude Include="..\indep\inc\CameraCoordinator.hpp" />
+    <ClInclude Include="..\indep\inc\CameraMover.hpp" />
+    <ClInclude Include="..\indep\inc\Car.hpp" />
+    <ClInclude Include="..\indep\inc\CarController.hpp" />
+    <ClInclude Include="..\indep\inc\CarDriver.hpp" />
+    <ClInclude Include="..\indep\inc\CarInfo.hpp" />
+    <ClInclude Include="..\indep\inc\CarMover.hpp" />
+    <ClInclude Include="..\indep\inc\CarSounds.hpp" />
+    <ClInclude Include="..\indep\inc\CarState.hpp" />
+    <ClInclude Include="..\indep\inc\Clans.hpp" />
+    <ClInclude Include="..\indep\inc\Collision.hpp" />
+    <ClInclude Include="..\indep\inc\CollisionBody.hpp" />
+    <ClInclude Include="..\indep\inc\ComponentPhysics.hpp" />
+    <ClInclude Include="..\indep\inc\Contact.hpp" />
+    <ClInclude Include="..\indep\inc\CopChase.hpp" />
+    <ClInclude Include="..\indep\inc\DeliveryMover.hpp" />
+    <ClInclude Include="..\indep\inc\DriveTarget.hpp" />
+    <ClInclude Include="..\indep\inc\DrivingChoice.hpp" />
+    <ClInclude Include="..\indep\inc\DrivingLocation.hpp" />
+    <ClInclude Include="..\indep\inc\Ecstasy.hpp" />
+    <ClInclude Include="..\indep\inc\NativeRenderSettings.hpp" />
+    <ClInclude Include="..\src\NativeConfigurator.inl" />
+    <ClInclude Include="..\indep\inc\Engine.hpp" />
+    <ClInclude Include="..\indep\inc\EventTree.hpp" />
+    <ClInclude Include="..\indep\inc\FEAnim.hpp" />
+    <ClInclude Include="..\indep\inc\FMenus.hpp" />
+    <ClInclude Include="..\indep\inc\EndGameScreens.hpp" />
+    <ClInclude Include="..\indep\inc\Flags.hpp" />
+    <ClInclude Include="..\indep\inc\FlailerChunks.hpp" />
+    <ClInclude Include="..\indep\inc\FlailerDB.hpp" />
+    <ClInclude Include="..\indep\inc\Fred.hpp" />
+    <ClInclude Include="..\indep\inc\GameFlow.hpp" />
+    <ClInclude Include="..\indep\inc\Joylog.hpp" />
+    <ClInclude Include="..\indep\inc\MellowMover.hpp" />
+    <ClInclude Include="..\indep\inc\NIS.hpp" />
+    <ClInclude Include="..\indep\inc\PauseMenu.hpp" />
+    <ClInclude Include="..\indep\inc\PhysicsCar.hpp" />
+    <ClInclude Include="..\indep\inc\Player.hpp" />
+    <ClInclude Include="..\indep\inc\Point.hpp" />
+    <ClInclude Include="..\indep\inc\Polyhedra.hpp" />
+    <ClInclude Include="..\indep\inc\PsychoDriver.hpp" />
+    <ClInclude Include="..\indep\inc\Pursuit.hpp" />
+    <ClInclude Include="..\indep\inc\RaceCoordinator.hpp" />
+    <ClInclude Include="..\indep\inc\RaceParameters.hpp" />
+    <ClInclude Include="..\indep\inc\Replay.hpp" />
+    <ClInclude Include="..\indep\inc\RigidBody.hpp" />
+    <ClInclude Include="..\indep\inc\Scenery.hpp" />
+    <ClInclude Include="..\indep\inc\Skids.hpp" />
+    <ClInclude Include="..\indep\inc\Sound3d.hpp" />
+    <ClInclude Include="..\indep\inc\Suspension.hpp" />
+    <ClInclude Include="..\indep\inc\Table.hpp" />
+    <ClInclude Include="..\indep\inc\TerrainType.hpp" />
+    <ClInclude Include="..\indep\inc\Texture.hpp" />
+    <ClInclude Include="..\indep\inc\Timer.hpp" />
+    <ClInclude Include="..\indep\inc\Track.hpp" />
+    <ClInclude Include="..\indep\inc\TrackPath.hpp" />
+    <ClInclude Include="..\indep\inc\TrackRoute.hpp" />
+    <ClInclude Include="..\indep\inc\TrafficCar.hpp" />
+    <ClInclude Include="..\indep\inc\VoronoiClip.hpp" />
+    <ClInclude Include="..\indep\inc\WeatherMan.hpp" />
+    <ClInclude Include="..\indep\inc\Wheel.hpp" />
+    <ClInclude Include="..\indep\inc\World.hpp" />
+    <ClInclude Include="..\indep\inc\WorldObject.hpp" />
+    <ClInclude Include="..\indep\inc\bRepeat.hpp" />
+    <ClInclude Include="..\indep\inc\eEnvMap.hpp" />
+    <ClInclude Include="..\indep\inc\eLight.hpp" />
+    <ClInclude Include="..\indep\inc\eMath.hpp" />
+    <ClInclude Include="..\indep\inc\spikestrip.hpp" />
+    <ClInclude Include="..\indep\src\speech\SEDWedge.hpp" />
+    <ClInclude Include="..\indep\src\speech\mgr.hpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

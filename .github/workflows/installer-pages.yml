@@ -1,0 +1,55 @@
+name: Publish game installer
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Deploy installer from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run installer-pages.yml --repo "$GITHUB_REPOSITORY" --ref main
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check installer
+        run: node --test installer/tests/*.test.mjs
+      - uses: actions/configure-pages@v5
+      - name: Package the latest release's loose NROs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'NFSHP2-Switch.nro' --pattern 'NFSHP2-Switch2.nro' --dir "$RUNNER_TEMP/nros"
+          python3 installer/package.py "$RUNNER_TEMP/nros" _site "$tag"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

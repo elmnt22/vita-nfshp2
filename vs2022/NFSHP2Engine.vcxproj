@@ -1,0 +1,391 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{B019B104-2AD3-476E-831F-BE92D9C8C08E}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword><VCProjectVersion>17.0</VCProjectVersion>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <RootNamespace>NFSHP2Engine</RootNamespace>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="PropertySheets"><Import Project="Dependencies.props" /><Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" /></ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <LanguageStandard>stdcpp17</LanguageStandard><LanguageStandard_C>stdc11</LanguageStandard_C>
+      <FloatingPointModel>Precise</FloatingPointModel>
+      <ExceptionHandling>SyncCThrow</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;UNICODE;_UNICODE;HP2_ENABLE_VULKAN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\src;$(ProjectDir)..;$(ProjectDir)..\indep\inc;$(HP2VulkanRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <Optimization>MaxSpeed</Optimization>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <LanguageStandard>stdcpp17</LanguageStandard><LanguageStandard_C>stdc11</LanguageStandard_C>
+      <FloatingPointModel>Precise</FloatingPointModel>
+      <ExceptionHandling>SyncCThrow</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>NDEBUG;_CRT_SECURE_NO_WARNINGS;UNICODE;_UNICODE;HP2_ENABLE_VULKAN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\src;$(ProjectDir)..;$(ProjectDir)..\indep\inc;$(HP2VulkanRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\bware\src\bList.cpp"><ObjectFileName>$(IntDir)bware_src_bList.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\racecoordinator.cpp"><ObjectFileName>$(IntDir)indep_src_racecoordinator.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\trackedcontroller.cpp"><ObjectFileName>$(IntDir)indep_src_trackedcontroller.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\carsounds.cpp"><ObjectFileName>$(IntDir)indep_src_carsounds.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\carsoundengine.cpp"><ObjectFileName>$(IntDir)indep_src_carsoundengine.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\carsoundtires.cpp"><ObjectFileName>$(IntDir)indep_src_carsoundtires.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\choppersound.cpp"><ObjectFileName>$(IntDir)indep_src_choppersound.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\soundscape.cpp"><ObjectFileName>$(IntDir)indep_src_soundscape.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\weatherman.cpp"><ObjectFileName>$(IntDir)indep_src_weatherman.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\trackpath.cpp"><ObjectFileName>$(IntDir)indep_src_trackpath.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\physicscar.cpp"><ObjectFileName>$(IntDir)indep_src_physicscar.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\timer.cpp"><ObjectFileName>$(IntDir)indep_src_timer.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\terraintype.cpp"><ObjectFileName>$(IntDir)indep_src_terraintype.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\cameramover.cpp"><ObjectFileName>$(IntDir)indep_src_cameramover.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\zonecameras.cpp"><ObjectFileName>$(IntDir)indep_src_zonecameras.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\rumble.cpp"><ObjectFileName>$(IntDir)indep_src_rumble.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\trackrouteeditor.cpp"><ObjectFileName>$(IntDir)indep_src_trackrouteeditor.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\copdriver.cpp"><ObjectFileName>$(IntDir)indep_src_copdriver.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\copmgr.cpp"><ObjectFileName>$(IntDir)indep_src_copmgr.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\joystick.cpp"><ObjectFileName>$(IntDir)indep_src_joystick.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\eastereggs.cpp"><ObjectFileName>$(IntDir)indep_src_eastereggs.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\stomper.cpp"><ObjectFileName>$(IntDir)indep_src_stomper.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\roadblock.cpp"><ObjectFileName>$(IntDir)indep_src_roadblock.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\spacefiller.cpp"><ObjectFileName>$(IntDir)indep_src_spacefiller.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\ghostcar.cpp"><ObjectFileName>$(IntDir)indep_src_ghostcar.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\realcontroller.cpp"><ObjectFileName>$(IntDir)indep_src_realcontroller.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bware\src\bMath.cpp"><ObjectFileName>$(IntDir)bware_src_bMath.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bware\src\bMatrix.cpp"><ObjectFileName>$(IntDir)bware_src_bMatrix.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bware\src\bQuaternion.cpp"><ObjectFileName>$(IntDir)bware_src_bQuaternion.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bware\src\bVector.cpp"><ObjectFileName>$(IntDir)bware_src_bVector.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\aerodynamics.cpp"><ObjectFileName>$(IntDir)indep_src_aerodynamics.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\animateddriver.cpp"><ObjectFileName>$(IntDir)indep_src_animateddriver.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\aicarcontroller.cpp"><ObjectFileName>$(IntDir)indep_src_aicarcontroller.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\aiplan.cpp"><ObjectFileName>$(IntDir)indep_src_aiplan.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\aiutil.cpp"><ObjectFileName>$(IntDir)indep_src_aiutil.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\bodydamage.cpp"><ObjectFileName>$(IntDir)indep_src_bodydamage.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\cardamage.cpp"><ObjectFileName>$(IntDir)indep_src_cardamage.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\car.cpp"><ObjectFileName>$(IntDir)indep_src_car.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\rewardsystem.cpp"><ObjectFileName>$(IntDir)indep_src_rewardsystem.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\carinfo.cpp"><ObjectFileName>$(IntDir)indep_src_carinfo.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\carloader.cpp"><ObjectFileName>$(IntDir)indep_src_carloader.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\trackgraph.cpp"><ObjectFileName>$(IntDir)indep_src_trackgraph.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\scenery.cpp"><ObjectFileName>$(IntDir)indep_src_scenery.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\worldobject.cpp"><ObjectFileName>$(IntDir)indep_src_worldobject.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\fernflattener.cpp"><ObjectFileName>$(IntDir)indep_src_fernflattener.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\terraineffects.cpp"><ObjectFileName>$(IntDir)indep_src_terraineffects.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\texture.cpp"><ObjectFileName>$(IntDir)indep_src_texture.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\resourceloader.cpp"><ObjectFileName>$(IntDir)indep_src_resourceloader.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\ecstasy\elighte.cpp"><ObjectFileName>$(IntDir)src_ecstasy_elighte.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\sune.cpp"><ObjectFileName>$(IntDir)src_sune.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\skye.cpp"><ObjectFileName>$(IntDir)src_skye.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\munitions.cpp"><ObjectFileName>$(IntDir)indep_src_munitions.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speech\speechfn.cpp"><ObjectFileName>$(IntDir)indep_src_speech_speechfn.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\ecstasy.cpp"><ObjectFileName>$(IntDir)indep_src_ecstasy.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\hudanim.cpp"><ObjectFileName>$(IntDir)indep_src_hudanim.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\language.cpp"><ObjectFileName>$(IntDir)indep_src_language.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\gameflow.cpp"><ObjectFileName>$(IntDir)indep_src_gameflow.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\joylog.cpp"><ObjectFileName>$(IntDir)indep_src_joylog.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\Config.cpp"><ObjectFileName>$(IntDir)indep_src_Config.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\main.cpp"><ObjectFileName>$(IntDir)indep_src_main.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bsound\src\bRegion.cpp"><ObjectFileName>$(IntDir)bsound_src_bRegion.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\demodisc.cpp"><ObjectFileName>$(IntDir)src_demodisc.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bsound\src\bDriver.cpp"><ObjectFileName>$(IntDir)bsound_src_bDriver.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bsound\src\bSound.cpp"><ObjectFileName>$(IntDir)bsound_src_bSound.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bsound\src\bJukebox.cpp"><ObjectFileName>$(IntDir)bsound_src_bJukebox.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bsound\src\bSample.cpp"><ObjectFileName>$(IntDir)bsound_src_bSample.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\MoviePlayer\cyclicbuffer.cpp"><ObjectFileName>$(IntDir)indep_src_MoviePlayer_cyclicbuffer.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\MoviePlayer\huffman2.cpp"><ObjectFileName>$(IntDir)indep_src_MoviePlayer_huffman2.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\MoviePlayer\dcttable.cpp"><ObjectFileName>$(IntDir)indep_src_MoviePlayer_dcttable.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\MoviePlayer\codec.cpp"><ObjectFileName>$(IntDir)indep_src_MoviePlayer_codec.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\MoviePlayer\dctimage.cpp"><ObjectFileName>$(IntDir)indep_src_MoviePlayer_dctimage.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\MoviePlayer\ringbuffer.cpp"><ObjectFileName>$(IntDir)indep_src_MoviePlayer_ringbuffer.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\MoviePlayer\dctblock.cpp"><ObjectFileName>$(IntDir)indep_src_MoviePlayer_dctblock.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\MoviePlayer\mv3codec.cpp"><ObjectFileName>$(IntDir)indep_src_MoviePlayer_mv3codec.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\MoviePlayer\mv3codecdecomp.cpp"><ObjectFileName>$(IntDir)indep_src_MoviePlayer_mv3codecdecomp.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\MoviePlayer\movieplayer.cpp"><ObjectFileName>$(IntDir)indep_src_MoviePlayer_movieplayer.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\ecstasy\eenveffectse.cpp"><ObjectFileName>$(IntDir)src_ecstasy_eenveffectse.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\mainmenu.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_mainmenu.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\SPCHlog.c"><ObjectFileName>$(IntDir)cmn_SPCHlog.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\SPCHrule.c"><ObjectFileName>$(IntDir)cmn_SPCHrule.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\SPCHsamp.c"><ObjectFileName>$(IntDir)cmn_SPCHsamp.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bsound\src\bSegment.cpp"><ObjectFileName>$(IntDir)bsound_src_bSegment.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\queuedfile.cpp"><ObjectFileName>$(IntDir)indep_src_queuedfile.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\options.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_options.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\nameentry.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_nameentry.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\racesetup.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_racesetup.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\joystickconfiguration.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_joystickconfiguration.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\frontendeffects.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_frontendeffects.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\frontend.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_frontend.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\barricade.cpp"><ObjectFileName>$(IntDir)indep_src_barricade.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speech\conversions.cpp"><ObjectFileName>$(IntDir)indep_src_speech_conversions.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\sound.cpp"><ObjectFileName>$(IntDir)indep_src_sound.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\sound3d.cpp"><ObjectFileName>$(IntDir)indep_src_sound3d.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\smokeable.cpp"><ObjectFileName>$(IntDir)indep_src_smokeable.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\eventtree.cpp"><ObjectFileName>$(IntDir)indep_src_eventtree.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speechnoise.cpp"><ObjectFileName>$(IntDir)indep_src_speechnoise.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speech\mgr.cpp"><ObjectFileName>$(IntDir)indep_src_speech_mgr.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speech\fsm.cpp"><ObjectFileName>$(IntDir)indep_src_speech_fsm.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speech\state.cpp"><ObjectFileName>$(IntDir)indep_src_speech_state.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speech\transition.cpp"><ObjectFileName>$(IntDir)indep_src_speech_transition.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speech\action.cpp"><ObjectFileName>$(IntDir)indep_src_speech_action.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speech\nfsfsm.cpp"><ObjectFileName>$(IntDir)indep_src_speech_nfsfsm.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\campaigntrees.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_campaigntrees.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\rewardview.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_rewardview.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\feanim.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_feanim.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\helpmenu.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_helpmenu.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\selectcar.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_selectcar.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\replayscreen.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_replayscreen.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\selecttrack.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_selecttrack.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speech\sedwedge.cpp"><ObjectFileName>$(IntDir)indep_src_speech_sedwedge.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\SPCHrslv.c"><ObjectFileName>$(IntDir)cmn_SPCHrslv.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\SPCHbank.c"><ObjectFileName>$(IntDir)cmn_SPCHbank.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\SPCHrand.c"><ObjectFileName>$(IntDir)cmn_SPCHrand.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\SPCHinit.c"><ObjectFileName>$(IntDir)cmn_SPCHinit.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\spchevnt.c"><ObjectFileName>$(IntDir)cmn_spchevnt.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\spchpick.c"><ObjectFileName>$(IntDir)cmn_spchpick.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\acidfxe.cpp"><ObjectFileName>$(IntDir)src_acidfxe.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\nis.cpp"><ObjectFileName>$(IntDir)indep_src_nis.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\player.cpp"><ObjectFileName>$(IntDir)indep_src_player.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\care.cpp"><ObjectFileName>$(IntDir)src_care.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\trafficteleporter.cpp"><ObjectFileName>$(IntDir)indep_src_trafficteleporter.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\soundcollision.cpp"><ObjectFileName>$(IntDir)indep_src_soundcollision.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\sound3dsample.cpp"><ObjectFileName>$(IntDir)indep_src_sound3dsample.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\characterinfo.cpp"><ObjectFileName>$(IntDir)indep_src_characterinfo.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\eanimations.cpp"><ObjectFileName>$(IntDir)indep_src_eanimations.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\eanimationsolid.cpp"><ObjectFileName>$(IntDir)indep_src_eanimationsolid.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\cameracoordinator.cpp"><ObjectFileName>$(IntDir)indep_src_cameracoordinator.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\carcollisiondetect.cpp"><ObjectFileName>$(IntDir)indep_src_carcollisiondetect.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\carstate.cpp"><ObjectFileName>$(IntDir)indep_src_carstate.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\chopper.cpp"><ObjectFileName>$(IntDir)indep_src_chopper.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\collision.cpp"><ObjectFileName>$(IntDir)indep_src_collision.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\collisionbody.cpp"><ObjectFileName>$(IntDir)indep_src_collisionbody.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\componentphysics.cpp"><ObjectFileName>$(IntDir)indep_src_componentphysics.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\contact.cpp"><ObjectFileName>$(IntDir)indep_src_contact.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\integrable.cpp"><ObjectFileName>$(IntDir)indep_src_integrable.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\cop.cpp"><ObjectFileName>$(IntDir)indep_src_cop.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\coputil.cpp"><ObjectFileName>$(IntDir)indep_src_coputil.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\drivetarget.cpp"><ObjectFileName>$(IntDir)indep_src_drivetarget.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\drivingchoice.cpp"><ObjectFileName>$(IntDir)indep_src_drivingchoice.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\drivinglocation.cpp"><ObjectFileName>$(IntDir)indep_src_drivinglocation.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\engine.cpp"><ObjectFileName>$(IntDir)indep_src_engine.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\eventmanager.cpp"><ObjectFileName>$(IntDir)indep_src_eventmanager.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\fred.cpp"><ObjectFileName>$(IntDir)indep_src_fred.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\replay.cpp"><ObjectFileName>$(IntDir)indep_src_replay.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\demomodereplay.cpp"><ObjectFileName>$(IntDir)indep_src_demomodereplay.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\flailerdb.cpp"><ObjectFileName>$(IntDir)indep_src_flailerdb.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\fmenus.cpp"><ObjectFileName>$(IntDir)indep_src_fmenus.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\helisheet.cpp"><ObjectFileName>$(IntDir)indep_src_helisheet.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\mellowmover.cpp"><ObjectFileName>$(IntDir)indep_src_mellowmover.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\point.cpp"><ObjectFileName>$(IntDir)indep_src_point.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\polyhedra.cpp"><ObjectFileName>$(IntDir)indep_src_polyhedra.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\psychodriver.cpp"><ObjectFileName>$(IntDir)indep_src_psychodriver.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\pursuit.cpp"><ObjectFileName>$(IntDir)indep_src_pursuit.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\quickspline.cpp"><ObjectFileName>$(IntDir)indep_src_quickspline.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\race.cpp"><ObjectFileName>$(IntDir)indep_src_race.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\raceparameters.cpp"><ObjectFileName>$(IntDir)indep_src_raceparameters.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\realdriver.cpp"><ObjectFileName>$(IntDir)indep_src_realdriver.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\rigidbody.cpp"><ObjectFileName>$(IntDir)indep_src_rigidbody.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\skids.cpp"><ObjectFileName>$(IntDir)indep_src_skids.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\spikestrip.cpp"><ObjectFileName>$(IntDir)indep_src_spikestrip.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\spline.cpp"><ObjectFileName>$(IntDir)indep_src_spline.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\suspension.cpp"><ObjectFileName>$(IntDir)indep_src_suspension.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\table.cpp"><ObjectFileName>$(IntDir)indep_src_table.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\track.cpp"><ObjectFileName>$(IntDir)indep_src_track.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\trackroute.cpp"><ObjectFileName>$(IntDir)indep_src_trackroute.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\trafficdriver.cpp"><ObjectFileName>$(IntDir)indep_src_trafficdriver.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\volumetree.cpp"><ObjectFileName>$(IntDir)indep_src_volumetree.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\voronoiclip.cpp"><ObjectFileName>$(IntDir)indep_src_voronoiclip.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\wheel.cpp"><ObjectFileName>$(IntDir)indep_src_wheel.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\world.cpp"><ObjectFileName>$(IntDir)indep_src_world.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\ecstasy\emathe.cpp"><ObjectFileName>$(IntDir)src_ecstasy_emathe.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\joysticke.cpp"><ObjectFileName>$(IntDir)src_joysticke.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bsound\src\bEffect.cpp"><ObjectFileName>$(IntDir)bsound_src_bEffect.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bsound\src\bVoice.cpp"><ObjectFileName>$(IntDir)bsound_src_bVoice.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\spabort.c"><ObjectFileName>$(IntDir)cmn_spabort.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\spdprint.c"><ObjectFileName>$(IntDir)cmn_spdprint.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\sptick.c"><ObjectFileName>$(IntDir)cmn_sptick.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\cmn\sputil.c"><ObjectFileName>$(IntDir)cmn_sputil.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\aidriver.cpp"><ObjectFileName>$(IntDir)indep_src_aidriver.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\beltmover.cpp"><ObjectFileName>$(IntDir)indep_src_beltmover.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\carcontroller.cpp"><ObjectFileName>$(IntDir)indep_src_carcontroller.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\deliverymover.cpp"><ObjectFileName>$(IntDir)indep_src_deliverymover.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\endgamescreens.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_endgamescreens.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\pausemenu.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_pausemenu.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\startracescreens.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_startracescreens.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\speech\speechcontext.cpp"><ObjectFileName>$(IntDir)indep_src_speech_speechcontext.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\trafficcar.cpp"><ObjectFileName>$(IntDir)indep_src_trafficcar.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bsound\src\bDriverLowPS2.cpp"><ObjectFileName>$(IntDir)bsound_src_bDriverLowPS2.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\bsound\src\bDriverPS2.cpp"><ObjectFileName>$(IntDir)bsound_src_bDriverPS2.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\logitechwheel.cpp"><ObjectFileName>$(IntDir)src_logitechwheel.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\clans.cpp"><ObjectFileName>$(IntDir)indep_src_clans.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\texturee.cpp"><ObjectFileName>$(IntDir)src_texturee.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\memorycard.cpp"><ObjectFileName>$(IntDir)src_memorycard.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\src\dbfiles.cpp"><ObjectFileName>$(IntDir)src_dbfiles.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\frontendscreens\memcardscreens.cpp"><ObjectFileName>$(IntDir)indep_src_frontendscreens_memcardscreens.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\camera.cpp"><ObjectFileName>$(IntDir)indep_src_camera.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\indep\src\trackmap.cpp"><ObjectFileName>$(IntDir)indep_src_trackmap.obj</ObjectFileName></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\indep\inc\QuickSpline.hpp" />
+    <ClInclude Include="..\indep\inc\Spline.hpp" />
+    <ClInclude Include="..\indep\inc\HeliSheet.hpp" />
+    <ClInclude Include="..\bsound\include\bJukebox.h" />
+    <ClInclude Include="..\bsound\include\bRegion.h" />
+    <ClInclude Include="..\bsound\include\bSample.h" />
+    <ClInclude Include="..\bsound\include\bSound.h" />
+    <ClInclude Include="..\bsound\include\bVoice.h" />
+    <ClInclude Include="..\bware\inc\bChunk.hpp" />
+    <ClInclude Include="..\bware\inc\bFile.hpp" />
+    <ClInclude Include="..\bware\inc\bMath.hpp" />
+    <ClInclude Include="..\bware\inc\bWare.hpp" />
+    <ClInclude Include="..\inc\dbFiles.hpp" />
+    <ClInclude Include="..\inc\memorycard.hpp" />
+    <ClInclude Include="..\indep\inc\AICarController.hpp" />
+    <ClInclude Include="..\indep\inc\AIPlan.hpp" />
+    <ClInclude Include="..\indep\inc\AcidFX.hpp" />
+    <ClInclude Include="..\indep\inc\Aerodynamics.hpp" />
+    <ClInclude Include="..\indep\inc\AnimatedDriver.hpp" />
+    <ClInclude Include="..\indep\inc\CameraCoordinator.hpp" />
+    <ClInclude Include="..\indep\inc\CameraMover.hpp" />
+    <ClInclude Include="..\indep\inc\Car.hpp" />
+    <ClInclude Include="..\indep\inc\CarCollisionDetect.hpp" />
+    <ClInclude Include="..\indep\inc\CarController.hpp" />
+    <ClInclude Include="..\indep\inc\CarDamage.hpp" />
+    <ClInclude Include="..\indep\inc\CarDriver.hpp" />
+    <ClInclude Include="..\indep\inc\CarInfo.hpp" />
+    <ClInclude Include="..\indep\inc\CarLoader.hpp" />
+    <ClInclude Include="..\indep\inc\CarMover.hpp" />
+    <ClInclude Include="..\indep\inc\CarSounds.hpp" />
+    <ClInclude Include="..\indep\inc\CarState.hpp" />
+    <ClInclude Include="..\indep\inc\Chopper.hpp" />
+    <ClInclude Include="..\indep\inc\Clans.hpp" />
+    <ClInclude Include="..\indep\inc\Collision.hpp" />
+    <ClInclude Include="..\indep\inc\CollisionBody.hpp" />
+    <ClInclude Include="..\indep\inc\ComponentPhysics.hpp" />
+    <ClInclude Include="..\indep\inc\Contact.hpp" />
+    <ClInclude Include="..\indep\inc\CopChase.hpp" />
+    <ClInclude Include="..\indep\inc\CopDriver.hpp" />
+    <ClInclude Include="..\indep\inc\DeliveryMover.hpp" />
+    <ClInclude Include="..\indep\inc\DemoDisc.hpp" />
+    <ClInclude Include="..\indep\inc\DemoModeReplay.hpp" />
+    <ClInclude Include="..\indep\inc\DriveTarget.hpp" />
+    <ClInclude Include="..\indep\inc\DrivingChoice.hpp" />
+    <ClInclude Include="..\indep\inc\DrivingLocation.hpp" />
+    <ClInclude Include="..\indep\inc\EasterEggs.hpp" />
+    <ClInclude Include="..\indep\inc\Ecstasy.hpp" />
+    <ClInclude Include="..\indep\inc\NativeRenderSettings.hpp" />
+    <ClInclude Include="..\indep\inc\Engine.hpp" />
+    <ClInclude Include="..\indep\inc\EventManager.hpp" />
+    <ClInclude Include="..\indep\inc\EventTree.hpp" />
+    <ClInclude Include="..\indep\inc\FEAnim.hpp" />
+    <ClInclude Include="..\indep\inc\FMenus.hpp" />
+    <ClInclude Include="..\indep\inc\EndGameScreens.hpp" />
+    <ClInclude Include="..\indep\inc\Flags.hpp" />
+    <ClInclude Include="..\indep\inc\FlailerChunks.hpp" />
+    <ClInclude Include="..\indep\inc\FlailerDB.hpp" />
+    <ClInclude Include="..\indep\inc\Fred.hpp" />
+    <ClInclude Include="..\indep\inc\NativeAudioProfileValidation.hpp" />
+    <ClInclude Include="..\indep\inc\GameFlow.hpp" />
+    <ClInclude Include="..\indep\inc\GhostCar.hpp" />
+    <ClInclude Include="..\indep\inc\HudAnim.hpp" />
+    <ClInclude Include="..\indep\inc\Integrable.hpp" />
+    <ClInclude Include="..\indep\inc\Joylog.hpp" />
+    <ClInclude Include="..\indep\inc\Language.hpp" />
+    <ClInclude Include="..\indep\inc\MellowMover.hpp" />
+    <ClInclude Include="..\indep\inc\Munitions.hpp" />
+    <ClInclude Include="..\indep\inc\NIS.hpp" />
+    <ClInclude Include="..\indep\inc\PauseMenu.hpp" />
+    <ClInclude Include="..\indep\inc\PhysicsCar.hpp" />
+    <ClInclude Include="..\indep\inc\Player.hpp" />
+    <ClInclude Include="..\indep\inc\Point.hpp" />
+    <ClInclude Include="..\indep\inc\Polyhedra.hpp" />
+    <ClInclude Include="..\indep\inc\PsychoDriver.hpp" />
+    <ClInclude Include="..\indep\inc\Pursuit.hpp" />
+    <ClInclude Include="..\indep\inc\Race.hpp" />
+    <ClInclude Include="..\indep\inc\RaceCoordinator.hpp" />
+    <ClInclude Include="..\indep\inc\RaceParameters.hpp" />
+    <ClInclude Include="..\indep\inc\RealDriver.hpp" />
+    <ClInclude Include="..\indep\inc\Replay.hpp" />
+    <ClInclude Include="..\indep\inc\ReplayScreen.hpp" />
+    <ClInclude Include="..\indep\inc\RigidBody.hpp" />
+    <ClInclude Include="..\indep\inc\Scenery.hpp" />
+    <ClInclude Include="..\indep\inc\Skids.hpp" />
+    <ClInclude Include="..\indep\inc\Smokeable.hpp" />
+    <ClInclude Include="..\indep\inc\SmokeableInfo.hpp" />
+    <ClInclude Include="..\indep\inc\Sound3d.hpp" />
+    <ClInclude Include="..\indep\inc\Sound3dSample.hpp" />
+    <ClInclude Include="..\indep\inc\SpeechNoise.hpp" />
+    <ClInclude Include="..\indep\inc\Suspension.hpp" />
+    <ClInclude Include="..\indep\inc\Table.hpp" />
+    <ClInclude Include="..\indep\inc\TerrainEffects.hpp" />
+    <ClInclude Include="..\indep\inc\TerrainType.hpp" />
+    <ClInclude Include="..\indep\inc\Texture.hpp" />
+    <ClInclude Include="..\indep\inc\Timer.hpp" />
+    <ClInclude Include="..\indep\inc\Track.hpp" />
+    <ClInclude Include="..\indep\inc\TrackMap.hpp" />
+    <ClInclude Include="..\indep\inc\TrackPath.hpp" />
+    <ClInclude Include="..\indep\inc\TrackRoute.hpp" />
+    <ClInclude Include="..\indep\inc\TrackedController.hpp" />
+    <ClInclude Include="..\indep\inc\TrafficCar.hpp" />
+    <ClInclude Include="..\indep\inc\TrafficDriver.hpp" />
+    <ClInclude Include="..\indep\inc\VoronoiClip.hpp" />
+    <ClInclude Include="..\indep\inc\WeatherMan.hpp" />
+    <ClInclude Include="..\indep\inc\Wheel.hpp" />
+    <ClInclude Include="..\indep\inc\World.hpp" />
+    <ClInclude Include="..\indep\inc\WorldObject.hpp" />
+    <ClInclude Include="..\indep\inc\bRepeat.hpp" />
+    <ClInclude Include="..\indep\inc\dbFilesBase.hpp" />
+    <ClInclude Include="..\indep\inc\eEnvMap.hpp" />
+    <ClInclude Include="..\indep\inc\eLight.hpp" />
+    <ClInclude Include="..\indep\inc\eMath.hpp" />
+    <ClInclude Include="..\indep\inc\spikestrip.hpp" />
+    <ClInclude Include="..\indep\src\MoviePlayer\DCTImage.h" />
+    <ClInclude Include="..\indep\src\MoviePlayer\Huffman2.h" />
+    <ClInclude Include="..\indep\src\MoviePlayer\MV3Codec.h" />
+    <ClInclude Include="..\indep\src\MoviePlayer\RingBuffer.h" />
+    <ClInclude Include="..\indep\src\speech\SEDWedge.hpp" />
+    <ClInclude Include="..\indep\src\speech\actions.hpp" />
+    <ClInclude Include="..\indep\src\speech\conditions.hpp" />
+    <ClInclude Include="..\indep\src\speech\fsm.hpp" />
+    <ClInclude Include="..\indep\src\speech\mgr.hpp" />
+    <ClInclude Include="..\indep\src\speech\nfsFsm.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="NFSHP2Core.vcxproj">
+      <Project>{83C7D1D8-039C-49C2-8D21-F0DD4DFE25A8}</Project>
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

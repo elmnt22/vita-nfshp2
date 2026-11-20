@@ -1,0 +1,3 @@
+#include "NativeAppResources.h"
+
+IDI_NFSHP2_APPLICATION ICON "NFSHP2.ico"
