@@ -1056,6 +1056,9 @@ public:
     void RenderWorldStrip(const std::vector<frontend::FlailerPolyVertex>& vertices,
         const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view,
         EcstasyCarShadow shadow=EcstasyCarShadow::None);
+    void RenderWorldStrip(const frontend::FlailerPolyVertex* vertices,std::size_t count,
+        const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view,
+        EcstasyCarShadow shadow=EcstasyCarShadow::None);
     void RecordCarShadowCapture(double sunMilliseconds,double roadMilliseconds) noexcept {
         carShadowCaptureMilliseconds_[0]+=sunMilliseconds;
         carShadowCaptureMilliseconds_[1]+=roadMilliseconds;
@@ -1177,7 +1180,11 @@ private:
     // group before publication, and no resource borrower lives in these quads.
     std::vector<std::unique_ptr<std::vector<EcstasyParticleQuad>>> particleGroups_;
     std::size_t liveParticleGroups_{};
+    // Capacity survives completion like particleGroups_: each used strip is
+    // overwritten before publication (no per-strip heap churn).
     std::vector<std::unique_ptr<std::vector<frontend::FlailerPolyVertex>>> worldStrips_;
+    std::size_t liveWorldStrips_{};
+    std::vector<frontend::FlailerPolyVertex>* TakeWorldStrip(const frontend::FlailerPolyVertex* vertices,std::size_t count);
     std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>> animatedStrips_;
     // Released posed strips of this frame object, reused (vector capacity
     // kept) by the next capture's owner-thread skinning path.
