@@ -222,7 +222,7 @@ void appendCarMarker(CarAppearance& appearance,uint32_t key,const std::array<flo
 }
 
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { std::array<std::uint64_t,8> carRenderSplitMicros{}; }
+
 namespace hp2 {
 struct CarEffectsResources::Storage {
     std::array<CarEffectPosition,Capacity> positions{};
@@ -500,6 +500,7 @@ void carPartCullerCull(CarPartCuller* parts,const float eye[4])
     }
 }
 
+namespace hp2 { std::array<std::uint64_t,8> carRenderSplitMicros{}; std::array<std::uint64_t,7> carSetupSplitMicros{}; }
 namespace {
 void updateCarRenderReplacementTextures(CarAppearance& render,Car* car,bool reconnect=true)
 {
@@ -581,6 +582,7 @@ void updateCarRenderSceneTextures(CarAppearance& render,Car* car,
     }
     if(changed)for(std::size_t lod=0;lod<3;++lod)
         editorMarkerModelReconnectTextureTable(&render.models[lod]);
+    ++hp2::carSetupSplitMicros[changed ? 4:6];
 }
 
 void createCarRenderLightFlares(CarAppearance& render,const PositionMarkerRegistry* markers)
@@ -1260,6 +1262,12 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     float toClip[16];eMulMatrix(toClip,transform,view.matrices.worldToClip);
     if (!ecstasyClassifyBounds(render.minimum,render.maximum,toClip))return 0;
     if(timed)++hp2::carRenderSplitMicros[7];
+    std::uint32_t setupMark=timed ? collisionWitnessClockMicros():0u;
+    const auto setupAt=[&](std::size_t part) {
+        if(!timed)return;
+        const auto now=collisionWitnessClockMicros();hp2::carSetupSplitMicros[part]+=now-setupMark;setupMark=now;
+    };
+    if(timed)hp2::carSetupSplitMicros[5]+=setupMark-carMark;
     struct CarScope {bool on;CarScope(bool v):on(v){if(on)hp2::ecstasyCarScope=true;}~CarScope(){if(on)hp2::ecstasyCarScope=false;}} carScope{timed};
     auto* nativeFrame=car ? car->Frame():nullptr;
     hp2::Require(!car || (nativeFrame && nativeFrame->movement &&
@@ -1269,12 +1277,14 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     updateCarRenderSceneTextures(render,car,nativeFrame ? &nativeFrame->state:nullptr,
         car ? car->driverInfo->driverClass:0,
         nativeFrame ? nativeFrame->movement->bindings.controls:nullptr,render.bindings->scenario,worldFrames);
+    setupAt(0);
     // Explicit PC-quality presentation adaptation. Retain the PAL pixel
     // radius for culling, flares, damage, driver and lighting decisions;
     // apply the native distance preference to body/wheel mesh LOD only.
     float inverse[16],localEye[4];vectorMatrixInverseAffine(inverse,transform);
     eMulVector3(localEye,inverse,view.view->current.eye);
     carPartCullerCull(render.cullers.data(),localEye);
+    setupAt(1);
     // Switch 1 and the Switch 2 high-FPS profile limit AI secondary work.
     const bool reducedDetail=hp2::nativeSceneQuality().reducedOpponents && car &&
         car->driverInfo->driverClass==2 &&
@@ -1316,6 +1326,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     const float distance=std::sqrt(distanceSquared);
     hp2::Require(distance>0.0f,"Original Car depth bias is undefined at its camera origin");
     ecstasyViewBiasMatrixForZSorting(&view,drawTransform,distance/distance);
+    setupAt(2);
     const bool frontend=render.bindings && render.bindings->applicationState &&
         *render.bindings->applicationState==3;
     hp2::Require(render.textures,"Car lighting has no canonical light registry");
@@ -1326,6 +1337,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     hp2::LightContextBatch lightContexts(render.textures->Lights());
     const auto bodyLighting=lightContexts.Setup(transform,
         frame.EnvironmentMatrix(),view.view->current.eye,view,applicationState);
+    setupAt(3);
     const std::uint32_t environmentFlags=
         !reducedDetail && hp2::environmentMappingEnabled && pixels>=18 ? 0u:1u;
     const auto draw=[&](std::size_t slot,const float* matrix,std::uint32_t flags=0u,float alpha=1.0f) {
