@@ -981,6 +981,10 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
                 (unsigned long long)nativeShadingCounters[3],(unsigned long long)nativeShadingCounters[4],(unsigned long long)nativeShadingCounters[5]);
             nativeShadingCounters={};
             platform::RecordSessionEvent("renderer.vitagl.gather_steps",detail);
+            std::snprintf(detail,sizeof(detail),"per_frame template_hits=%.1f solid_commands=%.1f shadow_commands=%.1f sorted_commands=%.1f",
+                nativeGatherCounters[0]/300.0,nativeGatherCounters[1]/300.0,nativeGatherCounters[2]/300.0,nativeGatherCounters[4]/300.0);
+            nativeGatherCounters={};
+            platform::RecordSessionEvent("renderer.vitagl.gather_solids",detail);
             std::snprintf(detail,sizeof(detail),"per_frame main_screens=%.2f other_screens=%.3f quads=%.0f",
                 nativeParticleCoverage[0]/300,nativeParticleCoverage[1]/300,nativeParticleCoverage[2]/300);
             nativeParticleCoverage={};

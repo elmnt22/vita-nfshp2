@@ -672,6 +672,9 @@ struct EditorMarkerSolidGeometry {
         std::uint64_t nativeTopologyMask{};
         // A frame-owned posed copy records its authored source (pool key).
         const Strip* nativePoseSource{};
+        // Source revision the posed copy's non-XYZ channels were copied at:
+        // a pooled copy of an unchanged source re-skins XYZ only.
+        std::uint64_t nativePoseSourceRevision{};
         std::uint64_t nativeVertexRevision{}; // Zero retains exact byte validation.
         void PrepareNativeTopology();
         void StampNativeVertexRevision() noexcept;
@@ -950,6 +953,19 @@ struct OpaqueSceneryBatch {
     std::uint64_t emitPass{};bool emitPassLit{};
         std::vector<std::array<float,6>> runBounds; // union of each run's strip boxes (min xyz, max xyz)
         std::vector<const TextureInfo*> uniqueTextures; // distinct strips[].texture (pixel residency check)
+    // Packed per-run emit record (one cache-friendly array instead of six
+    // parallel reads plus the texture descriptor projection selector).
+    struct EmitRun {
+        const TextureInfo* texture{};
+        const EditorMarkerLightMaterial* material{};
+        const EditorMarkerSolidGeometry::Strip* firstStrip{};
+        std::uint32_t drawFlags{},first{};
+        std::uint16_t count{};
+        std::uint8_t projection{};
+        std::array<float,6> box{};
+    };
+    std::vector<EmitRun> emitRuns;
+    std::vector<std::array<float,6>> stripBounds; // parallel to runStrips
 };
 
 class EcstasyFrame final {
@@ -1912,6 +1928,22 @@ extern int ecstasySceneJobsSerial;
 // Sampled scenery emit split (diagnostic): RenderOpaqueSceneryBatch adds
 // prepare / capture / emit ms here while the caller has sampling enabled.
 inline bool ecstasyEmitSampling=false;
+// Diagnostic-only cost bounds (Vita diag_nocars.txt / diag_noscenery.txt):
+// skip car / scenery rendering entirely. Never set by default.
+inline bool ecstasyDiagSkipCars=false,ecstasyDiagSkipScenery=false;
+// Diagnostic census of car-part strips (PC HP2_CAR_CENSUS=1): renders,
+// models, strips, depth-sorted, 0x40 specular, 0x100 reflection, clip1,
+// boned strips, run breaks (state change between consecutive strips).
+inline bool ecstasyCarCensusActive=false;
+// Car-scope RenderModel split (timed builds): visible, instance+projection,
+// strip capture, calls, strips, commands.
+inline bool ecstasyCarScope=false;
+// Model strip runs: consecutive same-state strips of one RenderModel call
+// share one command (sceneryRunCount over SceneryRunStrips) instead of one
+// command per strip. 0 = per-strip commands (Vita model_runs_off.txt).
+extern int ecstasyModelRuns;
+inline std::array<std::uint64_t,6> ecstasyModelSplitMicros{};
+inline std::array<std::uint64_t,9> ecstasyCarCensus{};
 inline std::array<double,3> ecstasyEmitSampleMs{};
 template<class Task>
 void RunNativeSceneJobs(std::size_t count,Task&& task,

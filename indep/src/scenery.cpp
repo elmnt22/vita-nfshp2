@@ -622,6 +622,7 @@ std::size_t sceneryNativeSelectDetailLod(const SceneryModel& model,
 void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame,
     std::uint32_t viewMask,std::int32_t worldFrames,bool emitGeometry)
 {
+    if(hp2::ecstasyDiagSkipScenery)emitGeometry=false;
     // PAL150D98/150B10/150378/14FE18/150EB8. Native vectors replace only the
     // original temporary cull-list allocation; their entries still borrow
     // the same models, placements, source trees and viewport camera.
