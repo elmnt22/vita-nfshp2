@@ -87,6 +87,7 @@ EditorMarkerTexture* findModelTexture(EditorMarkerResources* root,uint32_t key)
 
 extern uint32_t (*collisionWitnessClockMicros)();
 // Diagnostic: serial skinned strips copy/skin/capture us, [3] strips, [4] vertices.
+#include "bware/inc/bMathNeon.hpp"
 extern int bMatrixNeonEnabled;
 namespace hp2 {std::array<std::uint64_t,5> ecstasySkinSplitMicros{};
 // RenderModel parallel strip capture threshold (exact either way; PC
@@ -1325,11 +1326,16 @@ int32_t ecstasyClassifyBounds(const float minimum[3],const float maximum[3],cons
     // Same lanes and rounding as the x64 path: separate multiply/add (no
     // fused ops), base + X/Y/Z edge order, |W| limits per corner.
     const auto mx=vld1q_f32(matrix),my=vld1q_f32(matrix+4),mz=vld1q_f32(matrix+8);
-    const auto first=vaddq_f32(vmulq_n_f32(mx,minimum[0]),vmulq_n_f32(my,minimum[1]));
-    const auto base=vaddq_f32(vaddq_f32(first,vmulq_n_f32(mz,minimum[2])),vld1q_f32(matrix+12));
-    const auto xStep=vmulq_n_f32(mx,maximum[0]-minimum[0]);
-    const auto yStep=vmulq_n_f32(my,maximum[1]-minimum[1]);
-    const auto zStep=vmulq_n_f32(mz,maximum[2]-minimum[2]);
+    // Bounds load straight into NEON lanes: scalar operands would each take
+    // a VFP->ARM->NEON round trip (a pipeline stall on the Cortex-A9). The
+    // NEON subtractions round exactly as the scalar ones (RN, flush-to-zero).
+    const auto lowXY=vld1_f32(minimum),lowZ=vld1_dup_f32(minimum+2);
+    const auto sizeXY=vsub_f32(vld1_f32(maximum),lowXY),sizeZ=vsub_f32(vld1_dup_f32(maximum+2),lowZ);
+    const auto first=vaddq_f32(vmulq_lane_f32(mx,lowXY,0),vmulq_lane_f32(my,lowXY,1));
+    const auto base=vaddq_f32(vaddq_f32(first,vmulq_lane_f32(mz,lowZ,0)),vld1q_f32(matrix+12));
+    const auto xStep=vmulq_lane_f32(mx,sizeXY,0);
+    const auto yStep=vmulq_lane_f32(my,sizeXY,1);
+    const auto zStep=vmulq_lane_f32(mz,sizeZ,0);
     const float32x4_t corners[4]={base,vaddq_f32(base,xStep),
         vaddq_f32(vaddq_f32(base,xStep),yStep),vaddq_f32(base,yStep)};
     static const uint32x4_t positiveBits={1u,4u,16u,0u},negativeBits={2u,8u,32u,0u};
@@ -1341,8 +1347,15 @@ int32_t ecstasyClassifyBounds(const float minimum[3],const float maximum[3],cons
     for(int layer=0;layer<2;++layer)for(int corner=0;corner<4;++corner) {
         const auto point=layer ? vaddq_f32(corners[corner],zStep):corners[corner];
         const auto limit=vabsq_f32(vdupq_lane_f32(vget_high_f32(point),1));
-        const auto bits=vorrq_u32(vandq_u32(vcgtq_f32(point,limit),positiveBits),
-            vandq_u32(vcltq_f32(point,vnegq_f32(limit)),negativeBits));
+        // GCC 15 lowers vcgtq/vcltq_f32 and vnegq_f32 to generic vector
+        // compares, which (without -ffast-math) it scalarizes into eight
+        // vcmpe+vmrs sequences through the stack (~2.9 us per call). Issue
+        // the NEON compares directly; -|W| is the exact sign-bit flip.
+        const auto negativeLimit=vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(limit),vdupq_n_u32(0x80000000u)));
+        uint32x4_t above,below;
+        __asm__("vcgt.f32 %q0, %q1, %q2":"=w"(above):"w"(point),"w"(limit));
+        __asm__("vcgt.f32 %q0, %q1, %q2":"=w"(below):"w"(negativeLimit),"w"(point));
+        const auto bits=vorrq_u32(vandq_u32(above,positiveBits),vandq_u32(below,negativeBits));
         // Fold the three component lanes into every lane of 'flags'.
         const auto lanes=vorr_u32(vget_low_u32(bits),vget_high_u32(bits));
         const auto folded=vorr_u32(lanes,vrev64_u32(lanes));
@@ -3859,6 +3872,14 @@ static void EmitOpaqueSceneryRunsPacked(const OpaqueSceneryBatch& batch,const Ed
     }
     const auto* emitRuns=batch.emitRuns.data();
     const auto runCount=batch.emitRuns.size();
+    const auto commandsBefore=output.size();
+    struct EmitCount {
+        const std::vector<EcstasyDrawCommand>& output;std::size_t before;bool cull;std::size_t runs;
+        ~EmitCount() {
+            if(!ecstasyEmitSampling)return;
+            ecstasyEmitCounters[0]+=runs;ecstasyEmitCounters[3]+=output.size()-before;ecstasyEmitCounters[4]+=cull;
+        }
+    } emitCount{output,commandsBefore,cullStrips,runCount};
     for(std::size_t runIndex=0;runIndex<runCount;++runIndex) {
         const auto& run=emitRuns[runIndex];
         const auto* texture=run.texture;
@@ -3869,6 +3890,7 @@ static void EmitOpaqueSceneryRunsPacked(const OpaqueSceneryBatch& batch,const Ed
             // every strip (the GPU clips any strip that is not).
             const auto& box=run.box;
             const auto whole=run.count>1 && ecstasySceneryFastMerge ? ecstasyClassifyBounds(box.data(),box.data()+3,screenClip):1;
+            if(ecstasyEmitSampling) {ecstasyEmitCounters[1]+=run.count>1;if(whole==1)ecstasyEmitCounters[2]+=run.count;}
             if(whole==0)continue;
             if(whole==2)runStrips.insert(runStrips.end(),
                 batch.runStrips.begin()+run.first,batch.runStrips.begin()+run.first+run.count);
@@ -4114,23 +4136,20 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
                 std::array<std::uint32_t,3> encoded{};
                 std::memcpy(encoded.data(),position.data(),sizeof(encoded));
                 const auto first=encoded[0]&255u,second=encoded[1]&255u,weight=encoded[2]&255u;
-                const float x=eUnitVector4[0]+position[0],y=eUnitVector4[1]+position[1],
-                    z=eUnitVector4[2]+position[2],w=eUnitVector4[3];
+                const auto point=bNeonPoint3(eUnitVector4,position.data());
                 const auto transform=[&](std::uint32_t bone) {
                     Require(bone<bones,"Animated vertex bone exceeds its retained skeleton");
-                    const float* matrix=matrices[bone].data();
-                    float32x4_t result=vmulq_n_f32(vld1q_f32(matrix),x);
-                    result=vmlaq_n_f32(result,vld1q_f32(matrix+4),y);
-                    result=vmlaq_n_f32(result,vld1q_f32(matrix+8),z);
-                    return vmlaq_n_f32(result,vld1q_f32(matrix+12),w);
+                    return bNeonTransformMatrix(matrices[bone].data(),point);
                 };
                 float32x4_t posed;
                 if(weight==0)posed=transform(first);
                 else if(weight==1)posed=transform(second);
                 else {
-                    const float blend=static_cast<float>(weight)*(1.0f/256.0f);
+                    // weight/256 is exact; 1-blend rounds as the scalar one.
+                    const auto blend=vmul_n_f32(vcvt_f32_u32(vdup_n_u32(weight)),1.0f/256.0f);
+                    const auto keep=vsub_f32(vdup_n_f32(1.0f),blend);
                     const auto a=transform(first),b=transform(second);
-                    posed=vaddq_f32(vmulq_n_f32(a,1.0f-blend),vmulq_n_f32(b,blend));
+                    posed=vaddq_f32(vmulq_lane_f32(a,keep,0),vmulq_lane_f32(b,blend,0));
                 }
                 float* out=posedStrip.positions[vertex].data();
                 vst1_f32(out,vget_low_f32(posed));vst1q_lane_f32(out+2,posed,2);
@@ -4299,7 +4318,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
 #if !defined(__vita__) && !defined(__SWITCH__)
     if(ecstasyCarCensusActive) {
         ++ecstasyCarCensus[1];
-        const TextureInfo* lastTexture=nullptr;std::uint32_t lastFlags=~0u;const void* lastMaterial=nullptr;
+        const TextureInfo* censusTexture=nullptr;std::uint32_t lastFlags=~0u;const void* lastMaterial=nullptr;
         for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index) {
             const auto& strip=geometry.strips[index];
             if(strip.flags&0x400u)continue;
@@ -4312,8 +4331,8 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
             if(boneMatrices)++ecstasyCarCensus[7];
             const void* material=strip.lightMaterialIndex>=0 && static_cast<std::size_t>(strip.lightMaterialIndex)<geometry.lightMaterials.size() ?
                 geometry.lightMaterials[static_cast<std::size_t>(strip.lightMaterialIndex)]:nullptr;
-            if(texture!=lastTexture || strip.flags!=lastFlags || material!=lastMaterial)++ecstasyCarCensus[8];
-            lastTexture=texture;lastFlags=strip.flags;lastMaterial=material;
+            if(texture!=censusTexture || strip.flags!=lastFlags || material!=lastMaterial)++ecstasyCarCensus[8];
+            censusTexture=texture;lastFlags=strip.flags;lastMaterial=material;
         }
         if((ecstasyCarCensus[1]&4095u)==0) {
             char text[200];const auto& c=ecstasyCarCensus;
