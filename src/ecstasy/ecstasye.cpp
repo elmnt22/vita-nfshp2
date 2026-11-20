@@ -3604,12 +3604,11 @@ int ecstasySceneJobsSerial=[] {const char* value=std::getenv("HP2_SCENE_JOBS_SER
 // for the shared world context (exact; Vita scenery_fast_off.txt: 0).
 int ecstasyFastSceneryCapture=1;
 // Rear-view (view3) scenery captured on a collision helper concurrently with
-// view1 (exact; see SceneryResources::AsyncCapture). Off by default while
-// a Vita hang is investigated (Vita async_mirror.txt: on); PC
-// HP2_ASYNC_MIRROR=1, =2 also verifies each one.
+// view1 (exact; see SceneryResources::AsyncCapture). Vita default on
+// (async_mirror_off.txt); PC HP2_ASYNC_MIRROR=1, =2 also verifies each one.
 int ecstasyAsyncMirrorScenery=[] {
 #if defined(__vita__) || defined(__SWITCH__)
-    return 0;
+    return 1;
 #else
     const char* value=std::getenv("HP2_ASYNC_MIRROR");return value ? std::atoi(value):0;
 #endif
