@@ -1043,6 +1043,10 @@ public:
 
     // Source eAttachDirectData110378: one texture and average group depth.
     // The native packet owns copies of all projected vertices until completion.
+    // Fill-in-place form: the producer appends straight into the frame's
+    // next owned group, then commits it (no producer-side copy).
+    std::vector<EcstasyParticleQuad>& ParticleGroupStorage();
+    void CommitParticleGroup(const EditorMarkerTexture& descriptor,const CarCinematicScreen& view,float averageDepth);
     void AttachParticleGroup(const std::vector<EcstasyParticleQuad>& quads,
         const EditorMarkerTexture& texture,const CarCinematicScreen& view,float averageDepth);
     void AddPolygon(const frontend::FlailerPoly& polygon,const EditorMarkerTexture& texture,

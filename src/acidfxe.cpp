@@ -1709,11 +1709,10 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
     }
 #endif
     splitAt(1);
-    // Reuse one producer buffer across groups. AttachParticleGroup copies
-    // directly into the frame's contiguous native storage before it clears.
-    std::vector<EcstasyParticleQuad> quads;
+    // Survivors go straight into the frame's next owned group (an empty
+    // group is not committed and its storage is reused by the next one).
     for(const auto& plan:plans) {
-        quads.clear();
+        auto& quads=frame.ParticleGroupStorage();
         float depthSum=0.0f;
         for(auto index=plan.first;index<plan.first+plan.count;++index) {
             const auto& slot=slots[index];
@@ -1727,7 +1726,7 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
             quads.push_back(slot.quad);++result.drawnParticles;
         }
         if(!quads.empty()) {
-            frame.AttachParticleGroup(quads,*plan.descriptor,view,depthSum/static_cast<float>(quads.size()));
+            frame.CommitParticleGroup(*plan.descriptor,view,depthSum/static_cast<float>(quads.size()));
             ++result.drawnGroups;
         }
     }
