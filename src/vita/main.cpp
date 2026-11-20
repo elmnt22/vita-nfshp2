@@ -769,6 +769,11 @@ int main(int, char**)
             collisionWitnessBenchLog = [](const char* text) { benchLog->Line("vita.witness_bench", text); };
             log.Line("vita.diag", "witness bench armed");
         }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/witness_cache_off.txt").c_str(), &probe) >= 0) {
+            extern int collisionWitnessTransformCache;
+            collisionWitnessTransformCache = 0;
+            log.Line("vita.diag", "witness transform cache off");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/requeue_pred_off.txt").c_str(), &probe) >= 0) {
             extern int collisionRequeuePrediction;
             collisionRequeuePrediction = 0;
