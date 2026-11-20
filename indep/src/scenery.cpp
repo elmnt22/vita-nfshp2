@@ -1002,7 +1002,14 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     // false (nothing emitted) when one batch would need two lit states, or a
     // rejected model could change a solid/texture table read by later draws.
     constexpr std::size_t emitChunkDraws=48;
+    // Diagnostic: emit phases (plan+lights, instances, build, merge).
+    static std::array<double,4> emitPhases{};static std::array<double,3> emitCounts{};
     const auto parallelEmit=[&](bool merge)->bool {
+        auto phaseMark=std::chrono::steady_clock::now();
+        const auto phase=[&](std::size_t index) {
+            const auto now=std::chrono::steady_clock::now();
+            emitPhases[index]+=std::chrono::duration<double,std::milli>(now-phaseMark).count();phaseMark=now;
+        };
         const auto pass=++emitPass_;
         auto& plan=emitPlanScratch_;
         plan.assign(draws.size(),EmitPlan{});
@@ -1031,8 +1038,10 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             if(draw.model->replacement || !solid || solid->rigidAnimation || solid->vertexAnimation)return false;
         }
         Require(view.target && view.target->enabled && view.matricesCalculated,"Opaque scenery batch lost its live view");
+        phase(0);
         const auto& projection=frame.SceneryProjection(view);
         for(auto& entry:plan)if(entry.batch)entry.instance=&frame.AllocateInstance();
+        phase(1);
         const auto chunkCount=(draws.size()+emitChunkDraws-1)/emitChunkDraws;
         auto& chunks=emitChunkScratch_;
         if(chunks.size()<chunkCount)chunks.resize(chunkCount);
@@ -1051,8 +1060,12 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 entry.end=static_cast<std::uint32_t>(chunk.commands.size());
             }
         },2);
+        phase(2);
         if(!merge)return true;
+        double rejectedBefore=splitModelMs;
         for(std::size_t chunkIndex=0;chunkIndex<chunkCount;++chunkIndex) {
+            emitCounts[0]+=static_cast<double>(chunks[chunkIndex].commands.size());
+            emitCounts[1]+=static_cast<double>(chunks[chunkIndex].runStrips.size());
             auto& chunk=chunks[chunkIndex];
             const auto runBase=frame.AppendSceneryRunStrips(chunk.runStrips);
             const auto first=chunkIndex*emitChunkDraws,last=std::min(first+emitChunkDraws,draws.size());
@@ -1064,10 +1077,16 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 } else renderRejected(drawIndex,entry.context);
             }
         }
+        phase(3);
+        emitPhases[3]-=splitModelMs-rejectedBefore; // rejected models are model_ms
+        emitCounts[2]+=1.0;
         return true;
     };
     const bool parallelCandidate=cachedScenery && hp2::ecstasyParallelSceneryEmit && hp2::ecstasySceneryRuns &&
-        draws.size()>=2*emitChunkDraws && NativeSceneEffectiveHardwareConcurrency()>1;
+        draws.size()>=2*emitChunkDraws && NativeSceneEffectiveHardwareConcurrency()>1 &&
+        // Serial jobs (Vita default): chunk buffers + merge are only extra
+        // command copies; the direct serial path is the reference.
+        !hp2::ecstasySceneJobsSerial;
     const bool parallelDone=parallelCandidate && !verifyParallelEmit && parallelEmit(true);
     if(parallelDone) {
         ++parallelEmitViews_;
@@ -1160,6 +1179,13 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             std::snprintf(text,sizeof(text),"collect_ms=%.3f roots_ms=%.3f traverse_ms=%.3f dedupe_ms=%.3f parallel_emit=%.2f candidates=%.2f",
                 stages[0]/300,stages[1]/300,stages[2]/300,stages[3]/300,parallelViews/300,candidateViews/300);
             platform::RecordSessionEvent("render.scenery_prepare",text);
+            if(emitCounts[2]>0) {
+                const double n=emitCounts[2];
+                std::snprintf(text,sizeof(text),"views=%.0f plan_ms=%.3f instances_ms=%.3f build_ms=%.3f merge_ms=%.3f commands=%.1f run_strips=%.1f",
+                    n,emitPhases[0]/n,emitPhases[1]/n,emitPhases[2]/n,emitPhases[3]/n,emitCounts[0]/n,emitCounts[1]/n);
+                platform::RecordSessionEvent("render.scenery_emit",text);
+                emitPhases={};emitCounts={};
+            }
             stages={};parallelViews=candidateViews=0;
             split={};counts={};renders=0;
         }

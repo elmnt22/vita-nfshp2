@@ -579,6 +579,25 @@ int main(int, char**)
                 static_cast<unsigned long long>(collisionSpeculationVerifyBudget));
             log.Line("vita.diag", detail);
         }
+        {
+            // Calibration: cost of the steady_clock reads used by the timers,
+            // and of a 64 KB memcpy (cache-resident and streaming).
+            const auto start = std::chrono::steady_clock::now();
+            auto last = start;
+            for (int i = 0; i < 1000; ++i) last = std::chrono::steady_clock::now();
+            const double clockUs = std::chrono::duration<double, std::micro>(last - start).count() / 1000.0;
+            std::vector<unsigned char> a(4u << 20), b(4u << 20);
+            auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < 64; ++i) std::memcpy(b.data(), a.data() + (i & 1) * 64, 65536);
+            auto t1 = std::chrono::steady_clock::now();
+            std::memcpy(b.data(), a.data(), a.size());
+            auto t2 = std::chrono::steady_clock::now();
+            char detail[160];
+            std::snprintf(detail, sizeof(detail), "calibrate clock_us=%.3f memcpy64k_hot_mbps=%.0f memcpy4m_mbps=%.0f", clockUs,
+                64.0 * 65536.0 / std::chrono::duration<double, std::micro>(t1 - t0).count(),
+                double(a.size()) / std::chrono::duration<double, std::micro>(t2 - t1).count());
+            log.Line("vita.diag", detail);
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_runs_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryRuns = 0;
             log.Line("vita.diag", "scenery strip runs off");
