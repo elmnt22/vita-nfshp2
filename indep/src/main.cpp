@@ -1507,6 +1507,13 @@ bool ApplicationRuntime::Tick()
                     s.host.RecordSessionEvent("render.car_split",detail);
                     e={};
                 }
+                if(auto& e=hp2::ecstasyModelSplitMicros;e[3]) {
+                    const double n=static_cast<double>(e[3]);
+                    std::snprintf(detail,sizeof(detail),"calls=%llu visible_us=%.1f instance_us=%.1f strips_us=%.1f strips_per=%.1f commands_per=%.1f",
+                        static_cast<unsigned long long>(e[3]),e[0]/n,e[1]/n,e[2]/n,e[4]/n,e[5]/n);
+                    s.host.RecordSessionEvent("render.car_model_split",detail);
+                    e={};
+                }
                 if(auto& e=hp2::ecstasySkinSplitMicros;e[3]) {
                     const double n=static_cast<double>(e[3]);
                     std::snprintf(detail,sizeof(detail),"strips=%llu verts_per=%.1f copy_us=%.2f skin_us=%.2f capture_us=%.2f",

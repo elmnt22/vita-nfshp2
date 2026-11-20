@@ -87,6 +87,7 @@ EditorMarkerTexture* findModelTexture(EditorMarkerResources* root,uint32_t key)
 
 extern uint32_t (*collisionWitnessClockMicros)();
 // Diagnostic: serial skinned strips copy/skin/capture us, [3] strips, [4] vertices.
+extern int bMatrixNeonEnabled;
 namespace hp2 {std::array<std::uint64_t,5> ecstasySkinSplitMicros{};
 // RenderModel parallel strip capture threshold (exact either way; PC
 // HP2_PARALLEL_MODEL_STRIPS, Vita model_par<N>.txt).
@@ -3135,6 +3136,13 @@ void EcstasyFrame::DisplayBlendPrevious(const CarCinematicServices& views)
 }
 
 namespace {
+std::uint8_t MaterialProjectionIndex(const TextureInfo& texture)
+{
+    if(!texture.descriptor || !texture.descriptor->authoredRecord || texture.descriptor->authoredRecordSize<164)
+        throw std::runtime_error("World material lost its original projection selector");
+    const auto mode=texture.descriptor->authoredRecord[0x75];
+    return static_cast<std::uint8_t>(mode==1 || mode==2 ? mode:0);
+}
 const std::array<float,16>& CaptureMaterialProjection(
     const TextureInfo& texture,const EcstasyDrawProjection& projection)
 {
@@ -3582,6 +3590,12 @@ static bool NativeSolidCommandStateEqual(const EcstasyDrawCommand& a,const Ecsta
         a.screenFilter.enabled==b.screenFilter.enabled && a.screenFilter.fixedAlpha==b.screenFilter.fixedAlpha &&
         a.screenFilter.textureFunction==b.screenFilter.textureFunction;
 }
+int ecstasyModelRuns=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_MODEL_RUNS"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 1;
+}();
 int ecstasySceneryRunFastPath=[] {
 #if !defined(__vita__)
     if(const char* value=std::getenv("HP2_SCENERY_RUN_FAST"))return std::atoi(value)!=0 ? 1:0;
@@ -3666,6 +3680,21 @@ bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edi
                 }
                 batch.runBounds.push_back(box);
             }
+            batch.emitRuns.clear();batch.stripBounds.clear();
+            for(std::size_t runIndex=0;runIndex<batch.runs.size();++runIndex) {
+                const auto& run=batch.runs[runIndex];
+                OpaqueSceneryBatch::EmitRun packed;
+                packed.texture=batch.strips[run.first].texture;
+                packed.material=batch.materials[run.first];packed.drawFlags=batch.drawFlags[run.first];
+                packed.firstStrip=batch.runStrips[run.first];packed.first=run.first;
+                packed.count=static_cast<std::uint16_t>(run.count);
+                packed.projection=MaterialProjectionIndex(*packed.texture);
+                packed.box=batch.runBounds[runIndex];
+                batch.emitRuns.push_back(packed);
+            }
+            for(const auto* geometryStrip:batch.runStrips)
+                batch.stripBounds.push_back({{geometryStrip->minimum[0],geometryStrip->minimum[1],geometryStrip->minimum[2],
+                    geometryStrip->maximum[0],geometryStrip->maximum[1],geometryStrip->maximum[2]}});
             batch.runLit=lit;batch.runInGame=inGameMaterials_;batch.runFallback=fallback;batch.runsValid=true;
         }
     }
@@ -3705,10 +3734,33 @@ void EcstasyFrame::AppendOpaqueSceneryCommands(const EcstasyDrawCommand* first,s
     }
 }
 
-void EcstasyFrame::EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
+#if !defined(__vita__) && !defined(__SWITCH__)
+// Field-wise EcstasyDrawCommand equality (memcmp would compare padding).
+static bool NativeDrawCommandFieldsEqual(const EcstasyDrawCommand& a,const EcstasyDrawCommand& b)
+{
+    return a.kind==b.kind && a.uiPlacement==b.uiPlacement && a.nativeRenderEggState==b.nativeRenderEggState &&
+        a.polygon==b.polygon && a.particleGroup==b.particleGroup && a.worldStrip==b.worldStrip &&
+        a.strip==b.strip && a.model==b.model && a.texture==b.texture && a.orderingTexture==b.orderingTexture &&
+        a.depthPalette==b.depthPalette && a.focus==b.focus &&
+        std::memcmp(&a.screenFilter,&b.screenFilter,sizeof(a.screenFilter))==0 &&
+        a.feedbackGroup==b.feedbackGroup && a.lightMaterial==b.lightMaterial && a.instance==b.instance &&
+        a.clipToScreen==b.clipToScreen && a.view==b.view && a.target==b.target && a.sampledTarget==b.sampledTarget &&
+        a.sampledPreviousFrame==b.sampledPreviousFrame && a.showcaseEnvironmentBlend==b.showcaseEnvironmentBlend &&
+        a.cachedOpaqueScenery==b.cachedOpaqueScenery && a.sceneryRunCount==b.sceneryRunCount &&
+        a.sceneryRunFirst==b.sceneryRunFirst && a.carShadow==b.carShadow && a.rasterState==b.rasterState &&
+        a.layer==b.layer && a.clipClass==b.clipClass &&
+        std::memcmp(&a.alphaScale,&b.alphaScale,4)==0 && std::memcmp(&a.textureQScale,&b.textureQScale,4)==0 &&
+        a.drawFlags==b.drawFlags && a.depthSorted==b.depthSorted && a.zWriteEnabled==b.zWriteEnabled &&
+        std::memcmp(&a.sortDepth,&b.sortDepth,4)==0 && a.alphaGroup==b.alphaGroup && a.vertexOrder==b.vertexOrder;
+}
+#endif
+#if !defined(__vita__) && !defined(__SWITCH__)
+// PC HP2_VERIFY_EMIT_RUNS=1 reference: the pre-packed emit (parallel run
+// arrays, strip-struct bounds, recomputed localToClip, descriptor selector).
+static void EmitOpaqueSceneryRunsReference(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
     const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
     const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,
-    std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips) const
+    std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips)
 {
     const auto* solid=model.solid;
     EcstasyDrawCommand command;
@@ -3716,9 +3768,6 @@ void EcstasyFrame::EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const E
     command.view=&view;command.target=view.target;command.clipClass=2;
     command.textureQScale=view.pixelScale;
     command.instance=&instance;
-    // An intersecting model drops the strips that ecstasyDetermineVisibleStrips
-    // (mode 1, non-angular) drops: screen-clip bounds outside. A model inside
-    // the clip volume keeps every strip, as there. GPU clipping does the rest.
     float screenClip[16];
     if(cullStrips) {
         ecstasyViewLocalToScreenClip(&view,screenClip,localToWorld);
@@ -3733,9 +3782,6 @@ void EcstasyFrame::EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const E
         const auto* texture=batch.strips[run.first].texture;
         if(cullStrips) {
             const auto start=runStrips.size();
-            // The run's union box first: wholly outside one clip plane
-            // (a convex region) drops every strip; wholly inside keeps
-            // every strip (the GPU clips any strip that is not).
             const auto& box=batch.runBounds[runIndex];
             const auto whole=run.count>1 && ecstasySceneryFastMerge ? ecstasyClassifyBounds(box.data(),box.data()+3,screenClip):1;
             if(whole==0)continue;
@@ -3777,6 +3823,112 @@ void EcstasyFrame::EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const E
         } else {command.sceneryRunFirst=0;command.sceneryRunCount=0;}
         output.push_back(command);
     }
+}
+#endif
+static void EmitOpaqueSceneryRunsPacked(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
+    const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
+    const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,
+    std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips)
+{
+    const auto* solid=model.solid;
+    EcstasyDrawCommand command;
+    command.kind=EcstasyDrawKind::SolidStrip;command.model=&model;command.cachedOpaqueScenery=true;
+    command.view=&view;command.target=view.target;command.clipClass=2;
+    command.textureQScale=view.pixelScale;
+    command.instance=&instance;
+    // An intersecting model drops the strips that ecstasyDetermineVisibleStrips
+    // (mode 1, non-angular) drops: screen-clip bounds outside. A model inside
+    // the clip volume keeps every strip, as there. GPU clipping does the rest.
+    float screenClip[16];
+    if(cullStrips) {
+        ecstasyViewLocalToScreenClip(&view,screenClip,localToWorld);
+        const auto whole=ecstasyClassifyBounds(solid->minimum,solid->maximum,screenClip);
+        // instance.localToClip is exactly localToWorld*worldToClip (CaptureInstance /
+        // FillInstance), the same product ecstasyViewLocalToClip forms.
+        if(whole==1) {
+            if(ecstasyClassifyBounds(solid->minimum,solid->maximum,instance.localToClip.data())==2)cullStrips=false;
+        } else cullStrips=false;
+    }
+    const auto* emitRuns=batch.emitRuns.data();
+    const auto runCount=batch.emitRuns.size();
+    for(std::size_t runIndex=0;runIndex<runCount;++runIndex) {
+        const auto& run=emitRuns[runIndex];
+        const auto* texture=run.texture;
+        if(cullStrips) {
+            const auto start=runStrips.size();
+            // The run union box first: wholly outside one clip plane
+            // (a convex region) drops every strip; wholly inside keeps
+            // every strip (the GPU clips any strip that is not).
+            const auto& box=run.box;
+            const auto whole=run.count>1 && ecstasySceneryFastMerge ? ecstasyClassifyBounds(box.data(),box.data()+3,screenClip):1;
+            if(whole==0)continue;
+            if(whole==2)runStrips.insert(runStrips.end(),
+                batch.runStrips.begin()+run.first,batch.runStrips.begin()+run.first+run.count);
+            else for(std::uint32_t at=run.first;at<run.first+run.count;++at) {
+                const auto& bounds=batch.stripBounds[at];
+                if(ecstasyClassifyBounds(bounds.data(),bounds.data()+3,screenClip))
+                    runStrips.push_back(batch.runStrips[at]);
+            }
+            const auto visible=runStrips.size()-start;
+            if(!visible)continue;
+            if(command.texture!=texture) {
+                command.texture=texture;
+                command.clipToScreen=&projection.matrices[run.projection];
+            }
+            command.drawFlags=run.drawFlags;command.lightMaterial=run.material;
+            command.strip=runStrips[start];
+            if(visible>1) {
+                command.sceneryRunFirst=static_cast<std::uint32_t>(start);
+                command.sceneryRunCount=static_cast<std::uint16_t>(visible);
+            } else {
+                runStrips.pop_back();command.sceneryRunFirst=0;command.sceneryRunCount=0;
+            }
+            output.push_back(command);
+            continue;
+        }
+        if(command.texture!=texture) {
+            command.texture=texture;
+            command.clipToScreen=&projection.matrices[run.projection];
+        }
+        command.strip=run.firstStrip;command.drawFlags=run.drawFlags;
+        command.lightMaterial=run.material;
+        if(run.count>1) {
+            command.sceneryRunFirst=static_cast<std::uint32_t>(runStrips.size());
+            command.sceneryRunCount=static_cast<std::uint16_t>(run.count);
+            runStrips.insert(runStrips.end(),batch.runStrips.begin()+run.first,
+                batch.runStrips.begin()+run.first+run.count);
+        } else {command.sceneryRunFirst=0;command.sceneryRunCount=0;}
+        output.push_back(command);
+    }
+}
+
+void EcstasyFrame::EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
+    const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
+    const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,
+    std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips) const
+{
+#if !defined(__vita__) && !defined(__SWITCH__)
+    static const bool verifyEmitRuns=[] {const char* value=std::getenv("HP2_VERIFY_EMIT_RUNS");return value && *value=='1';}();
+    if(verifyEmitRuns) {
+        const auto outputBefore=output.size(),runsBefore=runStrips.size();
+        EmitOpaqueSceneryRunsPacked(batch,model,localToWorld,view,instance,projection,cullStrips,output,runStrips);
+        std::vector<EcstasyDrawCommand> expected;std::vector<const EditorMarkerSolidGeometry::Strip*> expectedRuns(
+            runStrips.begin(),runStrips.begin()+static_cast<std::ptrdiff_t>(runsBefore));
+        EmitOpaqueSceneryRunsReference(batch,model,localToWorld,view,instance,projection,cullStrips,expected,expectedRuns);
+        bool same=expected.size()==output.size()-outputBefore && expectedRuns==runStrips;
+        for(std::size_t at=0;same && at<expected.size();++at)
+            same=NativeDrawCommandFieldsEqual(expected[at],output[outputBefore+at]);
+        static std::uint64_t checks=0,mismatches=0;
+        ++checks;if(!same)++mismatches;
+        if((checks&4095u)==0 || (!same && mismatches==1)) {
+            char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
+                (unsigned long long)checks,(unsigned long long)mismatches);
+            platform::RecordSessionEvent("render.emit_runs_verify",text);
+        }
+        return;
+    }
+#endif
+    EmitOpaqueSceneryRunsPacked(batch,model,localToWorld,view,instance,projection,cullStrips,output,runStrips);
 }
 
 bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
@@ -3887,6 +4039,13 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
             }
         }
     } clear{visible,sources,chunks,textures};
+    const bool splitTimed=ecstasyCarScope && collisionWitnessClockMicros;
+    std::uint32_t splitMark=splitTimed ? collisionWitnessClockMicros():0u;
+    const auto splitAt=[&](std::size_t part) {
+        if(!splitTimed)return;
+        const auto now=collisionWitnessClockMicros();ecstasyModelSplitMicros[part]+=now-splitMark;splitMark=now;
+    };
+    struct SplitCall {bool on;SplitCall(bool v):on(v){}~SplitCall(){if(on)++ecstasyModelSplitMicros[3];}} splitCall{splitTimed};
     if (!ecstasyDetermineVisibleStrips(visible,model,view,localToWorld,boneMatrices!=nullptr,
         boneMatrices ? 1:((flags&4u) ? 2:1)))return 0;
     // These are the original live model/solid mutations, once and in source
@@ -3894,9 +4053,11 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     if (model.replacement)editorMarkerModelApplyReplacementTextureTable(&model);
     const auto& geometry=*model.solid->geometry;
     const auto start=commands_.size();
+    splitAt(0);
     auto state=CaptureStripState();
     state.instance=&CaptureInstance(localToWorld,view,lightContext);
     state.projection=&CaptureProjection(view);
+    splitAt(1);
     const bool environmentEnabled=environmentMappingEnabled!=0;
     std::size_t count=0;
     for(const auto& run:visible)count+=run.count;
@@ -3929,8 +4090,48 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     // This exact multiplication is shared by the model's ordered strip
     // packets. The owner does not advance the view or any borrowed input
     // before RunNativeSceneJobs has drained, including exceptional exits.
-    const auto skinStrip=[&](EditorMarkerSolidGeometry::Strip& posedStrip) {
-        for(auto& position:posedStrip.positions) {
+    const auto skinStrip=[&](EditorMarkerSolidGeometry::Strip& posedStrip,
+        const std::vector<std::array<float,3>>& sourcePositions) {
+        Require(sourcePositions.size()==posedStrip.positions.size(),"Posed strip lost its source vertex extent");
+#if defined(__vita__) && defined(__ARM_NEON)
+        // Same products and sums as eMulVector3 -> vectorMatrixTransform's
+        // NEON path (enabled only when the boot self-test proves it equals
+        // the scalar order) and the scalar blend, entirely in NEON registers:
+        // the VFP<->NEON store/reload round trips cost ~0.6 us per vertex.
+        if(bMatrixNeonEnabled) {
+            const auto bones=boneMatrices->size();
+            const auto* matrices=boneMatrices->data();
+            for(std::size_t vertex=0;vertex<sourcePositions.size();++vertex) {
+                const auto& position=sourcePositions[vertex];
+                std::array<std::uint32_t,3> encoded{};
+                std::memcpy(encoded.data(),position.data(),sizeof(encoded));
+                const auto first=encoded[0]&255u,second=encoded[1]&255u,weight=encoded[2]&255u;
+                const float x=eUnitVector4[0]+position[0],y=eUnitVector4[1]+position[1],
+                    z=eUnitVector4[2]+position[2],w=eUnitVector4[3];
+                const auto transform=[&](std::uint32_t bone) {
+                    Require(bone<bones,"Animated vertex bone exceeds its retained skeleton");
+                    const float* matrix=matrices[bone].data();
+                    float32x4_t result=vmulq_n_f32(vld1q_f32(matrix),x);
+                    result=vmlaq_n_f32(result,vld1q_f32(matrix+4),y);
+                    result=vmlaq_n_f32(result,vld1q_f32(matrix+8),z);
+                    return vmlaq_n_f32(result,vld1q_f32(matrix+12),w);
+                };
+                float32x4_t posed;
+                if(weight==0)posed=transform(first);
+                else if(weight==1)posed=transform(second);
+                else {
+                    const float blend=static_cast<float>(weight)*(1.0f/256.0f);
+                    const auto a=transform(first),b=transform(second);
+                    posed=vaddq_f32(vmulq_n_f32(a,1.0f-blend),vmulq_n_f32(b,blend));
+                }
+                float* out=posedStrip.positions[vertex].data();
+                vst1_f32(out,vget_low_f32(posed));vst1q_lane_f32(out+2,posed,2);
+            }
+            return;
+        }
+#endif
+        for(std::size_t vertex=0;vertex<sourcePositions.size();++vertex) {
+            const auto& position=sourcePositions[vertex];
             std::array<std::uint32_t,3> encoded{};
             std::memcpy(encoded.data(),position.data(),sizeof(encoded));
             const auto first=encoded[0]&255u,second=encoded[1]&255u,weight=encoded[2]&255u;
@@ -3947,9 +4148,18 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
                 for(std::size_t axis=0;axis<3;++axis)
                     posed[axis]=posed[axis]*(1.0f-blend)+other[axis]*blend;
             }
-            std::copy(posed,posed+3,position.begin());
+            std::copy(posed,posed+3,posedStrip.positions[vertex].begin());
         }
     };
+#if !defined(__vita__) && !defined(__SWITCH__)
+    static const bool verifyPoseReuse=[] {const char* value=std::getenv("HP2_VERIFY_POSE_REUSE");return value && *value=='1';}();
+#endif
+#if defined(__vita__) && !defined(HP2_VITA_ENVIRONMENT_MAP)
+    constexpr bool kModelRunsDropReflection=true; // CaptureStrip drops the reflection command
+#else
+    constexpr bool kModelRunsDropReflection=false;
+#endif
+    bool mergeRuns=false;
     const auto capture=[&](std::size_t ordinal,std::size_t index,std::int32_t clipClass,
         std::vector<EcstasyDrawCommand>& output,
         std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>>& posedStrips,
@@ -3989,23 +4199,154 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
             // indices and an unscaled8-bit blend value, not extra channels.
             // The owner takes pooled copies (parallel: pre-taken per ordinal).
             auto animatedStrip=parallel ? std::move(preposed[ordinal]):TakePosedStrip(strip);
-            if(animatedStrip)*animatedStrip=strip;
-            else animatedStrip=std::make_unique<EditorMarkerSolidGeometry::Strip>(strip);
+            // A pooled copy keyed by this source already holds every
+            // non-XYZ channel while the source revision is unchanged
+            // (decode/ST fix/damage restamp it); XYZ is rewritten below.
+            const bool reuse=animatedStrip && strip.nativeVertexRevision &&
+                animatedStrip->nativePoseSource==&strip &&
+                animatedStrip->nativePoseSourceRevision==strip.nativeVertexRevision &&
+                animatedStrip->positions.size()==strip.positions.size();
+            if(!reuse) {
+                if(animatedStrip)*animatedStrip=strip;
+                else animatedStrip=std::make_unique<EditorMarkerSolidGeometry::Strip>(strip);
+                animatedStrip->nativePoseSourceRevision=strip.nativeVertexRevision;
+            }
             animatedStrip->nativePoseSource=&strip;
             animatedStrip->nativeVertexRevision=0;
             skinAt(0);
             if(skinTimed) {++ecstasySkinSplitMicros[3];ecstasySkinSplitMicros[4]+=animatedStrip->positions.size();}
-            skinStrip(*animatedStrip);
+            skinStrip(*animatedStrip,strip.positions);
+#if !defined(__vita__) && !defined(__SWITCH__)
+            if(verifyPoseReuse && reuse) {
+                auto reference=strip;reference.nativePoseSource=&strip;reference.nativeVertexRevision=0;
+                reference.nativePoseSourceRevision=strip.nativeVertexRevision;
+                skinStrip(reference,strip.positions);
+                const auto& a=*animatedStrip;
+                const bool same=std::memcmp(a.positions.data(),reference.positions.data(),a.positions.size()*12)==0 &&
+                    a.normals==reference.normals && a.textureCoordinates==reference.textureCoordinates &&
+                    a.colors==reference.colors && a.nativeUniqueOrder==reference.nativeUniqueOrder &&
+                    a.nativeTriangleOrder==reference.nativeTriangleOrder && a.flags==reference.flags &&
+                    a.textureIndex==reference.textureIndex && a.lightMaterialIndex==reference.lightMaterialIndex &&
+                    a.drawDisableMask==reference.drawDisableMask && a.minimum==reference.minimum &&
+                    a.maximum==reference.maximum && a.textureScales==reference.textureScales &&
+                    a.autoK==reference.autoK && a.nativeTopologyCount==reference.nativeTopologyCount &&
+                    a.nativeTopologyMask==reference.nativeTopologyMask && a.mipLevelScale==reference.mipLevelScale;
+                static std::uint64_t checks=0,mismatches=0;++checks;if(!same)++mismatches;
+                if((checks&4095u)==0 || (!same && mismatches==1)) {
+                    char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
+                        (unsigned long long)checks,(unsigned long long)mismatches);
+                    platform::RecordSessionEvent("render.pose_reuse_verify",text);
+                }
+            }
+#endif
             submitted=animatedStrip.get();posedStrips.push_back(std::move(animatedStrip));
             skinAt(1);
+        }
+        if(mergeRuns && &output==&commands_ && output.size()>start && submitted->positions.size()>=3) {
+            // The command CaptureStrip would append differs from the
+            // previous one only by its strip: same model, instance, texture,
+            // final material, flags and clip class within this call. Only a
+            // strip that appends exactly one command (no depth sort, no
+            // specular/reflection follower) joins the run.
+            const bool reflectionCommand=(draw&0x100u) && (state.environmentApplicationState==3 || !kModelRunsDropReflection);
+            auto& previous=output.back();
+            const auto* finalMaterial=material && state.inGameMaterials && material->inGameVariant ?
+                material->inGameVariant.get():material;
+            if(!texture->requiresDepthSort && !(draw&0x40u) && !reflectionCommand &&
+                previous.kind==EcstasyDrawKind::SolidStrip && previous.model==&model &&
+                previous.instance==state.instance && previous.texture==texture &&
+                previous.lightMaterial==finalMaterial && previous.drawFlags==draw &&
+                previous.clipClass==clipClass && !previous.depthSorted &&
+                previous.carShadow==EcstasyCarShadow::None && previous.sceneryRunCount<0xffffu &&
+                (!previous.sceneryRunCount ||
+                    previous.sceneryRunFirst+previous.sceneryRunCount==sceneryRunStrips_.size())) {
+                Require(submitted->positions.size()==submitted->textureCoordinates.size() &&
+                    submitted->positions.size()==submitted->colors.size(),"Solid strip channels have different extents");
+                if(draw&0x140u)Require(lightContext && material && submitted->normals.size()==submitted->positions.size(),
+                    "Reflected strip lacks its original normal/material/light context");
+                if(!previous.sceneryRunCount) {
+                    previous.sceneryRunFirst=static_cast<std::uint32_t>(sceneryRunStrips_.size());
+                    sceneryRunStrips_.push_back(previous.strip);previous.sceneryRunCount=1;
+                }
+                sceneryRunStrips_.push_back(submitted);++previous.sceneryRunCount;
+                skinAt(2);
+                return;
+            }
         }
         CaptureStrip(output,alphaGroups,state,model,*submitted,*texture,material,localToWorld,
             view,clipClass,draw,alphaScale,lightContext);
         skinAt(2);
     };
+#if !defined(__vita__) && !defined(__SWITCH__)
+    if(ecstasyCarCensusActive) {
+        ++ecstasyCarCensus[1];
+        const TextureInfo* lastTexture=nullptr;std::uint32_t lastFlags=~0u;const void* lastMaterial=nullptr;
+        for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index) {
+            const auto& strip=geometry.strips[index];
+            if(strip.flags&0x400u)continue;
+            const auto* texture=textureInfoForDescriptor(&stripTexture(geometry,strip));
+            ++ecstasyCarCensus[2];
+            if(texture && texture->requiresDepthSort)++ecstasyCarCensus[3];
+            if(strip.flags&0x40u)++ecstasyCarCensus[4];
+            if(strip.flags&0x100u)++ecstasyCarCensus[5];
+            if(run.clipClass==1)++ecstasyCarCensus[6];
+            if(boneMatrices)++ecstasyCarCensus[7];
+            const void* material=strip.lightMaterialIndex>=0 && static_cast<std::size_t>(strip.lightMaterialIndex)<geometry.lightMaterials.size() ?
+                geometry.lightMaterials[static_cast<std::size_t>(strip.lightMaterialIndex)]:nullptr;
+            if(texture!=lastTexture || strip.flags!=lastFlags || material!=lastMaterial)++ecstasyCarCensus[8];
+            lastTexture=texture;lastFlags=strip.flags;lastMaterial=material;
+        }
+        if((ecstasyCarCensus[1]&4095u)==0) {
+            char text[200];const auto& c=ecstasyCarCensus;
+            std::snprintf(text,sizeof(text),"cars=%llu models=%llu strips=%llu sorted=%llu spec40=%llu refl100=%llu clip1=%llu boned=%llu runs=%llu",
+                (unsigned long long)c[0],(unsigned long long)c[1],(unsigned long long)c[2],(unsigned long long)c[3],(unsigned long long)c[4],
+                (unsigned long long)c[5],(unsigned long long)c[6],(unsigned long long)c[7],(unsigned long long)c[8]);
+            platform::RecordSessionEvent("render.car_census",text);
+        }
+    }
+#endif
     if(!parallel) {
+        mergeRuns=ecstasyModelRuns!=0;
+#if !defined(__vita__) && !defined(__SWITCH__)
+        static const bool verifyModelRuns=[] {const char* value=std::getenv("HP2_VERIFY_MODEL_RUNS");return value && *value=='1';}();
+        std::vector<EcstasyDrawCommand> referenceCommands;
+        if(verifyModelRuns && mergeRuns && !boneMatrices) {
+            // Reference: the per-strip commands, captured first into a side
+            // list (no posed strips for unboned models; alpha groups local).
+            auto referenceGroups=nextAlphaGroup_;
+            mergeRuns=false;
+            for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index)
+                capture(0,index,run.clipClass,referenceCommands,animatedStrips_,referenceGroups);
+            mergeRuns=true;
+        }
+#endif
         for(const auto& run:visible)for(std::size_t index=run.first;index<run.first+run.count;++index)
             capture(0,index,run.clipClass,commands_,animatedStrips_,nextAlphaGroup_);
+#if !defined(__vita__) && !defined(__SWITCH__)
+        if(verifyModelRuns && ecstasyModelRuns && !boneMatrices) {
+            std::vector<EcstasyDrawCommand> expanded;
+            for(std::size_t at=start;at<commands_.size();++at) {
+                const auto& command=commands_[at];
+                if(!command.sceneryRunCount) {expanded.push_back(command);continue;}
+                for(std::uint32_t strip=0;strip<command.sceneryRunCount;++strip) {
+                    expanded.push_back(command);auto& single=expanded.back();
+                    single.strip=sceneryRunStrips_[command.sceneryRunFirst+strip];
+                    single.sceneryRunCount=0;single.sceneryRunFirst=0;
+                }
+            }
+            bool same=expanded.size()==referenceCommands.size();
+            for(std::size_t at=0;same && at<expanded.size();++at)
+                same=NativeDrawCommandFieldsEqual(expanded[at],referenceCommands[at]);
+            static std::uint64_t checks=0,mismatches=0,merged=0;
+            ++checks;if(!same)++mismatches;merged+=referenceCommands.size()-(commands_.size()-start);
+            if((checks&4095u)==0 || (!same && mismatches<4)) {
+                char text[128];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu merged_commands=%llu",
+                    (unsigned long long)checks,(unsigned long long)mismatches,(unsigned long long)merged);
+                platform::RecordSessionEvent("render.model_runs_verify",text);
+            }
+        }
+#endif
+        if(splitTimed) {splitAt(2);ecstasyModelSplitMicros[4]+=count;ecstasyModelSplitMicros[5]+=commands_.size()-start;}
         return commands_.size()-start;
     }
     sources.reserve(count);
@@ -4062,7 +4403,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         for(auto at=animatedStrips_.size()-posedCount;at<animatedStrips_.size();++at) {
             const auto& posedStrip=*animatedStrips_[at];++checks;
             Require(posedStrip.nativePoseSource,"Posed strip lost its source");
-            auto expected=*posedStrip.nativePoseSource;skinStrip(expected);
+            auto expected=*posedStrip.nativePoseSource;skinStrip(expected,posedStrip.nativePoseSource->positions);
             const auto same=[](const auto& a,const auto& b) {
                 return a.size()==b.size() && (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(a[0]))==0);
             };
@@ -6615,6 +6956,9 @@ bool NativeResidentGeometryKey(const VkSolidStripJob& job,VkResidentGeometryKey&
 // snapshotted once per frame; FE and IG variants retain their actual tables.
 // calls, last-input hits, slot hits, lit record builds, unlit builds, dedupe hits
 std::array<std::uint64_t,6> nativeShadingCounters{};
+// Gather solid-path census: template hits, full solid commands, car-shadow
+// commands, scenery run strips, depth-sorted solid commands.
+std::array<std::uint64_t,5> nativeGatherCounters{};
 // Diagnostic: particle quad screen coverage (sum of clipped bbox area in
 // output-screen units) for the main view [0] and other targets [1]; quads [2].
 std::array<double,3> nativeParticleCoverage{};

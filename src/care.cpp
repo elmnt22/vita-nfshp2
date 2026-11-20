@@ -1222,6 +1222,12 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     const float brakes[4][16],std::int32_t worldFrames,std::int32_t presentationLayout,
     std::int32_t forcedLod,std::uint32_t sourceFlags,std::uint32_t lightFlags)
 {
+    if(hp2::ecstasyDiagSkipCars)return 0;
+#if !defined(__vita__) && !defined(__SWITCH__)
+    static const bool census=[] {const char* value=std::getenv("HP2_CAR_CENSUS");return value && *value=='1';}();
+    struct CensusScope {bool on;CensusScope(bool v):on(v){if(on)hp2::ecstasyCarCensusActive=true;}~CensusScope(){if(on)hp2::ecstasyCarCensusActive=false;}} censusScope{census};
+    if(census)++hp2::ecstasyCarCensus[0];
+#endif
     const bool timed=collisionWitnessClockMicros!=nullptr;
     std::uint32_t carMark=timed ? collisionWitnessClockMicros():0u;
     const auto carAt=[&](std::size_t part) {
@@ -1254,6 +1260,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     float toClip[16];eMulMatrix(toClip,transform,view.matrices.worldToClip);
     if (!ecstasyClassifyBounds(render.minimum,render.maximum,toClip))return 0;
     if(timed)++hp2::carRenderSplitMicros[7];
+    struct CarScope {bool on;CarScope(bool v):on(v){if(on)hp2::ecstasyCarScope=true;}~CarScope(){if(on)hp2::ecstasyCarScope=false;}} carScope{timed};
     auto* nativeFrame=car ? car->Frame():nullptr;
     hp2::Require(!car || (nativeFrame && nativeFrame->movement &&
         nativeFrame->movement->bindings.owner==car && nativeFrame->movement->bindings.state &&
