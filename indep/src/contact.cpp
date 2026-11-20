@@ -34,6 +34,19 @@
 int32_t collisionWitnessQueryDetached(CollisionWitness* witness, const float firstFrame[16],
     const float firstPosition[4], const float secondFrame[16], const float secondPosition[4],
     uint32_t* randomState, uint64_t counters[4]);
+int32_t collisionWitnessQueryAbortable(CollisionWitness* witness, const float firstFrame[16],
+    const float firstPosition[4], const float secondFrame[16], const float secondPosition[4],
+    uint32_t* randomState, uint64_t counters[4], const std::atomic<int>* stop);
+// Speculative rounds stop queries the caller will discard (exact: a stopped
+// query is never committed). Vita spec_abort_off.txt / PC HP2_SPEC_ABORT=0.
+int collisionSpeculativeAbort=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    const char* value=getenv("HP2_SPEC_ABORT");return value ? atoi(value):1;
+#else
+    return 1;
+#endif
+}();
+uint64_t collisionSpecAborted=0;
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds;
 
@@ -64,6 +77,20 @@ uint64_t collisionSpecSeparations=0,collisionSpecAccepted=0,collisionSpecWasted=
     collisionFindQueries=0,collisionSeparateQueries=0,collisionSeparateCalls=0;
 
 extern uint32_t (*collisionWitnessClockMicros)();
+// Solve split (main thread, diagnostics): 0 queue queries, 1 queue serial
+// fallbacks, 2 find-time bisection, 3 separation, 4 contact resolve body,
+// 5 resolve-loop pair finding, 6 helper pickup latency, 7 unused.
+uint64_t collisionSplitMicros[8]{},collisionSplitCounts[8]{};
+std::atomic<uint64_t> collisionPickupMicros{0},collisionPickupCount{0},collisionPublishCount{0};
+// Per helper slot: batches joined, tasks run.
+std::atomic<uint64_t> collisionSlotBatches[2]{},collisionSlotTasks[2]{};
+static thread_local int collisionHelperSlot=-1;
+uint32_t collisionSplitNow()
+{
+    if(collisionWitnessClockMicros)return collisionWitnessClockMicros();
+    return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 uint32_t collisionPoolHotMicros=60; // needs the host clock (Vita); pool_hot.txt: "<us>" (0 off)
 std::atomic<uint64_t> collisionPoolHelperTasks{0},collisionPoolHelperMicros{0};
 uint64_t collisionPoolMainMicros=0;
@@ -106,6 +133,8 @@ public:
         generation_=(generation_+1)&0xffffu;
         state_.store((generation_<<16)|0xffffu);
         function_=function;context_=context;count_=count;floatingPoint_=ReadFloatingPoint();
+        publishMicros_=collisionSplitNow();pickedUp_.store(false,std::memory_order_relaxed);
+        collisionPublishCount.fetch_add(1,std::memory_order_relaxed);
         state_.store(generation_<<16);
         const unsigned wake=armed_.load() ? 0u:(count-1<helpers_ ? count-1:helpers_);
         if(wake)
@@ -131,6 +160,8 @@ public:
         generation_=(generation_+1)&0xffffu;
         state_.store((generation_<<16)|0xffffu);
         function_=function;context_=context;count_=count;floatingPoint_=ReadFloatingPoint();
+        publishMicros_=collisionSplitNow();pickedUp_.store(false,std::memory_order_relaxed);
+        collisionPublishCount.fetch_add(1,std::memory_order_relaxed);
         state_.store(generation_<<16);
         const unsigned wake=armed_.load() ? 0u:(count-1<helpers_ ? count-1:helpers_);
         if(wake)
@@ -171,6 +202,7 @@ private:
                 const unsigned slot=*static_cast<unsigned*>(argument);
                 sceKernelChangeThreadCpuAffinityMask(0,slot==0 ? SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2);
                 sceKernelChangeThreadPriority(0,185);
+                collisionHelperSlot=static_cast<int>(slot);
                 Instance().Loop();
                 return nullptr;
             },&slots_[slot])==0) {pthread_detach(thread);++helpers_;}
@@ -180,7 +212,7 @@ private:
         const unsigned hardware=std::thread::hardware_concurrency();
         const unsigned wanted=hardware>=3 ? 2u:hardware>=2 ? 1u:0u;
         for(unsigned slot=0;slot<wanted;++slot) {
-            try {std::thread([this] {Loop();}).detach();++helpers_;} catch(...) {break;}
+            try {std::thread([this,slot] {collisionHelperSlot=static_cast<int>(slot);Loop();}).detach();++helpers_;} catch(...) {break;}
         }
 #endif
     }
@@ -253,6 +285,11 @@ private:
                 const uint32_t generation=state_.load()>>16;
                 unsigned index;
                 if(Claim(generation,index)) {
+                    if(collisionHelperSlot>=0) collisionSlotBatches[collisionHelperSlot].fetch_add(1,std::memory_order_relaxed);
+                    if(!pickedUp_.exchange(true,std::memory_order_relaxed)) {
+                        collisionPickupMicros.fetch_add(collisionSplitNow()-publishMicros_,std::memory_order_relaxed);
+                        collisionPickupCount.fetch_add(1,std::memory_order_relaxed);
+                    }
 #if defined(__vita__)
                     if(!hot)sceKernelChangeThreadPriority(0,110);
 #endif
@@ -261,6 +298,7 @@ private:
                     do {
                         const uint32_t taskStart=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
                         function_(context_,index);collisionPoolHelperTasks.fetch_add(1,std::memory_order_relaxed);
+                        if(collisionHelperSlot>=0) collisionSlotTasks[collisionHelperSlot].fetch_add(1,std::memory_order_relaxed);
                         if(collisionWitnessClockMicros)collisionPoolHelperMicros.fetch_add(collisionWitnessClockMicros()-taskStart,std::memory_order_relaxed);
                     } while(Claim(generation,index));
                     WriteFloatingPoint(saved);
@@ -281,6 +319,8 @@ private:
     }
     std::atomic<uint32_t> state_{0};
     std::atomic<int> inFlight_{0};
+    std::atomic<bool> pickedUp_{true};
+    volatile uint32_t publishMicros_{0};
     std::atomic<bool> armed_{false};
     void (*function_)(void*,unsigned){};
     void* context_{};
@@ -495,6 +535,7 @@ void commitQuery(CollisionWitness& current,uint32_t& state,const SpeculativeQuer
 struct PipelinedQuery {
     SpeculativeQuery query;
     std::atomic<uint32_t> done;
+    std::atomic<int> stop;
 };
 struct PipelinedBatch {
     const CollisionWitness* base;
@@ -514,8 +555,8 @@ void runPipelinedQuery(void* context,unsigned index)
     fillUnwritten(&query.witness.distance,sizeof(query.witness.distance));
     query.state=query.inState;
     query.counters[0]=query.counters[1]=query.counters[2]=query.counters[3]=0;
-    query.result=collisionWitnessQueryDetached(&query.witness,query.firstFrame,query.firstPosition,
-        query.secondFrame,query.secondPosition,&query.state,query.counters);
+    query.result=collisionWitnessQueryAbortable(&query.witness,query.firstFrame,query.firstPosition,
+        query.secondFrame,query.secondPosition,&query.state,query.counters,&entry.stop);
     entry.done.store(1,std::memory_order_release);
 }
 void separatePipelined(const SeparationInputs& inputs,CollisionWitness* witness,uint32_t* randomState,float output[4])
@@ -546,6 +587,7 @@ void separatePipelined(const SeparationInputs& inputs,CollisionWitness* witness,
             query.firstFrame=inputs.firstFrame;
             query.secondFrame=inputs.secondFrame;
             queries[k].done.store(0,std::memory_order_relaxed);
+            queries[k].stop.store(0,std::memory_order_relaxed);
         }
         const CollisionWitness base=current;
         PipelinedBatch batch{&base,queries};
@@ -577,8 +619,14 @@ void separatePipelined(const SeparationInputs& inputs,CollisionWitness* witness,
                 break;
             }
         }
+        // Everything after the last committed query is discarded: stop the
+        // ones still running so Close does not wait for them.
+        if (collisionSpeculativeAbort) for (unsigned k=committed;k<width;++k) queries[k].stop.store(1,std::memory_order_relaxed);
         pool.Close();
-        for (unsigned k=committed;k<width;++k) if (queries[k].done.load(std::memory_order_acquire)) ++collisionSpecWasted;
+        for (unsigned k=committed;k<width;++k) if (queries[k].done.load(std::memory_order_acquire)) {
+            ++collisionSpecWasted;
+            if (queries[k].query.result<0) ++collisionSpecAborted;
+        }
     }
     *witness=current;
     *randomState=state;
@@ -693,7 +741,14 @@ void buildSeparationInputs(const CollisionSystem* system,const CollisionQueuedCo
 }
 }
 
+static void collisionContactSeparateBody(CollisionSystem* system, CollisionQueuedContact* contact, float rewind);
 void collisionContactSeparate(CollisionSystem* system, CollisionQueuedContact* contact, float rewind)
+{
+    const uint32_t start=collisionSplitNow();
+    collisionContactSeparateBody(system,contact,rewind);
+    collisionSplitMicros[3]+=collisionSplitNow()-start;++collisionSplitCounts[3];
+}
+static void collisionContactSeparateBody(CollisionSystem* system, CollisionQueuedContact* contact, float rewind)
 {
     ++collisionSeparateCalls;
     SeparationInputs inputs;
@@ -749,6 +804,36 @@ static float findTimeSerial(CollisionSystem* system, CollisionQueuedContact* con
 }
 
 namespace {
+// One early-resolving bisection round: query 0 plus both children.
+struct FindRound {
+    const CollisionWitness* base;
+    SpeculativeQuery* queries;
+    std::atomic<uint32_t> done[3];
+    std::atomic<int> stop[3];
+    float contactDistance;
+};
+void runFindRoundQuery(void* context,unsigned index)
+{
+    auto& round=*static_cast<FindRound*>(context);
+    SpeculativeQuery& query=round.queries[index];
+    if (round.stop[index].load(std::memory_order_relaxed)) {query.result=-1;round.done[index].store(1,std::memory_order_release);return;}
+    query.witness=*round.base;
+    query.witness.first=query.inFirst;
+    query.witness.second=query.inSecond;
+    fillUnwritten(&query.witness.side,sizeof(query.witness.side));
+    fillUnwritten(query.witness.firstPoint,sizeof(query.witness.firstPoint));
+    fillUnwritten(query.witness.secondPoint,sizeof(query.witness.secondPoint));
+    fillUnwritten(&query.witness.distance,sizeof(query.witness.distance));
+    query.state=query.inState;
+    query.counters[0]=query.counters[1]=query.counters[2]=query.counters[3]=0;
+    query.result=collisionWitnessQueryAbortable(&query.witness,query.firstFrame,query.firstPosition,
+        query.secondFrame,query.secondPosition,&query.state,query.counters,&round.stop[index]);
+    // Query 0 decides which child is discarded: a penetrating result (2)
+    // continues with child 1, any other with child 2 (or neither when it
+    // converges, which the caller handles after committing it).
+    if (index==0 && collisionSpeculativeAbort) round.stop[query.result==2 ? 2:1].store(1,std::memory_order_relaxed);
+    round.done[index].store(1,std::memory_order_release);
+}
 struct FindTimePose {
     float firstPosition[4],secondPosition[4],firstFrame[16],secondFrame[16];
 };
@@ -808,6 +893,37 @@ float findTimeSpeculative(const CollisionSystem* system,const CollisionQueuedCon
         }
         const CollisionWitness base=current;
         SpeculativeBatch batch{&base,queries};
+        if (width==3 && collisionSpeculativeAbort) {
+            // Early-resolving round: once query 0 is known, the child that
+            // will not be used is stopped and the round ends as soon as the
+            // chosen child is done (no barrier on the discarded one).
+            auto& pool=CollisionHelperPool::Instance();
+            FindRound round{&base,queries,{},{},0.0f};
+            for (unsigned k=0;k<3;++k) {round.done[k].store(0,std::memory_order_relaxed);round.stop[k].store(0,std::memory_order_relaxed);}
+            round.contactDistance=contactDistance;
+            pool.Publish(3,runFindRoundQuery,&round);
+            ++collisionSpecRounds;
+            unsigned index;
+            while (!round.done[0].load(std::memory_order_acquire))
+                if (pool.ClaimOne(index)) runFindRoundQuery(&round,index);
+            commitQuery(current,state,queries[0]);
+            apply(0);
+            if (done || iteration>=8) {
+                round.stop[1].store(1,std::memory_order_relaxed);round.stop[2].store(1,std::memory_order_relaxed);
+                pool.Close();collisionSpecWasted+=2;break;
+            }
+            const unsigned chosen=result==2 ? 1u:2u;
+            round.stop[3-chosen].store(1,std::memory_order_relaxed);
+            while (!round.done[chosen].load(std::memory_order_acquire))
+                if (pool.ClaimOne(index)) runFindRoundQuery(&round,index);
+            pool.Close();
+            ++collisionSpecWasted;
+            if (queries[3-chosen].result<0 && round.done[3-chosen].load(std::memory_order_acquire)) ++collisionSpecAborted;
+            if (!predicted(current,state,queries[chosen])) {++collisionSpecMispredicts;++collisionSpecWasted;continue;}
+            commitQuery(current,state,queries[chosen]);
+            apply(chosen);
+            continue;
+        }
         CollisionHelperPool::Instance().Run(width,runSpeculativeQuery,&batch);
         ++collisionSpecRounds;
         commitQuery(current,state,queries[0]);
@@ -854,7 +970,9 @@ float collisionContactFindTime(CollisionSystem* system, CollisionQueuedContact* 
     if (collisionSpeculationMode==0 || CollisionHelperPool::Instance().Helpers()==0) return findTimeSerial(system,contact);
     memset(contact->displacement,0,sizeof(contact->displacement));
     int32_t result=0;
+    const uint32_t findStart=collisionSplitNow();
     const float midpoint=findTimeSpeculative(system,contact,&contact->pair->witness,system->randomState,&result);
+    collisionSplitMicros[2]+=collisionSplitNow()-findStart;++collisionSplitCounts[2];
     if (result==2) collisionContactSeparate(system,contact,midpoint);
     return midpoint;
 }

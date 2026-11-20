@@ -60,6 +60,10 @@
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 extern std::array<std::uint64_t,8> mellowSplitMicros;
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
+extern uint64_t collisionSplitMicros[8],collisionSplitCounts[8];
+extern std::atomic<uint64_t> collisionPickupMicros,collisionPickupCount,collisionPublishCount;
+extern std::atomic<uint64_t> collisionSlotBatches[2],collisionSlotTasks[2];
+extern uint64_t collisionSpecAborted;
 namespace hp2 { extern std::uint64_t ecstasyAsyncMirrorStats[12]; }
 namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
@@ -1421,6 +1425,27 @@ bool ApplicationRuntime::Tick()
                 ::collisionFindQueries=::collisionSeparateCalls=::collisionSeparateQueries=0;
                 ::collisionSpecSeparations=::collisionSpecRounds=::collisionSpecAccepted=::collisionSpecWasted=::collisionSpecMispredicts=0;
                 s.host.RecordSessionEvent("render.collision_solve",detail);
+                {
+                    auto& t=::collisionSplitMicros;auto& n=::collisionSplitCounts;
+                    const double f=static_cast<double>(count)*1000.0;
+                    const auto per=[](uint64_t a,uint64_t b) {return b ? static_cast<double>(a)/static_cast<double>(b):0.0;};
+                    const uint64_t pubs=::collisionPublishCount.load(),picks=::collisionPickupCount.load();
+                    std::snprintf(detail,sizeof(detail),"per_frame_ms queue=%.3f queue_serial=%.3f find=%.3f separate=%.3f resolve=%.3f pairs=%.3f "
+                        "per_frame_n queue=%.1f queue_serial=%.1f find=%.1f separate=%.1f resolve=%.1f steps=%.2f "
+                        "per_call_us queue=%.1f queue_serial=%.1f find=%.1f separate=%.1f resolve=%.1f "
+                        "batches_per_frame=%.1f picked_frac=%.3f pickup_us=%.1f slot_batch_frac=%.3f/%.3f slot_tasks=%.1f/%.1f aborted=%.1f",
+                        t[0]/f,t[1]/f,t[2]/f,t[3]/f,t[4]/f,t[5]/f,
+                        n[0]*1000.0/f,n[1]*1000.0/f,n[2]*1000.0/f,n[3]*1000.0/f,n[4]*1000.0/f,n[7]*1000.0/f,
+                        per(t[0],n[0]),per(t[1],n[1]),per(t[2],n[2]),per(t[3],n[3]),per(t[4],n[4]),
+                        pubs*1000.0/f,per(picks,pubs),per(::collisionPickupMicros.load(),picks),
+                        per(::collisionSlotBatches[0].load(),pubs),per(::collisionSlotBatches[1].load(),pubs),
+                        ::collisionSlotTasks[0].load()*1000.0/f,::collisionSlotTasks[1].load()*1000.0/f,::collisionSpecAborted*1000.0/f);
+                    ::collisionSpecAborted=0;
+                    for(int k=0;k<2;++k){::collisionSlotBatches[k]=0;::collisionSlotTasks[k]=0;}
+                    s.host.RecordSessionEvent("render.collision_split",detail);
+                    std::fill(std::begin(t),std::end(t),0);std::fill(std::begin(n),std::end(n),0);
+                    ::collisionPickupMicros=0;::collisionPickupCount=0;::collisionPublishCount=0;
+                }
                 if(auto& a=hp2::ecstasyAsyncMirrorStats;a[0]) {
                     const double n=static_cast<double>(a[0]);
                     std::snprintf(detail,sizeof(detail),"views=%llu merged=%llu fallbacks=%llu aborts=%llu inline=%llu wait_us=%.1f job_us=%.1f verify_mismatches=%llu abort_replacement=%llu abort_nosolid=%llu abort_rigid=%llu abort_vertex=%llu",

@@ -687,7 +687,8 @@ uint64_t collisionWitnessWarmMismatches=0;
 static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState,
-                              uint64_t* counters=nullptr, int32_t* predictPending=nullptr);
+                              uint64_t* counters=nullptr, int32_t* predictPending=nullptr,
+                              const std::atomic<int>* stop=nullptr);
 // RNG-free prediction (thread-safe, detached counters). *pending: 0 = the
 // witness is the exact query result and no random draw happened; 1 = exact
 // except the terminal restart, whose two vertex draws the caller makes from
@@ -707,6 +708,16 @@ int32_t collisionWitnessQueryDetached(CollisionWitness* witness, const float fir
                               const float secondPosition[4], uint32_t* randomState, uint64_t counters[4])
 {
     return collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState,counters);
+}
+// Detached and abortable: returns -1 (witness garbage) once *stop is set.
+// Only for speculative queries whose result the caller already knows it
+// will discard.
+int32_t collisionWitnessQueryAbortable(CollisionWitness* witness, const float firstFrame[16],
+                              const float firstPosition[4], const float secondFrame[16],
+                              const float secondPosition[4], uint32_t* randomState, uint64_t counters[4],
+                              const std::atomic<int>* stop)
+{
+    return collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState,counters,nullptr,stop);
 }
 int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
@@ -741,7 +752,7 @@ int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[
 static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState,
-                              uint64_t* counters, int32_t* predictPending)
+                              uint64_t* counters, int32_t* predictPending, const std::atomic<int>* stop)
 {
     const bool detached=counters!=nullptr;
     if(!detached) ++collisionWitnessQueries; else ++counters[0];
@@ -754,6 +765,7 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
     CollisionFeature* secondHistory[80];
     int32_t iteration = 0, restarts = 0, result = 0;
     do {
+        if (stop && stop->load(std::memory_order_relaxed)) return -1;
         const int firstKind = witness->first->kind, secondKind = witness->second->kind;
         const uint32_t stepStarted = !detached && collisionWitnessProbeClock ? collisionWitnessProbeClock() : 0;
         if (firstKind == 0 && secondKind == 0) {

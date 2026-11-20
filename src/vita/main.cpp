@@ -769,6 +769,11 @@ int main(int, char**)
             collisionWitnessBenchLog = [](const char* text) { benchLog->Line("vita.witness_bench", text); };
             log.Line("vita.diag", "witness bench armed");
         }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/spec_abort_off.txt").c_str(), &probe) >= 0) {
+            extern int collisionSpeculativeAbort;
+            collisionSpeculativeAbort = 0;
+            log.Line("vita.diag", "speculative abort off");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/async_mirror.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyAsyncMirrorScenery = 1;
             log.Line("vita.diag", "async mirror scenery on");
