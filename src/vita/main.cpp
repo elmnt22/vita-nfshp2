@@ -787,6 +787,11 @@ int main(int, char**)
             hp2::ecstasyAsyncMirrorScenery = 0;
             log.Line("vita.diag", "async mirror scenery off");
         }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/walk_memo_off.txt").c_str(), &probe) >= 0) {
+            extern int collisionWitnessMemo;
+            collisionWitnessMemo = 0;
+            log.Line("vita.diag", "walk memo off");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/witness_cache_off.txt").c_str(), &probe) >= 0) {
             extern int collisionWitnessTransformCache;
             collisionWitnessTransformCache = 0;

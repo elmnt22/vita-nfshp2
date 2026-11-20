@@ -1,4 +1,6 @@
 #include <atomic>
+#include <new>
+#include <mutex>
 #include "indep/inc/VoronoiClip.hpp"
 #include "indep/inc/Contact.hpp"
 #include "indep/inc/Polyhedra.hpp"
@@ -749,10 +751,310 @@ int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[
     }
     return result;
 }
+static int32_t collisionWitnessQueryWalk(CollisionWitness* witness, const float firstFrame[16],
+                              const float firstPosition[4], const float secondFrame[16],
+                              const float secondPosition[4], uint32_t* randomState,
+                              uint64_t* counters, int32_t* predictPending, const std::atomic<int>* stop,
+                              CollisionWitness* converged, int32_t* convergedPending, int32_t* steps);
+// Walk memo (exact). A query's walk is a pure function of its inputs: the
+// start witness (features, side, points, distance), both geometries, both
+// frames and positions; only a restart reads the random state. A walk that
+// converges with at most the terminal restart is stored as its converged
+// witness, result and whether that terminal restart happened; a later query
+// with bit-identical inputs replays it (the terminal restart's two vertex
+// draws are made from the live random state, exactly as the walk does).
+// Frozen contacts (countdown, parked cops) repeat their inputs every step.
+// One bounded table shared by all threads (helpers run queries too). Vita walk_memo_off.txt;
+// PC HP2_WALK_MEMO=0 off, 1 on, 2 on + rerun every hit and compare.
+int collisionWitnessMemo=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    const char* value=getenv("HP2_WALK_MEMO");return value ? atoi(value):1;
+#else
+    return 1;
+#endif
+}();
+// Bumped per collision system init: entries from an earlier world (whose
+// geometry addresses may be reused) never match.
+std::atomic<uint32_t> collisionWitnessMemoEpoch{1};
+std::atomic<uint64_t> collisionMemoLookups{0},collisionMemoHits{0},collisionMemoStores{0},
+    collisionMemoVerified{0},collisionMemoMismatches{0},collisionMemoSavedSteps{0};
+namespace {
+// Shared by all threads (helpers walk too). Every slot is a seqlock: a
+// writer claims it by moving its sequence from even to odd, writes, then
+// publishes the next even value; a reader copies and accepts the copy only
+// if the sequence was even and unchanged. A failed claim skips the store.
+//
+// Poses (both frames and positions, 160 bytes) are interned: a memo key
+// names its pose by (slot, sequence), and a pose slot's sequence changes on
+// every rewrite, so a key only matches while that slot still holds the
+// bit-identical pose.
+struct PoseBlock {float values[40];};
+struct PoseSlot {
+    std::atomic<uint32_t> sequence;
+    std::atomic<uint32_t> lastUse;
+    uint32_t hash;
+    PoseBlock pose;
+};
+struct WalkKey {
+    const void* pointers[4];
+    uint32_t poseSlot,poseSequence;
+    int32_t side;
+    float points[8];
+    float distance;
+};
+struct WalkValue {
+    CollisionFeature* first;
+    CollisionFeature* second;
+    float firstPoint[4],secondPoint[4];
+    float distance;
+    int32_t side;
+    int16_t steps;
+    int8_t pending,result;
+};
+struct WalkEntry {
+    std::atomic<uint32_t> sequence;
+    uint32_t hash,epoch;
+    WalkKey key;
+    WalkValue value;
+};
+uint32_t walkMemoEntries=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    const char* value=getenv("HP2_WALK_MEMO_ENTRIES");if(value) return (uint32_t)atoi(value);
+#endif
+    return 65536u; // ~8 MB on Vita
+}();
+constexpr uint32_t kPoseSlots=8192u;
+WalkEntry* walkMemoTable=nullptr;
+PoseSlot* walkPoseTable=nullptr;
+std::atomic<uint32_t> walkMemoClock{0};
+std::atomic<int> walkMemoReady{0};
+std::mutex walkMemoAllocate;
+thread_local bool walkMemoBypass=false;
+bool walkMemoEnsure()
+{
+    if (walkMemoReady.load(std::memory_order_acquire)) return walkMemoReady.load(std::memory_order_relaxed)>0;
+    std::lock_guard<std::mutex> lock(walkMemoAllocate);
+    if (!walkMemoReady.load(std::memory_order_relaxed)) {
+        walkMemoTable=new (std::nothrow) WalkEntry[walkMemoEntries];
+        walkPoseTable=new (std::nothrow) PoseSlot[kPoseSlots];
+        if (walkMemoTable && walkPoseTable) {
+            for (uint32_t index=0;index<walkMemoEntries;++index) {
+                walkMemoTable[index].sequence.store(0,std::memory_order_relaxed);walkMemoTable[index].epoch=0;
+            }
+            for (uint32_t index=0;index<kPoseSlots;++index) {
+                walkPoseTable[index].sequence.store(0,std::memory_order_relaxed);
+                walkPoseTable[index].lastUse.store(0,std::memory_order_relaxed);
+                walkPoseTable[index].hash=0;
+                memset(&walkPoseTable[index].pose,0xff,sizeof(PoseBlock)); // NaN bytes: never a real pose
+            }
+            walkMemoReady.store(1,std::memory_order_release);
+        } else {
+            delete[] walkMemoTable;delete[] walkPoseTable;walkMemoTable=nullptr;walkPoseTable=nullptr;
+            walkMemoReady.store(-1,std::memory_order_release);
+        }
+    }
+    return walkMemoReady.load(std::memory_order_relaxed)>0;
+}
+inline uint32_t hashWords(const void* data,size_t bytes,uint32_t hash)
+{
+    const unsigned char* at=static_cast<const unsigned char*>(data);
+    for (size_t offset=0;offset<bytes;offset+=4) {
+        uint32_t word;memcpy(&word,at+offset,4);
+        hash^=word;hash*=16777619u;hash^=hash>>15;
+    }
+    return hash;
+}
+inline bool claim(std::atomic<uint32_t>& sequence,uint32_t& was)
+{
+    was=sequence.load(std::memory_order_relaxed);
+    if (was&1u) return false;
+    if (!sequence.compare_exchange_strong(was,was+1u,std::memory_order_acquire,std::memory_order_relaxed)) return false;
+    std::atomic_thread_fence(std::memory_order_release);
+    return true;
+}
+// Pose slot holding exactly this pose: its slot and (even) sequence.
+bool poseFind(const PoseBlock& pose,uint32_t hash,uint32_t* slotOut,uint32_t* sequenceOut)
+{
+    const uint32_t base=hash&(kPoseSlots-4u);
+    for (uint32_t way=0;way<4;++way) {
+        PoseSlot& slot=walkPoseTable[base^way];
+        const uint32_t before=slot.sequence.load(std::memory_order_acquire);
+        if ((before&1u) || before==0 || slot.hash!=hash) continue;
+        const bool same=memcmp(&slot.pose,&pose,sizeof(pose))==0;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (!same || slot.sequence.load(std::memory_order_relaxed)!=before) continue;
+        slot.lastUse.store(walkMemoClock.load(std::memory_order_relaxed),std::memory_order_relaxed);
+        *slotOut=base^way;*sequenceOut=before;
+        return true;
+    }
+    return false;
+}
+bool poseInsert(const PoseBlock& pose,uint32_t hash,uint32_t* slotOut,uint32_t* sequenceOut)
+{
+    if (poseFind(pose,hash,slotOut,sequenceOut)) return true;
+    const uint32_t base=hash&(kPoseSlots-4u);
+    // Replace the way used longest ago.
+    uint32_t victim=base;
+    uint32_t oldest=walkPoseTable[base].lastUse.load(std::memory_order_relaxed);
+    const uint32_t now=walkMemoClock.load(std::memory_order_relaxed);
+    for (uint32_t way=1;way<4;++way) {
+        const uint32_t use=walkPoseTable[base^way].lastUse.load(std::memory_order_relaxed);
+        if (now-use>now-oldest) {oldest=use;victim=base^way;}
+    }
+    PoseSlot& slot=walkPoseTable[victim];
+    uint32_t was;
+    if (!claim(slot.sequence,was)) return false;
+    slot.hash=hash;slot.pose=pose;
+    slot.lastUse.store(now,std::memory_order_relaxed);
+    slot.sequence.store(was+2u,std::memory_order_release);
+    *slotOut=victim;*sequenceOut=was+2u;
+    return true;
+}
+inline void walkKeyFill(WalkKey& key,const CollisionWitness* witness,uint32_t poseSlot,uint32_t poseSequence)
+{
+    memset(&key,0,sizeof(key));
+    key.pointers[0]=witness->first;key.pointers[1]=witness->second;
+    key.pointers[2]=witness->firstGeometry;key.pointers[3]=witness->secondGeometry;
+    key.poseSlot=poseSlot;key.poseSequence=poseSequence;
+    key.side=witness->side;
+    memcpy(key.points,witness->firstPoint,16);memcpy(key.points+4,witness->secondPoint,16);
+    key.distance=witness->distance;
+}
+inline uint32_t walkBase(uint32_t hash) {return hash&(walkMemoEntries-4u);}
+bool walkMemoFind(const WalkKey& key,uint32_t hash,uint32_t epoch,WalkValue* out)
+{
+    const uint32_t base=walkBase(hash);
+    for (uint32_t way=0;way<4;++way) {
+        WalkEntry& entry=walkMemoTable[base^way];
+        const uint32_t before=entry.sequence.load(std::memory_order_acquire);
+        if ((before&1u) || before==0 || entry.hash!=hash || entry.epoch!=epoch) continue;
+        const bool same=memcmp(&entry.key,&key,sizeof(key))==0;
+        if (same) *out=entry.value;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (same && entry.sequence.load(std::memory_order_relaxed)==before) return true;
+    }
+    return false;
+}
+void walkMemoStore(const WalkKey& key,uint32_t hash,uint32_t epoch,const WalkValue& value)
+{
+    const uint32_t base=walkBase(hash);
+    // Prefer an empty, stale or dead-pose way; otherwise the cheapest walk.
+    WalkEntry* slot=&walkMemoTable[base];
+    int bestScore=1<<30;
+    for (uint32_t way=0;way<4;++way) {
+        WalkEntry* candidate=&walkMemoTable[base^way];
+        int score;
+        if (candidate->sequence.load(std::memory_order_relaxed)==0 || candidate->epoch!=epoch) score=-2;
+        else if (walkPoseTable[candidate->key.poseSlot%kPoseSlots].sequence.load(std::memory_order_relaxed)!=candidate->key.poseSequence) score=-1;
+        else score=candidate->value.steps;
+        if (score<bestScore) {bestScore=score;slot=candidate;}
+    }
+    uint32_t was;
+    if (!claim(slot->sequence,was)) return;
+    slot->hash=hash;slot->epoch=epoch;slot->key=key;slot->value=value;
+    slot->sequence.store(was+2u,std::memory_order_release);
+    collisionMemoStores.fetch_add(1,std::memory_order_relaxed);
+}
+inline bool walkWitnessEqual(const CollisionWitness& x,const CollisionWitness& y)
+{
+    return x.side==y.side && x.first==y.first && x.second==y.second &&
+        memcmp(x.firstPoint,y.firstPoint,16)==0 && memcmp(x.secondPoint,y.secondPoint,16)==0 &&
+        memcmp(&x.distance,&y.distance,4)==0;
+}
+}
+// Advanced once per world frame (pose replacement age).
+void collisionWitnessMemoTick() {walkMemoClock.fetch_add(1,std::memory_order_relaxed);}
 static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState,
                               uint64_t* counters, int32_t* predictPending, const std::atomic<int>* stop)
+{
+    if (!collisionWitnessMemo || walkMemoBypass || !walkMemoEnsure())
+        return collisionWitnessQueryWalk(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState,
+            counters,predictPending,stop,nullptr,nullptr,nullptr);
+    const bool detached=counters!=nullptr;
+    const uint32_t epoch=collisionWitnessMemoEpoch.load(std::memory_order_relaxed);
+    PoseBlock pose;
+    memcpy(pose.values,firstFrame,64);memcpy(pose.values+16,firstPosition,16);
+    memcpy(pose.values+20,secondFrame,64);memcpy(pose.values+36,secondPosition,16);
+    const uint32_t poseHash=hashWords(&pose,sizeof(pose),2166136261u);
+    uint32_t poseSlot=0,poseSequence=0;
+    bool havePose=poseFind(pose,poseHash,&poseSlot,&poseSequence);
+    collisionMemoLookups.fetch_add(1,std::memory_order_relaxed);
+    WalkKey key;
+    uint32_t hash=0;
+    WalkValue entry;
+    if (havePose) {
+        walkKeyFill(key,witness,poseSlot,poseSequence);
+        hash=hashWords(&key,sizeof(key),poseHash);
+    }
+    if (havePose && walkMemoFind(key,hash,epoch,&entry)) {
+        collisionMemoHits.fetch_add(1,std::memory_order_relaxed);
+        collisionMemoSavedSteps.fetch_add((uint64_t)entry.steps,std::memory_order_relaxed);
+#if !defined(__vita__) && !defined(__SWITCH__)
+        CollisionWitness check=*witness;uint32_t checkState=randomState ? *randomState:0u;int32_t checkPending=0;
+        uint64_t checkCounters[4]{};
+        int32_t checkResult=0;
+        if (collisionWitnessMemo==2) {
+            walkMemoBypass=true;
+            checkResult=collisionWitnessQueryWalk(&check,firstFrame,firstPosition,secondFrame,secondPosition,
+                randomState ? &checkState:nullptr,checkCounters,predictPending ? &checkPending:nullptr,nullptr,nullptr,nullptr,nullptr);
+            walkMemoBypass=false;
+        }
+#endif
+        if(!detached) ++collisionWitnessQueries; else ++counters[0];
+        witness->side=entry.side;witness->first=entry.first;witness->second=entry.second;
+        memcpy(witness->firstPoint,entry.firstPoint,16);memcpy(witness->secondPoint,entry.secondPoint,16);
+        witness->distance=entry.distance;
+        uint64_t restarts=0;
+        if (entry.pending==1) {
+            if (predictPending) *predictPending=1;
+            else {
+                witness->first = &witness->firstGeometry->vertices[vectorRandomBounded((uint32_t)witness->firstGeometry->vertexCount, randomState)];
+                witness->second = &witness->secondGeometry->vertices[vectorRandomBounded((uint32_t)witness->secondGeometry->vertexCount, randomState)];
+                restarts=1;
+            }
+        }
+        if (!detached) {collisionWitnessIterations+=(uint64_t)entry.steps;collisionWitnessRestarts+=restarts;}
+        else {counters[1]+=(uint64_t)entry.steps;counters[2]+=restarts;}
+#if !defined(__vita__) && !defined(__SWITCH__)
+        if (collisionWitnessMemo==2) {
+            collisionMemoVerified.fetch_add(1,std::memory_order_relaxed);
+            const bool same=walkWitnessEqual(check,*witness) && checkResult==entry.result &&
+                (!randomState || checkState==*randomState) && (!predictPending || checkPending==*predictPending);
+            if (!same) collisionMemoMismatches.fetch_add(1,std::memory_order_relaxed);
+        }
+#endif
+        return entry.result;
+    }
+    const CollisionWitness start=*witness;
+    CollisionWitness converged;int32_t convergedPending=-1,steps=0;
+    const int32_t result=collisionWitnessQueryWalk(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState,
+        counters,predictPending,stop,&converged,&convergedPending,&steps);
+    if (convergedPending>=0 && steps<32767) {
+        if (!havePose) {
+            havePose=poseInsert(pose,poseHash,&poseSlot,&poseSequence);
+            if (havePose) {walkKeyFill(key,&start,poseSlot,poseSequence);hash=hashWords(&key,sizeof(key),poseHash);}
+        }
+        if (havePose) {
+            WalkValue value;
+            value.first=converged.first;value.second=converged.second;
+            memcpy(value.firstPoint,converged.firstPoint,16);memcpy(value.secondPoint,converged.secondPoint,16);
+            value.distance=converged.distance;value.side=converged.side;
+            value.steps=(int16_t)steps;value.pending=(int8_t)convergedPending;value.result=(int8_t)result;
+            walkMemoStore(key,hash,epoch,value);
+        }
+    }
+    return result;
+}
+// The walk itself. With converged set, it reports the converged witness and
+// whether the terminal restart happened (*convergedPending 0/1), or -1 when
+// the walk is not replayable (a restart before termination, exhaustion, stop).
+static int32_t collisionWitnessQueryWalk(CollisionWitness* witness, const float firstFrame[16],
+                              const float firstPosition[4], const float secondFrame[16],
+                              const float secondPosition[4], uint32_t* randomState,
+                              uint64_t* counters, int32_t* predictPending, const std::atomic<int>* stop,
+                              CollisionWitness* converged, int32_t* convergedPending, int32_t* steps)
 {
     const bool detached=counters!=nullptr;
     if(!detached) ++collisionWitnessQueries; else ++counters[0];
@@ -797,7 +1099,9 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
             collisionWitnessKindMicros[firstKind * 3 + secondKind] += collisionWitnessProbeClock() - stepStarted;
             ++collisionWitnessKindSteps[firstKind * 3 + secondKind];
         }
+        if (steps) ++*steps;
         if (collisionWitnessRemember(witness, firstHistory, secondHistory, iteration)) {
+            if (converged && restarts==0 && result!=0) {*converged=*witness;*convergedPending=1;}
             ++restarts;
             iteration = 0;
             if (predictPending) {
@@ -811,6 +1115,7 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
         } else ++iteration;
         if (!detached) ++collisionWitnessIterations; else ++counters[1];
     } while (result == 0 && restarts < 3 && iteration < 80);
+    if (converged && restarts==0 && result!=0) {*converged=*witness;*convergedPending=0;}
     if (!detached) {
         collisionWitnessRestarts+=(uint64_t)restarts;
         if (result == 0) ++collisionWitnessExhausted;

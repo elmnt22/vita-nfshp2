@@ -87,6 +87,7 @@ static double soundUpdatePeakMs=0;
 extern std::array<double,8> carMoverModeMs;
 extern std::array<std::uint32_t,8> carMoverModeCalls;
 extern std::atomic<uint64_t> collisionWitnessCacheChecks,collisionWitnessCacheMismatches;
+extern std::atomic<uint64_t> collisionMemoLookups,collisionMemoHits,collisionMemoStores,collisionMemoVerified,collisionMemoMismatches,collisionMemoSavedSteps;
 namespace hp2 { void InitDisplaySystem(const GameResources& files,GameTime& clock); }
 extern std::array<double,4> worldCollisionSubPhaseMs; // indep/src/world.cpp diagnostic
 extern std::array<double,4> worldCollisionSolveMs;
@@ -1505,6 +1506,14 @@ bool ApplicationRuntime::Tick()
                         ::collisionWitnessWarmMilliseconds/count,static_cast<unsigned long long>(::collisionWitnessWarmMismatches));
                     ::collisionWitnessMilliseconds=::collisionWitnessWarmMilliseconds=0;
                     s.host.RecordSessionEvent("render.witness_window",detail);
+                    {
+                        const uint64_t lookups=::collisionMemoLookups.exchange(0),hits=::collisionMemoHits.exchange(0);
+                        std::snprintf(detail,sizeof(detail),"lookups_per_frame=%.1f hit_frac=%.3f stores_per_frame=%.1f saved_steps_per_frame=%.1f verified=%llu mismatches=%llu",
+                            lookups/count,lookups?double(hits)/double(lookups):0.0,::collisionMemoStores.exchange(0)/count,
+                            ::collisionMemoSavedSteps.exchange(0)/count,static_cast<unsigned long long>(::collisionMemoVerified.load()),
+                            static_cast<unsigned long long>(::collisionMemoMismatches.load()));
+                        s.host.RecordSessionEvent("render.walk_memo",detail);
+                    }
                     if(::collisionWitnessProbeClock) {
                         // kinds: 0 vertex, 1 edge, 2 face; pairs are first*3+second.
                         int used=0;

@@ -1,3 +1,4 @@
+#include <atomic>
 #include <vector>
 #include "indep/inc/AnimatedDriver.hpp"
 #include "indep/inc/CarDamage.hpp"
@@ -396,12 +397,14 @@ static void changePairMask(CollisionSystem* system, const CollisionShape* first,
     else system->space->pairBits[bit>>3]&=(uint8_t)~mask;
 }
 
+extern std::atomic<uint32_t> collisionWitnessMemoEpoch;
 void collisionSystemInitialize(CollisionSystem* system, CollisionSpace* space,
                                CollisionPair* pairs, size_t pairCapacity,
                                CollisionQueuedContact* contacts, size_t contactCapacity,
                                CollisionImpact* impacts, size_t impactCapacity,
                                const CollisionSolverTuning* tuning)
 {
+    collisionWitnessMemoEpoch.fetch_add(1,std::memory_order_relaxed);
     memset(system,0,sizeof(*system));
     memset(pairs,0,pairCapacity*sizeof(*pairs));
     memset(contacts,0,contactCapacity*sizeof(*contacts));
