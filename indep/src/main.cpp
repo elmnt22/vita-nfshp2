@@ -60,6 +60,7 @@
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 extern std::array<std::uint64_t,8> mellowSplitMicros;
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
+namespace hp2 { extern std::uint64_t ecstasyAsyncMirrorStats[12]; }
 namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
@@ -1420,6 +1421,15 @@ bool ApplicationRuntime::Tick()
                 ::collisionFindQueries=::collisionSeparateCalls=::collisionSeparateQueries=0;
                 ::collisionSpecSeparations=::collisionSpecRounds=::collisionSpecAccepted=::collisionSpecWasted=::collisionSpecMispredicts=0;
                 s.host.RecordSessionEvent("render.collision_solve",detail);
+                if(auto& a=hp2::ecstasyAsyncMirrorStats;a[0]) {
+                    const double n=static_cast<double>(a[0]);
+                    std::snprintf(detail,sizeof(detail),"views=%llu merged=%llu fallbacks=%llu aborts=%llu inline=%llu wait_us=%.1f job_us=%.1f verify_mismatches=%llu abort_replacement=%llu abort_nosolid=%llu abort_rigid=%llu abort_vertex=%llu",
+                        (unsigned long long)a[0],(unsigned long long)a[1],(unsigned long long)a[2],(unsigned long long)a[3],
+                        (unsigned long long)a[4],a[5]/n,a[6]/n,(unsigned long long)a[7],(unsigned long long)a[8],(unsigned long long)a[9],
+                        (unsigned long long)a[10],(unsigned long long)a[11]);
+                    s.host.RecordSessionEvent("render.async_mirror",detail);
+                    const auto mismatches=a[7];std::fill(std::begin(a),std::end(a),0);a[7]=mismatches;
+                }
                 {
                     if(const auto checks=::collisionWitnessCacheChecks.load()) {
                         std::snprintf(detail,sizeof(detail),"checks=%llu mismatches=%llu",static_cast<unsigned long long>(checks),

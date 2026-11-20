@@ -1107,6 +1107,19 @@ public:
     std::uint32_t AppendSceneryRunStrips(const std::vector<const EditorMarkerSolidGeometry::Strip*>& strips);
     void AppendOpaqueSceneryCommands(const EcstasyDrawCommand* first,std::size_t count,std::uint32_t runBase);
     std::uint64_t ReusedOpaqueSceneryStrips() const noexcept {return reusedOpaqueSceneryStrips_;}
+    // Asynchronous rear-view scenery capture. The auxiliary frame (owned by
+    // this frame, so it lives until this frame is reused) holds the job's
+    // instances, projections and run strips; the owner appends its commands.
+    EcstasyFrame& AsyncSceneryFrame(std::size_t index=0);
+    // Reset the auxiliary arenas and copy the capture state the scenery
+    // batch path reads (Z write, dashboard projection, in-game materials,
+    // environment); the state test repeats the comparison at the merge.
+    void PrepareAsyncScenery(EcstasyFrame& aux) const;
+    bool AsyncSceneryStateMatches(const EcstasyFrame& aux) const noexcept;
+#if !defined(__vita__) && !defined(__SWITCH__)
+    // PC verify: every command field the gather reads, by value.
+    static bool AsyncSceneryCommandsEqual(const EcstasyFrame& a,const EcstasyFrame& b);
+#endif
     void RenderStrip(const EditorMarkerModel& model,const EditorMarkerSolidGeometry::Strip& strip,
         const TextureInfo& texture,const EditorMarkerLightMaterial* material,
         const float localToWorld[16],const CarCinematicScreen& view,
@@ -1130,6 +1143,7 @@ private:
     // borrows immutable geometry and projection inputs until its synchronous
     // join, and writes commands/posed strips into a separate ordered chunk.
     std::uint64_t reusedOpaqueSceneryStrips_{};
+    std::array<std::unique_ptr<EcstasyFrame>,2> asyncScenery_;
     std::array<double,2> carShadowCaptureMilliseconds_{};
     const EcstasyDrawInstance& CaptureInstance(const float localToWorld[16],
         const CarCinematicScreen& view,const SceneLightContext* lightContext=nullptr,std::uint64_t lightKey=0);
