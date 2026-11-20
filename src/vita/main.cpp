@@ -3,6 +3,7 @@
 // render.timing_window / render.phase_window profile measures the CPU side
 // (logic + capture) on the Cortex-A9 before any GPU backend exists.
 #include <psp2/ctrl.h>
+#include <psp2/gxm.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
@@ -41,7 +42,9 @@ namespace vita_selftest { void Run(void (*log)(const char*, const char*)); }
 extern "C" {
 // Engine heap: newlib malloc arena. The rest of user memory stays for the
 // kernel/GPU. Tunable once the real footprint is measured.
-unsigned int _newlib_heap_size_user = 330u * 1024u * 1024u;
+// Peak newlib use on heavy tracks ~215 MB (renderer.vitagl.memory_use); the
+// rest of user RAM goes to vitaGL, which otherwise runs out of GPU memory.
+unsigned int _newlib_heap_size_user = 280u * 1024u * 1024u;
 unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 }
 
@@ -49,7 +52,7 @@ namespace hp2 { extern int debugQuickRaceTrack, debugQuickRaceReverse; extern in
 extern int collisionWitnessWarmProbe;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; }
+namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -182,6 +185,18 @@ public:
                     std::snprintf(detail, sizeof(detail), "track=%d reverse=%d", track, reverse);
                     log_.Line("vita.autopad_track", detail);
                 }
+            }
+            std::fclose(file);
+        }
+        // Testing: quickrace_track.txt "<track> [reverse]" forces Quick Race
+        // onto that track (normal menus and input; no autopad taps).
+        if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/quickrace_track.txt").c_str(), "r")) {
+            int track = -1, reverse = 0;
+            if (std::fscanf(file, "%d %d", &track, &reverse) >= 1 && track >= 0) {
+                ::hp2::debugQuickRaceTrack = track; ::hp2::debugQuickRaceReverse = reverse;
+                char detail[64];
+                std::snprintf(detail, sizeof(detail), "track=%d reverse=%d", track, reverse);
+                log_.Line("vita.quickrace_track", detail);
             }
             std::fclose(file);
         }
@@ -582,6 +597,43 @@ int main(int, char**)
                 log.Line("vita.diag", ("model parallel strips " + std::to_string(threshold)).c_str());
             }
         }
+        // Half-resolution smoke/dust (user-approved 2026-11-19) is the Vita
+        // default; halfres_off.txt restores full resolution.
+        hp2::ecstasyHalfResParticles = 1;
+        if (sceIoGetstat((std::string(kDataDirectory) + "/halfres_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyHalfResParticles = 0;
+            log.Line("vita.diag", "half-resolution particles off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/halfres_sync.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyHalfResSync = 1;
+            log.Line("vita.diag", "DIAGNOSTIC half-res GPU sync before depth read");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/halfres_dflip.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyHalfResDepthFlip = 1;
+            log.Line("vita.diag", "half-res depth flip");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/halfres_cflip.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyHalfResCompositeFlip = 1;
+            log.Line("vita.diag", "half-res composite flip");
+        }
+        if (FILE* gate = std::fopen((std::string(kDataDirectory) + "/halfres_min.txt").c_str(), "r")) {
+            double value = 0.0;
+            if (std::fscanf(gate, "%lf", &value) == 1) hp2::ecstasyHalfResMinScreens = value;
+            std::fclose(gate);
+            log.Line("vita.diag", ("half-res min screens " + std::to_string(hp2::ecstasyHalfResMinScreens)).c_str());
+        }
+        if (FILE* shots = std::fopen((std::string(kDataDirectory) + "/dshots.txt").c_str(), "r")) {
+            unsigned long long frame = 0;
+            while (std::fscanf(shots, "%llu", &frame) == 1) hp2::ecstasyDisplayShotFrames.push_back(frame);
+            std::fclose(shots);
+            log.Line("vita.diag", ("display shots " + std::to_string(hp2::ecstasyDisplayShotFrames.size())).c_str());
+        }
+        if (FILE* shots = std::fopen((std::string(kDataDirectory) + "/shots.txt").c_str(), "r")) {
+            unsigned long long frame = 0;
+            while (std::fscanf(shots, "%llu", &frame) == 1) hp2::ecstasyScreenshotFrames.push_back(frame);
+            std::fclose(shots);
+            log.Line("vita.diag", ("screenshots " + std::to_string(hp2::ecstasyScreenshotFrames.size())).c_str());
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/particles_serial.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyParallelParticles = 0;
             log.Line("vita.diag", "particle parallel build off");
@@ -601,6 +653,29 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/frag_mediump.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyFragmentMediump = 1;
             log.Line("vita.diag", "fragment precision mediump");
+        }
+        // Scene worker jobs share cores 1/2 with the gather and GL threads;
+        // inline jobs measured faster on heavy tracks (track 64 traverse
+        // 5.5 -> 1.4 ms/view). scene_jobs_parallel.txt restores the pool.
+        hp2::ecstasySceneJobsSerial = 1;
+        if (sceIoGetstat((std::string(kDataDirectory) + "/scene_jobs_parallel.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasySceneJobsSerial = 0;
+            log.Line("vita.diag", "scene jobs parallel");
+        }
+        // Hardware-depth half pass: no measured gain over the depth-texture
+        // discard (track 64 smoke 17.6 vs 17.8 fps); opt-in only.
+        hp2::ecstasyHalfResHardwareDepth = 0;
+        if (sceIoGetstat((std::string(kDataDirectory) + "/halfres_hwdepth.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyHalfResHardwareDepth = 1;
+            log.Line("vita.diag", "half-res hardware depth");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/halfres_atest.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyHalfResSkipAlphaTest = 0;
+            log.Line("vita.diag", "half-res keeps alpha test");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_prep_serial.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyParallelSceneryPrepare = 0;
+            log.Line("vita.diag", "scenery prepare serial");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/worker_prio.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneWorkerPriority = 140;

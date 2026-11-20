@@ -1884,11 +1884,14 @@ inline NativeSceneWorkerPool& NativeSceneThreadPool() {
 // workers only fill separate output slots; the main thread joins them before
 // it copies shared vertices or uploads. On one core/small scenes, no native
 // thread pool is constructed and there are no locks/condition variables.
+// Vita diagnostic (scene_jobs_serial.txt): run every scene job inline.
+extern int ecstasySceneJobsSerial;
 template<class Task>
 void RunNativeSceneJobs(std::size_t count,Task&& task,
     std::size_t minimumParallelJobs=512,unsigned requestedWorkers=0)
 {
     if(!count)return;
+    if(ecstasySceneJobsSerial) {for(std::size_t index=0;index<count;++index)task(index);return;}
     const unsigned effective=NativeSceneEffectiveHardwareConcurrency();
     const unsigned budget=requestedWorkers ? std::min(effective,requestedWorkers):effective;
     const unsigned workers=static_cast<unsigned>(std::min<std::size_t>(count,std::max(1u,budget)));

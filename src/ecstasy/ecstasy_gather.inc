@@ -584,7 +584,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         const bool layeredUi=ui && (draw.rasterState[2]&255u)!=0;
         Require(elementIndices.size()<=std::numeric_limits<std::uint32_t>::max(),
             "Vulkan frame index count exceeds32-bit draw range");
-        VkDrawBatch batch;batch.indexed=true;batch.cachedOpaqueScenery=draw.cachedOpaqueScenery;
+        VkDrawBatch batch;batch.indexed=true;batch.cachedOpaqueScenery=draw.cachedOpaqueScenery;batch.particle=particle;
         batch.first=static_cast<std::uint32_t>(elementIndices.size());batch.texture=textureIndex;
         // AttachMicroCode's TME/primitive controls feed the solid VU
         // templates; UI and immediate particle packets have independent PRIM.

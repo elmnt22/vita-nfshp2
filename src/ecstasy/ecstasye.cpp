@@ -98,6 +98,17 @@ int ecstasyParallelModelStrips=[] {
 }();
 // Posed (skinned) models: parallel from this many strips; 0 = old threshold
 // only (PC HP2_PARALLEL_SKIN_STRIPS, Vita skin_serial.txt).
+// vitaGL (user-approved look change 2026-11-19): draw runs of smoke/dust
+// particle batches on the main screen into a half-resolution buffer with a
+// manual scene-depth test, then composite (default off: costs ~2 fps until the display render target allows 2 scenes; Vita halfres_on.txt).
+int ecstasyHalfResParticles=0;
+int ecstasyHalfResHardwareDepth=1; // Vita halfres_discard.txt: 0 (per-fragment depth-texture discard)
+int ecstasyHalfResSkipAlphaTest=1; // Vita halfres_atest.txt: 0 (keep the redundant discard)
+// Splitting the display scene stores+reloads colour and depth (~4 ms), so the
+// half pass is used only on frames with heavy particle fill (screens covered).
+double ecstasyHalfResMinScreens=6.0;
+int ecstasyHalfResSync=0,ecstasyHalfResDepthFlip=0,ecstasyHalfResCompositeFlip=0; // orientation (Vita halfres_dflip/_cflip.txt)
+std::vector<std::uint64_t> ecstasyScreenshotFrames,ecstasyDisplayShotFrames; // Vita dshots.txt: on-screen copies         // Vita shots.txt: frame numbers to save
 int ecstasyParallelSkinStrips=[] {
 #if !defined(__vita__)
     if(const char* value=std::getenv("HP2_PARALLEL_SKIN_STRIPS"))return std::max(0,std::atoi(value));
@@ -177,6 +188,8 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
 // Scene jobs are short owner-blocking bursts (the caller waits for them), so
 // they may preempt the long-running gather/GL threads on cores 1-2.
 int ecstasySceneWorkerPriority=0; // 0 keeps the default priority
+int ecstasySceneJobsSerial=0;
+int ecstasyParallelSceneryPrepare=1; // Vita scenery_prep_serial.txt: 0
 void ConfigureNativeSceneWorker() noexcept
 {
     (void)sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_1|SCE_KERNEL_CPU_MASK_USER_2);
@@ -4553,6 +4566,12 @@ void graphicsNotifyPresentationComplete() noexcept {
 #if !defined(HP2_ENABLE_VULKAN)
 #include "src/ecstasy/vk_pod.hpp"
 #include <vitaGL.h>
+#include <psp2/gxm.h>
+#include <malloc.h>
+#include <psp2/display.h>
+extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface; // vitaGL's display depth surface
+extern "C" SceGxmRenderTarget* gxm_render_target;               // vitaGL's display render target
+extern "C" SceGxmContext* gxm_context;
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <pthread.h>
@@ -7361,6 +7380,8 @@ struct VkDrawBatch {
     // Every CPU-written vertex of this batch has q==1 exactly, so uv/q==uv
     // (vitaGL samples without the per-fragment divide; same result).
     bool affineUV{};
+    // Particle-group quads (vitaGL may draw runs of them at half resolution).
+    bool particle{};
     VkRect2D scissor{};
     VkViewport viewport{};
     std::int32_t textureFunction{},alphaTest{};
@@ -7387,7 +7408,7 @@ struct VkDrawBatch {
             sampledPreviousFrame==previous.sampledPreviousFrame && blend==previous.blend &&
             blendConstant==previous.blendConstant && depth==previous.depth && depthWrite==previous.depthWrite &&
             postProcess==previous.postProcess && showcaseEnvironmentBlend==previous.showcaseEnvironmentBlend &&
-            wireframe==previous.wireframe && affineUV==previous.affineUV &&
+            wireframe==previous.wireframe && affineUV==previous.affineUV && particle==previous.particle &&
             untextured==previous.untextured && clampTopLeft==previous.clampTopLeft &&
             textureFunction==previous.textureFunction && alphaTest==previous.alphaTest &&
             focusFirst==previous.focusFirst && focusPassCount==previous.focusPassCount && focusBlend==previous.focusBlend &&
