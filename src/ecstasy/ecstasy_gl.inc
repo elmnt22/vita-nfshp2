@@ -1011,14 +1011,17 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         const auto now=sceKernelGetSystemTimeWide();
         if((prepareMs>40.0 || claimMs>15.0) && now-lastSlowPrepareLog>500000u) {
             lastSlowPrepareLog=now;
-            char detail[320];
+            char detail[512];
             std::snprintf(detail,sizeof(detail),
                 "claim_wait_ms=%.2f prepare_ms=%.2f gather_ms=%.2f texture_uploads=%u texture_bytes=%llu resident_bytes=%" HP2_ZU " "
-                "commands=%" HP2_ZU " batches=%" HP2_ZU " vertices=%" HP2_ZU " last_gl_submit_ms=%.2f last_gl_present_ms=%.2f",
+                "commands=%" HP2_ZU " batches=%" HP2_ZU " vertices=%" HP2_ZU " last_gl_submit_ms=%.2f last_gl_present_ms=%.2f "
+                "validate_ms=%.2f loop_ms=%.2f vjobs_ms=%.2f indices_ms=%.2f resident_new=%u resident_evict=%u resident_capture=%u",
                 claimMs,prepareMs,statistics.gatherMilliseconds,static_cast<unsigned>(statistics.textureUploads),
                 static_cast<unsigned long long>(statistics.textureUploadBytes),
                 packet.residentVertexBytes.size()+packet.residentIndexBytes.size(),commandCount,
-                packet.batches.size(),packet.vertices.size(),statistics.recordSubmitMilliseconds,statistics.presentMilliseconds);
+                packet.batches.size(),packet.vertices.size(),statistics.recordSubmitMilliseconds,statistics.presentMilliseconds,
+                nativeGatherFrameMs[0],nativeGatherFrameMs[1],nativeGatherFrameMs[2],nativeGatherFrameMs[3],
+                nativeGatherResidentEvents[0],nativeGatherResidentEvents[1],nativeGatherResidentEvents[2]);
             platform::RecordSessionEvent("renderer.vitagl.slow_prepare",detail);
         }
     }

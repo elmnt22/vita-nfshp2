@@ -22,6 +22,8 @@ std::array<double,10> nativeGatherStepMilliseconds{};
 // shadow), resident misses, resident re-prepares.
 std::array<double,6> nativeSolidKinds{};
 std::array<double,12> nativeBatchBreaks{};
+// Last Gather's phases (ms): validation, command loop, vertex jobs, indices.
+std::array<double,4> nativeGatherFrameMs{};
 
 void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     std::vector<VkVertex>& output,std::vector<std::uint32_t>& elementIndices,
@@ -29,6 +31,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
 {
     // BeginGather also identifies validation performed during overlap
     // preflight. The sealed frame cannot mutate between that check and here.
+    nativeGatherResidentEvents={};
     residentGeometry.Begin(gatherSerial);residentIndexCache.Begin(gatherSerial);
     residentFrameVertices=0;residentFrameIndices=0;gatheredResidentIndexSpans.clear();gatheredResidentSpanTokens.clear();
     nativeStripJobs.clear();nativeWorkRanges.clear();nativeFrameShading.Clear();
@@ -44,7 +47,9 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // Per-strip copies of run commands that leave the cached scenery path.
     // Stable addresses: generic jobs keep pointers until this Gather ends.
     sceneryRunFallbacks.clear();
-    profile.gatherValidationMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-validateStarted).count();
+    const auto loopStarted=Clock::now();
+    nativeGatherFrameMs[0]=std::chrono::duration<double,std::milli>(loopStarted-validateStarted).count();
+    profile.gatherValidationMilliseconds+=nativeGatherFrameMs[0];
     const bool directSourcePreparation=nativeWorkers<=1;
     std::size_t nativePendingWork=0;
     // Cold raw uploads use the shared native pool after ordered state
@@ -1145,9 +1150,11 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     }
     residentGeometry.CompletePreparation();
     const auto indicesStarted=Clock::now();
-    profile.gatherVertexJobsMilliseconds+=
-        std::chrono::duration<double,std::milli>(indicesStarted-finishStarted).count();
+    nativeGatherFrameMs[1]=std::chrono::duration<double,std::milli>(finishStarted-loopStarted).count();
+    nativeGatherFrameMs[2]=std::chrono::duration<double,std::milli>(indicesStarted-finishStarted).count();
+    profile.gatherVertexJobsMilliseconds+=nativeGatherFrameMs[2];
     ResolveNativeResidentIndices(residentIndexCache,gatheredResidentIndexSpans,gatheredResidentSpanTokens,elementIndices,batches);
-    profile.gatherIndicesMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-indicesStarted).count();
+    nativeGatherFrameMs[3]=std::chrono::duration<double,std::milli>(Clock::now()-indicesStarted).count();
+    profile.gatherIndicesMilliseconds+=nativeGatherFrameMs[3];
     profile.gatherFinishMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-finishStarted).count();
 }
