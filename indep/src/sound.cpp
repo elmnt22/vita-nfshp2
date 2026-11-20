@@ -1304,6 +1304,23 @@ static WorldAudioResult finishAudioRequest(WorldAudioRequestQueue* queue,
     // same voice and source until an actual acknowledgement frees a command
     // slot. Publish its real STOP here, after older commands; never forge an
     // acknowledgement, playing completion, or extra sample owner.
+    // Fast exit (same result): with a valid binding and no occupied
+    // retiring==2 slot the scan below changes nothing. Per-index binding
+    // checks plus list walks cost ~30 us per acknowledgement on Vita.
+    if (queue->instanceCapacity && queue->instances &&
+        queue->instanceCapacity<=SIZE_MAX/sizeof(WorldAudioInstance)) {
+        bool idle=false;
+        if (queue->library) {
+            idle=queue->library->Driver()==queue && queue->instances==queue->library->SampleAt(0) &&
+                queue->instanceCapacity==queue->library->SampleCapacity() &&
+                !queue->library->AnySampleRetiring(2);
+        } else {
+            idle=true;
+            for (size_t index=0;index<queue->instanceCapacity && idle;++index)
+                idle=!(queue->instances[index].occupied && queue->instances[index].retiring==2);
+        }
+        if (idle) return queue->result = failed ? WORLD_AUDIO_BACKEND_FAILURE:WORLD_AUDIO_OK;
+    }
     for (size_t index=0;index<queue->instanceCapacity;++index) {
         auto* current=worldAudioInstanceAt(queue,index);
         if (!current) return queue->result=WORLD_AUDIO_INVALID_BINDING;

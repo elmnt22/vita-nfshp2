@@ -396,6 +396,18 @@ public:
                 audio.mixMilliseconds, static_cast<unsigned long long>(audio.buffers), audio.voicesPeak);
             pumpPeakUs_ = 0;
             log_.Line("audio.backend_window", detail);
+            {
+                // Top request kinds by apply time (per pump averages).
+                int order[40];for (int k = 0; k < 40; ++k) order[k] = k;
+                std::sort(order, order + 40, [&](int a, int b) {return audio.kindMilliseconds[a] > audio.kindMilliseconds[b];});
+                int used = std::snprintf(detail, sizeof(detail), "requests=%.2f predecode_ms=%.3f apply_ms=%.3f lock_ms=%.3f",
+                    audio.requests / 300.0, audio.preDecodeMilliseconds / 300.0, audio.applyMilliseconds / 300.0, audio.lockWaitMilliseconds / 300.0);
+                for (int i = 0; i < 6 && used > 0 && used < static_cast<int>(sizeof(detail)); ++i) {
+                    const int k = order[i];if (!audio.kindCounts[k]) break;
+                    used += std::snprintf(detail + used, sizeof(detail) - used, " k%d=%u/%.3fms", k, audio.kindCounts[k], audio.kindMilliseconds[k] / 300.0);
+                }
+                log_.Line("audio.request_kinds", detail);
+            }
         }
         return result;
     }
