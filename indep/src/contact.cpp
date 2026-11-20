@@ -37,6 +37,23 @@ int32_t collisionWitnessQueryDetached(CollisionWitness* witness, const float fir
 int32_t collisionWitnessQueryAbortable(CollisionWitness* witness, const float firstFrame[16],
     const float firstPosition[4], const float secondFrame[16], const float secondPosition[4],
     uint32_t* randomState, uint64_t counters[4], const std::atomic<int>* stop);
+int32_t collisionWitnessQueryPredict(CollisionWitness* witness, const float firstFrame[16],
+    const float firstPosition[4], const float secondFrame[16], const float secondPosition[4],
+    int32_t* pending, uint64_t counters[4]);
+// Contact pipeline (exact): a whole queue pass's find-time and separation
+// queries are published at once in random-state order. Vita
+// contact_pipe_off.txt / PC HP2_CONTACT_PIPE=0.
+int collisionContactPipeline=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    const char* value=getenv("HP2_CONTACT_PIPE");return value ? atoi(value):1;
+#else
+    return 1;
+#endif
+}();
+uint64_t collisionPipeZeroKind[6]={},collisionPipeRelayouts=0;
+uint64_t collisionPipeLong=0,collisionPipeZeroDraw=0,collisionPipeBehind[9]={};
+uint64_t collisionPipeMissPair=0,collisionPipeMissStart=0,collisionPipeShort=0,collisionPipeDrawDelta[4]={0,0,0,0};
+uint64_t collisionPipeContacts=0,collisionPipeEntryMisses=0,collisionPipeBreaks=0,collisionPipeTasks=0,collisionPipeUsed=0,collisionPipePasses=0;
 // Speculative rounds stop queries the caller will discard (exact: a stopped
 // query is never committed). Vita spec_abort_off.txt / PC HP2_SPEC_ABORT=0.
 int collisionSpeculativeAbort=[] {
@@ -944,8 +961,374 @@ float findTimeSpeculative(const CollisionSystem* system,const CollisionQueuedCon
 }
 }
 
+// ---------------------------------------------------------------------------
+// Contact pipeline. Within one queue pass the contacts are linked only by the
+// shared random state: each contact's find-time/separation queries read the
+// pair's witness, the shapes' poses (unchanged during the pass) and the
+// random state. Every witness query that converges ends with one terminal
+// restart (two vertex draws), so the start of every query in the pass can be
+// predicted once the number of queries per contact is known. The RNG-free
+// planning pass (warm starts, run with the queue prediction) predicts each
+// contact's bisection path and separation length; the exact queries of the
+// whole pass are then published at once and committed in order. A query is
+// used only if its start vertices, random state and pose (midpoint bits /
+// separation iteration) equal the actual ones, so the result is the serial
+// one by construction; any other query is computed serially on the spot and
+// the pipeline is closed.
+namespace {
+struct ContactPlan {
+    int valid,complete,findCount,separate,separateCount;
+    float midpoints[8];
+    float rewind;
+    FindTimePose poses[8];
+    SeparationInputs inputs;
+    CollisionWitness base;
+};
+std::vector<ContactPlan> contactPlans;
+struct PipeTask {
+    SpeculativeQuery query;
+    const CollisionWitness* base;
+    std::atomic<uint32_t> done;
+    std::atomic<int> stop;
+};
+constexpr size_t kPipeTaskCapacity=1024;
+constexpr size_t kPipeContactCapacity=96;
+PipeTask* pipeTasks=nullptr;
+struct PipeContact {
+    CollisionPair* pair;
+    size_t plan,firstTask,taskCount,seed;
+    CollisionFeature* startFirst;
+    CollisionFeature* startSecond;
+    uint32_t startState;
+};
+PipeContact pipeContacts[kPipeContactCapacity];
+size_t pipeContactCount=0,pipeCursor=0,pipeTaskCount=0;
+bool pipeActive=false;
+const CollisionPipelineSeed* pipeSeeds=nullptr;
+size_t pipeSeedCount=0;
+
+void runPipeTask(void*,unsigned index)
+{
+    PipeTask& task=pipeTasks[index];
+    SpeculativeQuery& query=task.query;
+    if (task.stop.load(std::memory_order_relaxed)) {query.result=-1;task.done.store(1,std::memory_order_release);return;}
+    query.witness=*task.base;
+    query.witness.first=query.inFirst;
+    query.witness.second=query.inSecond;
+    fillUnwritten(&query.witness.side,sizeof(query.witness.side));
+    fillUnwritten(query.witness.firstPoint,sizeof(query.witness.firstPoint));
+    fillUnwritten(query.witness.secondPoint,sizeof(query.witness.secondPoint));
+    fillUnwritten(&query.witness.distance,sizeof(query.witness.distance));
+    query.state=query.inState;
+    query.counters[0]=query.counters[1]=query.counters[2]=query.counters[3]=0;
+    query.result=collisionWitnessQueryAbortable(&query.witness,query.firstFrame,query.firstPosition,
+        query.secondFrame,query.secondPosition,&query.state,query.counters,&task.stop);
+    task.done.store(1,std::memory_order_release);
+}
+
+void pipelineClose()
+{
+    if (!pipeActive) return;
+    for (size_t k=0;k<pipeTaskCount;++k) pipeTasks[k].stop.store(1,std::memory_order_relaxed);
+    CollisionHelperPool::Instance().Close();
+    pipeActive=false;
+}
+
+// Serial reference without helpers (verify only): findTimeSerial with the
+// serial separation.
+float findTimeReference(CollisionSystem* system,CollisionQueuedContact* contact)
+{
+    CollisionShape* first=contact->view.first;
+    CollisionShape* second=contact->view.second;
+    const float firstTime=first->active ? first->previousTime : 1000.0f;
+    const float secondTime=second->active ? second->previousTime : 1000.0f;
+    float upper=minimumFinite(firstTime,secondTime), lower=0.0f, midpoint=0.0f;
+    int32_t result=0;
+    memset(contact->displacement,0,sizeof(contact->displacement));
+    for (int iteration=0;iteration<8;++iteration) {
+        const float half=(upper-lower)*0.5f;
+        midpoint=lower+half;
+        float firstPosition[4],secondPosition[4],firstFrame[16],secondFrame[16];
+        collisionResponseInterpolatePose(first,firstPosition,firstFrame,midpoint);
+        collisionResponseInterpolatePose(second,secondPosition,secondFrame,midpoint);
+        result=collisionWitnessQuery(&contact->pair->witness,firstFrame,firstPosition,
+                                     secondFrame,secondPosition,system->randomState);
+        if (result==2) lower=midpoint;
+        else {
+            if (contact->pair->witness.distance<system->tuning->contactDistance) return midpoint;
+            upper=midpoint;
+        }
+    }
+    if (result==2) {
+        SeparationInputs inputs;
+        buildSeparationInputs(system,contact,midpoint,inputs);
+        separateSerial(inputs,&contact->pair->witness,system->randomState,contact->displacement);
+    }
+    return midpoint;
+}
+
+// findTimeSerial + separation for one planned contact, taking each query
+// from the pipeline when its inputs are exactly the actual ones.
+float pipelineContactCommit(const CollisionSystem* system,const CollisionQueuedContact* contact,const PipeContact& pc,
+    CollisionWitness& current,uint32_t& state,float displacement[4])
+{
+    const ContactPlan& plan=contactPlans[pc.plan];
+    auto& pool=CollisionHelperPool::Instance();
+    const CollisionShape* first=contact->view.first;
+    const CollisionShape* second=contact->view.second;
+    const float firstTime=first->active ? first->previousTime : 1000.0f;
+    const float secondTime=second->active ? second->previousTime : 1000.0f;
+    float upper=minimumFinite(firstTime,secondTime), lower=0.0f, midpoint=0.0f;
+    const float contactDistance=system->tuning->contactDistance;
+    memset(displacement,0,4*sizeof(float));
+    PipeTask* tasks=pipeTasks+pc.firstTask;
+    struct UsedCheck {
+        const PipeContact& pc;size_t used{};bool broke{};
+        ~UsedCheck() {if (!broke && used<pc.taskCount) ++collisionPipeLong;}
+    } usedCheck{pc};
+    const auto take=[&](size_t position)->bool {
+        if (!pipeActive || position>=pc.taskCount) return false;
+        PipeTask& task=tasks[position];
+        if (!predicted(current,state,task.query)) return false;
+        unsigned index;
+        while (!task.done.load(std::memory_order_acquire))
+            if (pool.ClaimOne(index)) runPipeTask(nullptr,index);
+        if (task.query.result<0) return false;
+        commitQuery(current,state,task.query);
+        if (task.query.counters[2]==0) {
+            ++collisionPipeZeroDraw;
+            // 0..2 result; +3 when it is a separation query
+            ++collisionPipeZeroKind[(task.query.result<0 ? 0:task.query.result>2 ? 2:task.query.result)+(position>=8 ? 3:0)];
+        }
+        ++collisionPipeUsed;++usedCheck.used;
+        return true;
+    };
+    const auto breakPipe=[&] {usedCheck.broke=true;if (pipeActive) {++collisionPipeBreaks;pipelineClose();}};
+    int32_t result=0;
+    for (int iteration=0;iteration<8;++iteration) {
+        const float half=(upper-lower)*0.5f;
+        midpoint=lower+half;
+        ++collisionFindQueries;
+        if (iteration<plan.findCount && memcmp(&plan.midpoints[iteration],&midpoint,sizeof(midpoint))==0 &&
+            take((size_t)iteration)) result=tasks[iteration].query.result;
+        else {
+            breakPipe();
+            float firstPosition[4],secondPosition[4],firstFrame[16],secondFrame[16];
+            collisionResponseInterpolatePose(first,firstPosition,firstFrame,midpoint);
+            collisionResponseInterpolatePose(second,secondPosition,secondFrame,midpoint);
+            result=collisionWitnessQuery(&current,firstFrame,firstPosition,secondFrame,secondPosition,&state);
+        }
+        if (result==2) lower=midpoint;
+        else {
+            if (current.distance<contactDistance) return midpoint;
+            upper=midpoint;
+        }
+    }
+    if (result!=2) return midpoint;
+    ++collisionSeparateCalls;
+    const bool planned=plan.separate && plan.findCount==8 && memcmp(&plan.rewind,&midpoint,sizeof(midpoint))==0;
+    SeparationInputs local;
+    const SeparationInputs* inputs=&plan.inputs;
+    if (!planned) {buildSeparationInputs(system,contact,midpoint,local);inputs=&local;}
+    for (int iteration=0;iteration<20;++iteration) {
+        ++collisionSeparateQueries;
+        const size_t position=8u+(size_t)iteration;
+        if (planned && take(position)) result=tasks[position].query.result;
+        else if (planned && position>=pc.taskCount) ++collisionPipeShort;
+        else {
+            breakPipe();
+            result=collisionWitnessQuery(&current,inputs->firstFrame,inputs->adjustedFirst[iteration],
+                inputs->secondFrame,inputs->adjustedSecond[iteration],&state);
+        }
+        if (result!=2) {memcpy(displacement,inputs->displacement[iteration],4*sizeof(float));return midpoint;}
+    }
+    return midpoint;
+}
+}
+
+void collisionContactPlanReserve(size_t count)
+{
+    if (contactPlans.size()<count) contactPlans.resize(count);
+    for (size_t index=0;index<count;++index) contactPlans[index].valid=0;
+}
+
+bool collisionContactPipelineEnabled()
+{
+    return collisionContactPipeline && collisionSpeculationMode!=0 && CollisionHelperPool::Instance().Helpers()>0;
+}
+
+// Helper thread (inside the queue prediction run): RNG-free plan of one
+// contact from the queue query's converged witness. Reads shapes only.
+void collisionContactPlanPrepare(size_t index,const CollisionSystem* system,CollisionPair* pair,const CollisionWitness& converged)
+{
+    ContactPlan& plan=contactPlans[index];
+    plan.valid=0;plan.complete=0;plan.findCount=0;plan.separate=0;plan.separateCount=0;
+    const CollisionShape* first=pair->first->shape;
+    const CollisionShape* second=pair->second->shape;
+    const float firstTime=first->active ? first->previousTime : 1000.0f;
+    const float secondTime=second->active ? second->previousTime : 1000.0f;
+    float upper=minimumFinite(firstTime,secondTime), lower=0.0f, midpoint=0.0f;
+    const float contactDistance=system->tuning->contactDistance;
+    plan.base=converged;
+    CollisionWitness witness=converged;
+    uint64_t counters[4]={0,0,0,0};
+    int32_t result=0;
+    plan.valid=1;
+    for (int iteration=0;iteration<8;++iteration) {
+        const float half=(upper-lower)*0.5f;
+        midpoint=lower+half;
+        FindTimePose& pose=plan.poses[iteration];
+        plan.midpoints[iteration]=midpoint;
+        collisionResponseInterpolatePose(first,pose.firstPosition,pose.firstFrame,midpoint);
+        collisionResponseInterpolatePose(second,pose.secondPosition,pose.secondFrame,midpoint);
+        int32_t pending=0;
+        result=collisionWitnessQueryPredict(&witness,pose.firstFrame,pose.firstPosition,pose.secondFrame,
+            pose.secondPosition,&pending,counters);
+        plan.findCount=iteration+1;
+        if (pending<0) return;
+        if (result==2) lower=midpoint;
+        else {
+            if (witness.distance<contactDistance) {plan.complete=1;return;}
+            upper=midpoint;
+        }
+    }
+    if (result!=2) {plan.complete=1;return;}
+    plan.separate=1;plan.rewind=midpoint;
+    CollisionQueuedContact probe{};
+    probe.view.first=pair->first->shape;probe.view.second=pair->second->shape;probe.pair=pair;
+    buildSeparationInputs(system,&probe,midpoint,plan.inputs);
+    for (int iteration=0;iteration<20;++iteration) {
+        int32_t pending=0;
+        result=collisionWitnessQueryPredict(&witness,plan.inputs.firstFrame,plan.inputs.adjustedFirst[iteration],
+            plan.inputs.secondFrame,plan.inputs.adjustedSecond[iteration],&pending,counters);
+        plan.separateCount=iteration+1;
+        if (pending<0) return;
+        if (result!=2) break;
+    }
+    plan.complete=1;
+}
+
+// Lays out seeds [begin,count) from the given random state. With given
+// features, the first seed's queue query is already committed and its
+// contact starts from them.
+static void pipelineLayout(size_t begin,uint32_t state,CollisionFeature* givenFirst,CollisionFeature* givenSecond)
+{
+    pipelineClose();
+    size_t tasks=0,contacts=0;
+    for (size_t at=begin;at<pipeSeedCount;++at) {
+        const auto& seed=pipeSeeds[at];
+        const CollisionWitness& queued=*seed.queueWitness;
+        CollisionFeature* startFirst=queued.first;
+        CollisionFeature* startSecond=queued.second;
+        if (at==begin && givenFirst) {startFirst=givenFirst;startSecond=givenSecond;}
+        else if (seed.queuePending==1) {
+            startFirst=&queued.firstGeometry->vertices[vectorRandomBounded((uint32_t)queued.firstGeometry->vertexCount,&state)];
+            startSecond=&queued.secondGeometry->vertices[vectorRandomBounded((uint32_t)queued.secondGeometry->vertexCount,&state)];
+        }
+        if (!seed.contact) continue;
+        const ContactPlan& plan=contactPlans[seed.plan];
+        if (!plan.valid) break;
+        const size_t need=(size_t)plan.findCount+(size_t)plan.separateCount;
+        if (contacts==kPipeContactCapacity || tasks+need>kPipeTaskCapacity) break;
+        PipeContact& pc=pipeContacts[contacts++];
+        pc.pair=seed.pair;pc.plan=seed.plan;pc.firstTask=tasks;pc.taskCount=need;pc.seed=at;
+        pc.startFirst=startFirst;pc.startSecond=startSecond;pc.startState=state;
+        for (size_t k=0;k<need;++k) {
+            PipeTask& task=pipeTasks[tasks++];
+            SpeculativeQuery& query=task.query;
+            query.inFirst=startFirst;query.inSecond=startSecond;query.inState=state;
+            if (k<(size_t)plan.findCount) {
+                const FindTimePose& pose=plan.poses[k];
+                query.firstPosition=pose.firstPosition;query.secondPosition=pose.secondPosition;
+                query.firstFrame=pose.firstFrame;query.secondFrame=pose.secondFrame;
+            } else {
+                const size_t j=k-(size_t)plan.findCount;
+                query.firstPosition=plan.inputs.adjustedFirst[j];query.secondPosition=plan.inputs.adjustedSecond[j];
+                query.firstFrame=plan.inputs.firstFrame;query.secondFrame=plan.inputs.secondFrame;
+            }
+            task.base=&plan.base;
+            task.done.store(0,std::memory_order_relaxed);
+            task.stop.store(0,std::memory_order_relaxed);
+            // The common case: converged after at least one step, one
+            // terminal restart (two draws) that seeds the next query. The
+            // final separating query sometimes ends on a new pair without a
+            // restart; the next contact then lays out again from the actual
+            // state (see collisionContactFindTime).
+            startFirst=&plan.base.firstGeometry->vertices[vectorRandomBounded((uint32_t)plan.base.firstGeometry->vertexCount,&state)];
+            startSecond=&plan.base.secondGeometry->vertices[vectorRandomBounded((uint32_t)plan.base.secondGeometry->vertexCount,&state)];
+        }
+        if (!plan.complete) break;
+    }
+    if (tasks==0) return;
+    pipeContactCount=contacts;pipeCursor=0;pipeTaskCount=tasks;
+    collisionPipeTasks+=tasks;
+    pipeActive=true;
+    CollisionHelperPool::Instance().Publish((unsigned)tasks,runPipeTask,nullptr);
+}
+
+// Main thread, after the queue prediction: lay out the pass's exact queries
+// in random-state order and publish them.
+void collisionContactPipelineStart(CollisionSystem* system,const CollisionPipelineSeed* seeds,size_t count)
+{
+    pipelineClose();
+    pipeSeeds=nullptr;pipeSeedCount=0;
+    if (!collisionContactPipelineEnabled() || count==0) return;
+    if (!pipeTasks) pipeTasks=new PipeTask[kPipeTaskCapacity];
+    pipeSeeds=seeds;pipeSeedCount=count;
+    ++collisionPipePasses;
+    pipelineLayout(0,*system->randomState,nullptr,nullptr);
+}
+
+void collisionContactPipelineEnd()
+{
+    pipelineClose();
+    pipeSeeds=nullptr;pipeSeedCount=0;
+}
+
 float collisionContactFindTime(CollisionSystem* system, CollisionQueuedContact* contact)
 {
+    if (pipeActive) {
+        const PipeContact* pc=nullptr;
+        if (pipeCursor<pipeContactCount && pipeContacts[pipeCursor].pair==contact->pair) pc=&pipeContacts[pipeCursor++];
+        if (!pc) ++collisionPipeMissPair;
+        if (pc && (contact->pair->witness.first!=pc->startFirst || contact->pair->witness.second!=pc->startSecond ||
+                   *system->randomState!=pc->startState)) {
+            ++collisionPipeMissStart;
+            // Diagnostic: how many draws the actual state is ahead (+) of the plan.
+            uint32_t ahead=pc->startState,behind=*system->randomState;int delta=-1;
+            for (int k=1;k<=8 && delta<0;++k) {(void)vectorRandomBounded(2u,&ahead);if (ahead==*system->randomState) delta=k;}
+            for (int k=1;k<=8 && delta<0;++k) {(void)vectorRandomBounded(2u,&behind);if (behind==pc->startState) delta=100+k;}
+            if (delta>100) ++collisionPipeBehind[delta-100];
+            ++collisionPipeDrawDelta[delta<0 ? 3:delta<100 ? (delta==2 ? 0:2):1];
+            // The plans are RNG-free: lay the rest of the pass out again from
+            // the actual state and this contact's actual start.
+            ++collisionPipeRelayouts;
+            pipelineLayout(pc->seed,*system->randomState,contact->pair->witness.first,contact->pair->witness.second);
+            pc=pipeActive && pipeContactCount>0 && pipeContacts[0].pair==contact->pair ? &pipeContacts[pipeCursor++]:nullptr;
+        }
+        if (!pc) {++collisionPipeEntryMisses;pipelineClose();}
+        else {
+            ++collisionPipeContacts;
+            const bool verify=collisionSpeculationMode==2 ||
+                (collisionSpeculationMode==3 && collisionSpecVerified<collisionSpeculationVerifyBudget);
+            if (verify) {
+                CollisionWitness copy=contact->pair->witness;
+                uint32_t state=*system->randomState;
+                float displacement[4];
+                const float midpoint=pipelineContactCommit(system,contact,*pc,copy,state,displacement);
+                const float expected=findTimeReference(system,contact);
+                ++collisionSpecVerified;
+                if (!sameWitness(copy,contact->pair->witness) || state!=*system->randomState ||
+                    memcmp(displacement,contact->displacement,sizeof(displacement))!=0 ||
+                    memcmp(&midpoint,&expected,sizeof(midpoint))!=0) ++collisionSpecMismatches;
+                return expected;
+            }
+            const uint32_t findStart=collisionSplitNow();
+            const float midpoint=pipelineContactCommit(system,contact,*pc,contact->pair->witness,*system->randomState,contact->displacement);
+            collisionSplitMicros[2]+=collisionSplitNow()-findStart;++collisionSplitCounts[2];
+            return midpoint;
+        }
+    }
     const bool verify=collisionSpeculationMode==2 ||
         (collisionSpeculationMode==3 && collisionSpecVerified<collisionSpeculationVerifyBudget);
     if (verify) {
