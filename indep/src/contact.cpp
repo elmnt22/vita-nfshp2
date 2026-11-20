@@ -41,6 +41,10 @@ extern double collisionWitnessMilliseconds;
 // result kept, speculative result compared), 3 verify for the first
 // collisionSpeculationVerifyBudget separations, then speculative.
 int collisionSpeculationMode=0;
+extern int collisionWitnessBench;
+void collisionWitnessBenchRecord(const CollisionWitness* witness,const float firstFrame[16],const float firstPosition[4],
+    const float secondFrame[16],const float secondPosition[4],uint32_t state);
+int collisionSeparatePipelined=1; // pipelined separation (Vita sep_pipe_off.txt: 0)
 uint64_t collisionSpeculationVerifyBudget=0;
 #if !defined(__vita__)
 #include <stdlib.h>
@@ -59,6 +63,11 @@ uint64_t collisionSpecSeparations=0,collisionSpecAccepted=0,collisionSpecWasted=
     collisionSpecRounds=0,collisionSpecVerified=0,collisionSpecMismatches=0,
     collisionFindQueries=0,collisionSeparateQueries=0,collisionSeparateCalls=0;
 
+extern uint32_t (*collisionWitnessClockMicros)();
+uint32_t collisionPoolHotMicros=60; // needs the host clock (Vita); pool_hot.txt: "<us>" (0 off)
+std::atomic<uint64_t> collisionPoolHelperTasks{0},collisionPoolHelperMicros{0};
+uint64_t collisionPoolMainMicros=0;
+uint64_t collisionPoolMainTasks=0,collisionPoolRuns=0,collisionPoolRunMicros=0,collisionPoolWaitMicros=0;
 namespace {
 // Two helper threads (Vita cores 1 and 2) that claim indices of the batch the
 // main thread publishes. The main thread claims indices too and only waits
@@ -89,9 +98,36 @@ public:
 #endif
         }
     }
+    // Pipelined batches: Publish opens a batch without running it, the
+    // caller claims indices itself (ClaimOne) while it consumes results in
+    // order, and Close stops further claims and waits for in-flight tasks.
+    void Publish(unsigned count,void (*function)(void*,unsigned),void* context)
+    {
+        generation_=(generation_+1)&0xffffu;
+        state_.store((generation_<<16)|0xffffu);
+        function_=function;context_=context;count_=count;floatingPoint_=ReadFloatingPoint();
+        state_.store(generation_<<16);
+        const unsigned wake=armed_.load() ? 0u:(count-1<helpers_ ? count-1:helpers_);
+        if(wake)
+#if defined(__vita__)
+        sceKernelSignalSema(sema_,static_cast<int>(wake));
+#else
+        {
+            {std::lock_guard<std::mutex> lock(mutex_);pending_+=wake;}
+            if(wake>1)wakeup_.notify_all();else wakeup_.notify_one();
+        }
+#endif
+    }
+    bool ClaimOne(unsigned& index) {return Claim(generation_,index);}
+    void Close()
+    {
+        state_.store((generation_<<16)|0xffffu);
+        while(inFlight_.load()!=0) {}
+    }
     void Run(unsigned count,void (*function)(void*,unsigned),void* context)
     {
         if(helpers_==0 || count<2) {for(unsigned index=0;index<count;++index)function(context,index);return;}
+        const uint32_t runStart=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
         generation_=(generation_+1)&0xffffu;
         state_.store((generation_<<16)|0xffffu);
         function_=function;context_=context;count_=count;floatingPoint_=ReadFloatingPoint();
@@ -107,8 +143,18 @@ public:
         }
 #endif
         unsigned index;
-        while(Claim(generation_,index))function(context,index);
+        while(Claim(generation_,index)) {
+            const uint32_t taskStart=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+            function(context,index);++collisionPoolMainTasks;
+            if(collisionWitnessClockMicros)collisionPoolMainMicros+=collisionWitnessClockMicros()-taskStart;
+        }
+        const uint32_t waitStart=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
         while(inFlight_.load()!=0) {}
+        if(collisionWitnessClockMicros) {
+            const uint32_t now=collisionWitnessClockMicros();
+            collisionPoolRunMicros+=now-runStart;collisionPoolWaitMicros+=now-waitStart;
+        }
+        ++collisionPoolRuns;
     }
 private:
     CollisionHelperPool()
@@ -180,32 +226,57 @@ private:
                 --pending_;
             }
 #endif
+            // Hot polling (collisionPoolHotMicros>0): after a batch the
+            // helper keeps its task priority while it polls, for a bounded
+            // time only, so a thread it preempts (which may hold a lock the
+            // main thread needs) always runs again within that bound.
+            bool hot=false;uint32_t hotSince=0;unsigned polls=0;
             do {
                 // Cheap poll: only enter the claim protocol for an open batch.
                 const uint32_t peek=state_.load(std::memory_order_relaxed);
                 if((peek&0xffffu)==0xffffu || (peek&0xffffu)>=count_) {
+                    if(hot && (++polls&31u)==0 && collisionWitnessClockMicros &&
+                        collisionWitnessClockMicros()-hotSince>collisionPoolHotMicros) {
+#if defined(__vita__)
+                        sceKernelChangeThreadPriority(0,185);
+#endif
+                        hot=false;
+                    }
                     if(armed_.load(std::memory_order_relaxed))continue;
                     break;
                 }
-#if defined(__vita__)
-                // Run claimed tasks above render/GL so the main thread never
-                // waits on a preempted helper; poll again at idle priority.
-                sceKernelChangeThreadPriority(0,110);
-#endif
+                // Claim first (inFlight_ covers the claim), then raise the
+                // priority: a syscall before the claim lets the main thread
+                // take the task itself. Run above render/GL so the main
+                // thread never waits on a preempted helper.
                 inFlight_.fetch_add(1);
                 const uint32_t generation=state_.load()>>16;
                 unsigned index;
                 if(Claim(generation,index)) {
+#if defined(__vita__)
+                    if(!hot)sceKernelChangeThreadPriority(0,110);
+#endif
                     const uint32_t saved=ReadFloatingPoint();
                     WriteFloatingPoint(floatingPoint_);
-                    do function_(context_,index); while(Claim(generation,index));
+                    do {
+                        const uint32_t taskStart=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+                        function_(context_,index);collisionPoolHelperTasks.fetch_add(1,std::memory_order_relaxed);
+                        if(collisionWitnessClockMicros)collisionPoolHelperMicros.fetch_add(collisionWitnessClockMicros()-taskStart,std::memory_order_relaxed);
+                    } while(Claim(generation,index));
                     WriteFloatingPoint(saved);
-                }
-                inFlight_.fetch_sub(1);
+                    inFlight_.fetch_sub(1);
+                    if(collisionPoolHotMicros && collisionWitnessClockMicros) {hot=true;hotSince=collisionWitnessClockMicros();polls=0;}
+                    else {
 #if defined(__vita__)
-                sceKernelChangeThreadPriority(0,185);
+                        sceKernelChangeThreadPriority(0,185);
 #endif
+                        hot=false;
+                    }
+                } else inFlight_.fetch_sub(1);
             } while(armed_.load(std::memory_order_relaxed));
+#if defined(__vita__)
+            if(hot)sceKernelChangeThreadPriority(0,185);
+#endif
         }
     }
     std::atomic<uint32_t> state_{0};
@@ -407,6 +478,104 @@ void commitQuery(CollisionWitness& current,uint32_t& state,const SpeculativeQuer
     ++collisionSpecAccepted;
 }
 
+// Pipelined form of separateSpeculative: the whole predicted chain (every
+// remaining iteration) is published at once; helpers claim queries in
+// order as they become free and the caller commits them in order, claiming
+// queries itself while the next one is unfinished. The same predictions and
+// commit rule as separateSpeculative, without a barrier per three queries.
+struct PipelinedQuery {
+    SpeculativeQuery query;
+    std::atomic<uint32_t> done;
+};
+struct PipelinedBatch {
+    const CollisionWitness* base;
+    PipelinedQuery* queries;
+};
+void runPipelinedQuery(void* context,unsigned index)
+{
+    const auto& batch=*static_cast<const PipelinedBatch*>(context);
+    PipelinedQuery& entry=batch.queries[index];
+    SpeculativeQuery& query=entry.query;
+    query.witness=*batch.base;
+    query.witness.first=query.inFirst;
+    query.witness.second=query.inSecond;
+    fillUnwritten(&query.witness.side,sizeof(query.witness.side));
+    fillUnwritten(query.witness.firstPoint,sizeof(query.witness.firstPoint));
+    fillUnwritten(query.witness.secondPoint,sizeof(query.witness.secondPoint));
+    fillUnwritten(&query.witness.distance,sizeof(query.witness.distance));
+    query.state=query.inState;
+    query.counters[0]=query.counters[1]=query.counters[2]=query.counters[3]=0;
+    query.result=collisionWitnessQueryDetached(&query.witness,query.firstFrame,query.firstPosition,
+        query.secondFrame,query.secondPosition,&query.state,query.counters);
+    entry.done.store(1,std::memory_order_release);
+}
+void separatePipelined(const SeparationInputs& inputs,CollisionWitness* witness,uint32_t* randomState,float output[4])
+{
+    const auto started=std::chrono::steady_clock::now();
+    ++collisionSpecSeparations;
+    auto& pool=CollisionHelperPool::Instance();
+    CollisionWitness current=*witness;
+    uint32_t state=*randomState;
+    static PipelinedQuery queries[20];
+    const uint32_t firstCount=(uint32_t)current.firstGeometry->vertexCount;
+    const uint32_t secondCount=(uint32_t)current.secondGeometry->vertexCount;
+    int iteration=0;
+    bool finished=false;
+    while (iteration<20 && !finished) {
+        const unsigned width=(unsigned)(20-iteration);
+        queries[0].query.inFirst=current.first;queries[0].query.inSecond=current.second;queries[0].query.inState=state;
+        for (unsigned k=1;k<width;++k) {
+            uint32_t draw=queries[k-1].query.inState;
+            queries[k].query.inFirst=&current.firstGeometry->vertices[vectorRandomBounded(firstCount,&draw)];
+            queries[k].query.inSecond=&current.secondGeometry->vertices[vectorRandomBounded(secondCount,&draw)];
+            queries[k].query.inState=draw;
+        }
+        for (unsigned k=0;k<width;++k) {
+            auto& query=queries[k].query;
+            query.firstPosition=inputs.adjustedFirst[iteration+k];
+            query.secondPosition=inputs.adjustedSecond[iteration+k];
+            query.firstFrame=inputs.firstFrame;
+            query.secondFrame=inputs.secondFrame;
+            queries[k].done.store(0,std::memory_order_relaxed);
+        }
+        const CollisionWitness base=current;
+        PipelinedBatch batch{&base,queries};
+        pool.Publish(width,runPipelinedQuery,&batch);
+        ++collisionSpecRounds;
+        unsigned committed=0;
+        for (unsigned k=0;k<width;++k) {
+            while (!queries[k].done.load(std::memory_order_acquire)) {
+                unsigned index;
+                if (pool.ClaimOne(index)) runPipelinedQuery(&batch,index);
+            }
+            const auto& query=queries[k].query;
+            if (k>0 && (current.first!=query.inFirst || current.second!=query.inSecond || state!=query.inState)) {
+                ++collisionSpecMispredicts;break;
+            }
+            if (collisionWitnessBench) {
+                CollisionWitness input=base;input.first=query.inFirst;input.second=query.inSecond;
+                collisionWitnessBenchRecord(&input,query.firstFrame,query.firstPosition,query.secondFrame,query.secondPosition,query.inState);
+            }
+            mergeWitness(current,query.witness);
+            state=query.state;
+            collisionWitnessQueries+=query.counters[0];collisionWitnessIterations+=query.counters[1];
+            collisionWitnessRestarts+=query.counters[2];collisionWitnessExhausted+=query.counters[3];
+            ++collisionSpecAccepted;++collisionSeparateQueries;++committed;
+            ++iteration;
+            if (query.result!=2) {
+                memcpy(output,inputs.displacement[iteration-1],4*sizeof(float));
+                finished=true;
+                break;
+            }
+        }
+        pool.Close();
+        for (unsigned k=committed;k<width;++k) if (queries[k].done.load(std::memory_order_acquire)) ++collisionSpecWasted;
+    }
+    *witness=current;
+    *randomState=state;
+    collisionWitnessMilliseconds+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+}
+
 // Each speculative query k>0 assumes query k-1 converged after at least one
 // step and restarted exactly once (two vertex draws), the common case. The
 // chain is committed in order; the first query whose actual input differs
@@ -528,14 +697,17 @@ void collisionContactSeparate(CollisionSystem* system, CollisionQueuedContact* c
         uint32_t state=*system->randomState;
         float displacement[4];memcpy(displacement,contact->displacement,sizeof(displacement));
         separateSerial(inputs,witness,system->randomState,contact->displacement);
-        separateSpeculative(inputs,&copy,&state,displacement);
+        if (collisionSeparatePipelined) separatePipelined(inputs,&copy,&state,displacement);
+        else separateSpeculative(inputs,&copy,&state,displacement);
         ++collisionSpecVerified;
         if (!sameWitness(copy,*witness) || state!=*system->randomState ||
             memcmp(displacement,contact->displacement,sizeof(displacement))!=0) ++collisionSpecMismatches;
         return;
     }
-    if (collisionSpeculationMode!=0 && CollisionHelperPool::Instance().Helpers()>0)
-        separateSpeculative(inputs,witness,system->randomState,contact->displacement);
+    if (collisionSpeculationMode!=0 && CollisionHelperPool::Instance().Helpers()>0) {
+        if (collisionSeparatePipelined) separatePipelined(inputs,witness,system->randomState,contact->displacement);
+        else separateSpeculative(inputs,witness,system->randomState,contact->displacement);
+    }
     else separateSerial(inputs,witness,system->randomState,contact->displacement);
 }
 
@@ -660,7 +832,8 @@ float collisionContactFindTime(CollisionSystem* system, CollisionQueuedContact* 
         if (result==2) {
             SeparationInputs inputs;
             buildSeparationInputs(system,contact,midpoint,inputs);
-            separateSpeculative(inputs,&copy,&state,displacement);
+            if (collisionSeparatePipelined) separatePipelined(inputs,&copy,&state,displacement);
+            else separateSpeculative(inputs,&copy,&state,displacement);
         }
         const float expected=findTimeSerial(system,contact);
         ++collisionSpecVerified;

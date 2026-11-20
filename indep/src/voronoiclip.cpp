@@ -9,6 +9,8 @@
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
+#include <cstdio>
+#include <cstring>
 
 CollisionWitness* collisionWitnessInitialize(CollisionWitness* witness, CollisionGeometry* first, CollisionGeometry* second)
 {
@@ -957,4 +959,66 @@ float collisionGeometryMaximumViolation(const CollisionGeometry* geometry)
             if(maximum<distance) maximum=distance;
         }
     return maximum;
+}
+
+// On-device witness micro-benchmark (diagnostic, main thread): records the
+// first 256 committed separation queries, then replays them on copies.
+int collisionWitnessBench=0;
+void (*collisionWitnessBenchLog)(const char*)=nullptr;
+namespace {
+struct WitnessBenchCase {CollisionWitness witness;float firstFrame[16],firstPosition[4],secondFrame[16],secondPosition[4];uint32_t state;};
+WitnessBenchCase witnessBenchCases[256];
+unsigned witnessBenchCount=0;
+void runWitnessBench()
+{
+    if(!collisionWitnessClockMicros || !collisionWitnessBenchLog)return;
+    char text[512];
+    uint32_t passMicros[10]={};
+    uint64_t counters[4]={};
+    for(int pass=0;pass<10;++pass) {
+        const uint32_t start=collisionWitnessClockMicros();
+        for(unsigned index=0;index<witnessBenchCount;++index) {
+            const auto& entry=witnessBenchCases[index];
+            CollisionWitness witness=entry.witness;uint32_t state=entry.state;
+            collisionWitnessQueryBody(&witness,entry.firstFrame,entry.firstPosition,entry.secondFrame,entry.secondPosition,&state,counters);
+        }
+        passMicros[pass]=collisionWitnessClockMicros()-start;
+    }
+    uint32_t warm=0;for(int pass=1;pass<10;++pass)warm+=passMicros[pass];
+    std::snprintf(text,sizeof(text),"witness_bench cases=%u first_pass_us_per_query=%.2f warm_us_per_query=%.2f iterations_per_query=%.2f",
+        witnessBenchCount,double(passMicros[0])/witnessBenchCount,double(warm)/9.0/witnessBenchCount,double(counters[1])/(10.0*witnessBenchCount));
+    collisionWitnessBenchLog(text);
+    // Per kind (warm, probe clock overhead included and reported).
+    const uint32_t clockStart=collisionWitnessClockMicros();
+    for(int i=0;i<1000;++i)(void)collisionWitnessClockMicros();
+    const double clockUs=double(collisionWitnessClockMicros()-clockStart)/1000.0;
+    uint64_t kindMicros[9],kindSteps[9];
+    std::memcpy(kindMicros,collisionWitnessKindMicros,sizeof(kindMicros));std::memcpy(kindSteps,collisionWitnessKindSteps,sizeof(kindSteps));
+    const uint64_t q=collisionWitnessQueries,it=collisionWitnessIterations,r=collisionWitnessRestarts,e=collisionWitnessExhausted;
+    auto* savedProbe=collisionWitnessProbeClock;collisionWitnessProbeClock=collisionWitnessClockMicros;
+    std::memset(collisionWitnessKindMicros,0,sizeof(kindMicros));std::memset(collisionWitnessKindSteps,0,sizeof(kindSteps));
+    for(int pass=0;pass<5;++pass)for(unsigned index=0;index<witnessBenchCount;++index) {
+        const auto& entry=witnessBenchCases[index];
+        CollisionWitness witness=entry.witness;uint32_t state=entry.state;
+        collisionWitnessQueryBody(&witness,entry.firstFrame,entry.firstPosition,entry.secondFrame,entry.secondPosition,&state);
+    }
+    int used=std::snprintf(text,sizeof(text),"witness_bench_kinds clock_us=%.3f ",clockUs);
+    for(int pair=0;pair<9;++pair)if(collisionWitnessKindSteps[pair])
+        used+=std::snprintf(text+used,sizeof(text)-used,"k%d%d steps/q=%.2f us=%.3f ",pair/3,pair%3,
+            double(collisionWitnessKindSteps[pair])/(5.0*witnessBenchCount),double(collisionWitnessKindMicros[pair])/collisionWitnessKindSteps[pair]);
+    collisionWitnessBenchLog(text);
+    collisionWitnessProbeClock=savedProbe;
+    std::memcpy(collisionWitnessKindMicros,kindMicros,sizeof(kindMicros));std::memcpy(collisionWitnessKindSteps,kindSteps,sizeof(kindSteps));
+    collisionWitnessQueries=q;collisionWitnessIterations=it;collisionWitnessRestarts=r;collisionWitnessExhausted=e;
+}
+}
+void collisionWitnessBenchRecord(const CollisionWitness* witness,const float firstFrame[16],const float firstPosition[4],
+    const float secondFrame[16],const float secondPosition[4],uint32_t state)
+{
+    if(!collisionWitnessBench || witnessBenchCount>=256)return;
+    auto& entry=witnessBenchCases[witnessBenchCount];
+    entry.witness=*witness;entry.state=state;
+    std::memcpy(entry.firstFrame,firstFrame,sizeof(entry.firstFrame));std::memcpy(entry.secondFrame,secondFrame,sizeof(entry.secondFrame));
+    std::memcpy(entry.firstPosition,firstPosition,sizeof(entry.firstPosition));std::memcpy(entry.secondPosition,secondPosition,sizeof(entry.secondPosition));
+    if(++witnessBenchCount==256) {runWitnessBench();collisionWitnessBench=0;}
 }

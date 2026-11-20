@@ -750,9 +750,33 @@ int main(int, char**)
             hp2::ecstasyDiagEmitTwice = true;
             log.Line("vita.diag", "scenery emit twice (diagnostic)");
         }
+        if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/pool_hot.txt").c_str(), "r")) {
+            extern uint32_t collisionPoolHotMicros;
+            unsigned value = 0;
+            if (std::fscanf(file, "%u", &value) == 1) collisionPoolHotMicros = value;
+            std::fclose(file);
+            char text[64]; std::snprintf(text, sizeof(text), "collision pool hot polling %u us", value);
+            log.Line("vita.diag", text);
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/witness_bench.txt").c_str(), &probe) >= 0) {
+            extern int collisionWitnessBench; extern void (*collisionWitnessBenchLog)(const char*);
+            static auto* benchLog = &log;
+            collisionWitnessBench = 1;
+            collisionWitnessBenchLog = [](const char* text) { benchLog->Line("vita.witness_bench", text); };
+            log.Line("vita.diag", "witness bench armed");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/sep_pipe_off.txt").c_str(), &probe) >= 0) {
+            extern int collisionSeparatePipelined;
+            collisionSeparatePipelined = 0;
+            log.Line("vita.diag", "pipelined separation off");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/queue_pred_off.txt").c_str(), &probe) >= 0) {
             collisionQueuePrediction = 0;
             log.Line("vita.diag", "collision queue prediction off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/witness_kinds.txt").c_str(), &probe) >= 0) {
+            collisionWitnessProbeClock = [] { return static_cast<uint32_t>(sceKernelGetProcessTimeLow()); };
+            log.Line("vita.diag", "witness kind probe on");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/witness_probe.txt").c_str(), &probe) >= 0) {
             collisionWitnessWarmProbe = 1;
