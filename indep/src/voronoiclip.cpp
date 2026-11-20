@@ -1076,9 +1076,20 @@ static int32_t collisionWitnessQueryWalk(CollisionWitness* witness, const float 
 {
     const bool detached=counters!=nullptr;
     if(!detached) ++collisionWitnessQueries; else ++counters[0];
-    float firstToSecond[16], secondToFirst[16];
-    collisionRelativeTransform(firstToSecond, secondFrame, secondPosition, firstFrame, firstPosition);
-    collisionRelativeTransform(secondToFirst, firstFrame, firstPosition, secondFrame, secondPosition);
+    // Both relative transforms are pure functions of the two frames and
+    // positions; consecutive walks (restarts, memo misses from other start
+    // features) often share them, so keep the last pair per thread.
+    struct TransformCache {bool valid;float pose[40];float firstToSecond[16],secondToFirst[16];};
+    static thread_local TransformCache transformCache{};
+    float pose[40];
+    memcpy(pose,firstFrame,64);memcpy(pose+16,firstPosition,16);memcpy(pose+20,secondFrame,64);memcpy(pose+36,secondPosition,16);
+    if (!transformCache.valid || memcmp(transformCache.pose,pose,sizeof(pose))!=0) {
+        collisionRelativeTransform(transformCache.firstToSecond, secondFrame, secondPosition, firstFrame, firstPosition);
+        collisionRelativeTransform(transformCache.secondToFirst, firstFrame, firstPosition, secondFrame, secondPosition);
+        memcpy(transformCache.pose,pose,sizeof(pose));transformCache.valid=true;
+    }
+    const float* firstToSecond=transformCache.firstToSecond;
+    const float* secondToFirst=transformCache.secondToFirst;
     CollisionTransformedVertex firstVertex{}, secondVertex{};
     CollisionTransformedEdge firstEdge{}, secondEdge{};
     CollisionFeature* firstHistory[80];

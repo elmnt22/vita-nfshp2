@@ -2102,6 +2102,35 @@ std::array<float,2> ecstasyNativeDepthRange(const float projection[16],std::int3
     return result;
 }
 
+std::vector<EcstasyParticleQuad>& EcstasyFrame::ParticleGroupStorage()
+{
+    Require(phase_==Phase::Building,"Cannot append to a sealed graphics frame");
+    if(liveParticleGroups_==particleGroups_.size())
+        particleGroups_.push_back(std::make_unique<std::vector<EcstasyParticleQuad>>());
+    auto& owned=*particleGroups_[liveParticleGroups_];
+    owned.clear();
+    return owned;
+}
+
+void EcstasyFrame::CommitParticleGroup(const EditorMarkerTexture& descriptor,const CarCinematicScreen& view,float averageDepth)
+{
+    Require(liveParticleGroups_<particleGroups_.size(),"Particle group commit without storage");
+    auto& owned=*particleGroups_[liveParticleGroups_];
+    if(owned.empty())return;
+    Require(phase_==Phase::Building && view.target && view.target->enabled &&
+        view.target->width>0 && view.target->height>0 && view.matricesCalculated,
+        "Particle group lacks its active view/target");
+    const auto* texture=textureInfoForDescriptor(&descriptor);
+    Require(texture && texture->pixels.Data(),"Particle group has no loaded texture owner");
+    Require(std::isfinite(averageDepth),"Particle group depth is not finite");
+    EcstasyDrawCommand command;command.kind=EcstasyDrawKind::ParticleGroup;
+    command.particleGroup=&owned;command.texture=texture;command.view=&view;command.target=view.target;
+    command.zWriteEnabled=zWriteEnabled_;command.depthSorted=texture->requiresDepthSort;
+    command.sortDepth=averageDepth;command.alphaGroup=++nextAlphaGroup_;
+    try {commands_.push_back(command);}catch(...) {owned.clear();throw;}
+    ++liveParticleGroups_;
+}
+
 void EcstasyFrame::AttachParticleGroup(const std::vector<EcstasyParticleQuad>& quads,
     const EditorMarkerTexture& descriptor,const CarCinematicScreen& view,float averageDepth)
 {

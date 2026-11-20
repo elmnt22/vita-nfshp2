@@ -1212,7 +1212,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         GlBlendState activeBlend;bool blendKnown=false;
         int activeDepth=-1,activeDepthWrite=-1;
         activeTexture=~0u;
-        const auto drawOne=[&](std::uint32_t batchIndex) {
+        const auto drawOneBody=[&](std::uint32_t batchIndex) {
             const auto& batch=batches[batchIndex];
             const bool sampled=batch.sampledTarget>0;
             if(!batch.scissor.extent.width || !batch.scissor.extent.height) {++skipped;return;}
@@ -1379,6 +1379,31 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                         static_cast<GLsizei>(std::min(chunk,batch.count-done)));
             }
             ++drawn;previous=&batch;
+        };
+        // Slow-draw probe (cheap clock only): a single draw over 15 ms is
+        // first-use work inside vitaGL; log its state (first 40 per run).
+        const auto drawOne=[&](std::uint32_t batchIndex) {
+            if(!collisionWitnessClockMicros) {drawOneBody(batchIndex);return;}
+            const std::uint32_t started=collisionWitnessClockMicros();
+            drawOneBody(batchIndex);
+            const std::uint32_t elapsed=collisionWitnessClockMicros()-started;
+            static int logged=0;
+            if(elapsed<15000u || logged>=40)return;
+            ++logged;
+            const auto& batch=batches[batchIndex];
+            const auto blend=glBlendFor(batch);
+            std::uint32_t tw=0,th=0;int fmt=-1;
+            if(batch.sampledTarget<=0 && !batch.untextured && batch.texture<packet.textures.size()) {
+                tw=packet.textures[batch.texture].width;th=packet.textures[batch.texture].height;fmt=(int)batch.texture;
+            }
+            char detail[320];
+            std::snprintf(detail,sizeof(detail),"ms=%.2f half=%d offscreen=%d sampled=%d texture=%d tex=%ux%u untextured=%d tfunc=%d alpha_test=%d "
+                "blend=%d src=%04x dst=%04x eq=%04x fixed=%d depth=%d depth_write=%d gpu_pos=%d shade=%d affine=%d indexed=%d resident=%d count=%u",
+                elapsed*0.001,halfMode ? 1:0,offscreen ? 1:0,(int)batch.sampledTarget,fmt,tw,th,batch.untextured ? 1:0,(int)batch.textureFunction,
+                (int)batch.alphaTest,blend.enable ? 1:0,(unsigned)blend.source,(unsigned)blend.destination,(unsigned)blend.equation,blend.fixedAlpha ? 1:0,
+                batch.depth ? 1:0,batch.depthWrite ? 1:0,batch.nativeGpuPosition ? 1:0,batch.nativeShadingIndex!=0 ? 1:0,batch.affineUV ? 1:0,
+                batch.indexed ? 1:0,batch.residentGeometry ? 1:0,(unsigned)batch.count);
+            platform::RecordSessionEvent("renderer.vitagl.slow_draw",detail);
         };
         const auto resetState=[&] {
             activeProgram=nullptr;previous=nullptr;blendKnown=false;activeDepth=activeDepthWrite=-1;
