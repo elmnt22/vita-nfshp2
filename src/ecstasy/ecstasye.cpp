@@ -1436,6 +1436,14 @@ void classifyStrips(std::vector<EcstasyVisibleStrip>& output,const EditorMarkerM
     // index order; only the independent bound/cone calculations run apart.
     if(strips.size()<512 || hp2::NativeSceneEffectiveHardwareConcurrency()<2 || hp2::ecstasySceneJobsSerial) {
         for(std::size_t index=0;index<strips.size();++index) {
+#if defined(__GNUC__)
+            // Strip headers are ~200 bytes apart: request the bounds/cone
+            // fields a few strips ahead (Vita RAM is latency bound).
+            if(index+3<strips.size()) {
+                const auto* ahead=reinterpret_cast<const char*>(&strips[index+3]);
+                __builtin_prefetch(ahead);__builtin_prefetch(ahead+32);
+            }
+#endif
             const auto classification=classify(index);
             if(classification)output.push_back({index,1,classification});
         }
@@ -4160,16 +4168,27 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     constexpr bool kModelRunsDropReflection=false;
 #endif
     bool mergeRuns=false;
+    const EditorMarkerTexture* lastDescriptor=nullptr;const TextureInfo* lastTexture=nullptr;
     const auto capture=[&](std::size_t ordinal,std::size_t index,std::int32_t clipClass,
         std::vector<EcstasyDrawCommand>& output,
         std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>>& posedStrips,
         std::uint64_t& alphaGroups) {
         Require(index<geometry.strips.size(),"Visible strip run leaves its actual model");
         const auto& strip=geometry.strips[index];
+#if defined(__GNUC__)
+        if(!parallel && index+2<geometry.strips.size()) {
+            const auto* ahead=reinterpret_cast<const char*>(&geometry.strips[index+2]);
+            for(std::size_t line=0;line<128;line+=32)__builtin_prefetch(ahead+line);
+        }
+#endif
         if (strip.flags&0x400u)return;
         const auto& descriptor=stripTexture(geometry,strip);
-        const auto* texture=parallel ? textures[static_cast<std::size_t>(strip.textureIndex)]:
-            textureInfoForDescriptor(&descriptor);
+        // The registry lookup is a hash probe; consecutive strips usually
+        // share their binding (the replacement table is fixed for the call).
+        const TextureInfo* texture;
+        if(parallel)texture=textures[static_cast<std::size_t>(strip.textureIndex)];
+        else if(&descriptor==lastDescriptor)texture=lastTexture;
+        else {texture=textureInfoForDescriptor(&descriptor);lastDescriptor=&descriptor;lastTexture=texture;}
         Require(texture,"Model texture is absent from the canonical TexturePack");
         // Final RenderStrips10DF1C..10DF50: target's alpha-only/opaque-only
         // passes are encoded by caller flags8/16; no second strip list.
