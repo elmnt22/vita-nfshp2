@@ -7333,11 +7333,15 @@ struct VkResidentGeometrySource {
     std::size_t queuedValidation{};
     std::size_t count{},normalCount{},uniqueCount{},triangleCount{},topologyCount{};
     std::uint64_t disableMask{},topologyMask{};
-    std::array<std::array<float,3>,48> positions{},normals{};
-    std::array<std::array<float,2>,48> coordinates{};
-    std::array<std::uint16_t,48> colors{};
-    std::array<std::uint8_t,48> unique{};
-    std::array<std::uint8_t,138> triangles{};
+    // Byte shadows: only the first count/normalCount/uniqueCount/
+    // triangleCount elements are ever written (Capture) or read (Matches),
+    // so they are left uninitialized (default-initialized allocation): a
+    // first-sight zero fill costs ~2 KB of write-allocate misses on Vita.
+    std::array<std::array<float,3>,48> positions,normals;
+    std::array<std::array<float,2>,48> coordinates;
+    std::array<std::uint16_t,48> colors;
+    std::array<std::uint8_t,48> unique;
+    std::array<std::uint8_t,138> triangles;
     std::array<std::uint32_t,4> variants{};
     std::size_t variantCount{};
     VkSolidTopology topology;
@@ -7387,8 +7391,15 @@ struct VkResidentGeometryEntry {
     std::uint16_t indexCount{};
     std::uint8_t count{};
     bool prepared{},uploaded{};
-    std::array<VkVertex,48> shadow{};
-    std::array<std::uint32_t,138> indices{};
+    // Raw vertex storage: vertex preparation writes the first count
+    // vertices and only those are copied out, so the remaining slot bytes
+    // are never read (no first-sight zero fill of 3.3 KB on Vita).
+    struct VertexStorage {
+        alignas(VkVertex) unsigned char bytes[sizeof(VkVertex)*48];
+        VkVertex* data() noexcept {return reinterpret_cast<VkVertex*>(bytes);}
+        const VkVertex* data() const noexcept {return reinterpret_cast<const VkVertex*>(bytes);}
+    } shadow;
+    std::array<std::uint32_t,138> indices; // first indexCount written before use
 };
 
 class VkResidentGeometryCache {
@@ -7481,7 +7492,7 @@ public:
             if(free_.empty() && (!recency_.empty() && entries_[recency_.front()]->lastGather==gather_)) {
                 return nullptr;
             }
-            resolved=sources_.emplace(token,std::make_unique<VkResidentGeometrySource>()).first->second.get();
+            resolved=sources_.emplace(token,std::unique_ptr<VkResidentGeometrySource>(new VkResidentGeometrySource)).first->second.get();
             resolved->token=token;FrameSource(token)=resolved;
         }
         auto& source=*resolved;
@@ -7548,7 +7559,7 @@ public:
             Evict(recency_.front());++nativeGatherResidentEvents[1];
         }
         const auto slot=free_.back();free_.pop_back();
-        auto owned=std::make_unique<VkResidentGeometryEntry>();auto& entry=*owned;
+        auto owned=std::unique_ptr<VkResidentGeometryEntry>(new VkResidentGeometryEntry);auto& entry=*owned;
         entry.source=token;entry.sourceGeneration=source.generation;entry.key=key;
         entry.slot=slot;entry.count=job.count;
         Require(nextIndexToken_!=std::numeric_limits<std::uint64_t>::max(),"Native geometry index token exhausted");
