@@ -1610,7 +1610,9 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
         const auto& plan=plans[owners[index]];
         const auto& definition=*plan.definition;
         const auto* particle=particles[index];
+#if defined(__GNUC__)
         if(index+4<particles.size())__builtin_prefetch(particles[index+4]);
+#endif
         auto& slot=slots[index];
         const float age=1.0f-(static_cast<float>(particle->remainingTicks)*0.0009765625f)*plan.inverseLifetime;
         const float point[4]={particle->position[0],particle->position[1],particle->position[2],1.0f};

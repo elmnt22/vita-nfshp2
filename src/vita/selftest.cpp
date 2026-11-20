@@ -12,6 +12,7 @@ extern "C" std::int32_t ecstasyClassifyBounds(const float minimum[3], const floa
 extern "C" void vectorMatrixTransform(float output[4], const float matrix[16], const float input[4]);
 void vectorMatrixTransformScalar(float output[4], const float matrix[16], const float input[4]);
 extern "C" void vectorMatrixMultiply(float output[16], const float left[16], const float right[16]);
+extern "C" void vectorMatrixTransformPoint(float output[4], const float matrix[16], const float input[4]);
 extern "C" void eMulVector3(float output[4], const float matrix[16], const float input[3]);
 extern "C" float eUnitVector4[4];
 #include "bware/inc/bMathNeon.hpp"
@@ -141,6 +142,17 @@ void Run(void (*log)(const char* event, const char* detail))
             eMulVector3(viaNeon, matrix, input);
             vectorMatrixTransformScalar(reference, matrix, point);
             if (std::memcmp(viaNeon, reference, sizeof(viaNeon)) != 0) ++transformMismatches;
+        }
+        // vectorMatrixTransformPoint: {x,y,z,1}, also aliased.
+        {
+            const float point[4] = {input[0], input[1], input[2], 1.0f};
+            float viaNeon[4], reference[4], aliasedPoint[4];
+            vectorMatrixTransformPoint(viaNeon, matrix, input);
+            vectorMatrixTransformScalar(reference, matrix, point);
+            if (std::memcmp(viaNeon, reference, sizeof(viaNeon)) != 0) ++transformMismatches;
+            std::memcpy(aliasedPoint, input, sizeof(aliasedPoint));
+            vectorMatrixTransformPoint(aliasedPoint, matrix, aliasedPoint);
+            if (std::memcmp(aliasedPoint, reference, sizeof(aliasedPoint)) != 0) ++transformMismatches;
         }
         // vectorMatrixMultiply: four column transforms, also aliased.
         if ((test & 7) == 0) {

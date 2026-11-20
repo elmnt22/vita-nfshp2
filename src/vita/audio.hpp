@@ -17,6 +17,9 @@ struct AudioStatistics {
     double pumpPeakMilliseconds{},pumpPeakMusicMs{},pumpPeakInstallMs{},pumpPeakCommandsMs{};
     std::uint32_t pumpPeakRequests{};
     double pumpPeakLockWaitMs{},pumpPeakApplyMs{};
+    // Per request kind: apply ms and count; PreDecode and request totals.
+    double kindMilliseconds[40]{};std::uint32_t kindCounts[40]{};
+    double preDecodeMilliseconds{},applyMilliseconds{},lockWaitMilliseconds{};std::uint64_t requests{};
 };
 class AudioDevice final {
 public:
