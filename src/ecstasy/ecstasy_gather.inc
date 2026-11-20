@@ -392,6 +392,96 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         nativeGatherStepMilliseconds[index]+=std::chrono::duration<double,std::milli>(now-stepMark).count();
         stepMark=now;
     };
+    // Solid strip templates (see ecstasySolidTemplate): small direct-mapped
+    // table keyed by instance, so base/specular strips and several models
+    // interleaved in one view each keep their own template.
+    struct SolidTemplate {
+        const EcstasyDrawCommand* draw{};VkDrawBatch batch;
+        std::array<float,2> scroll{};float lod1{};
+    };
+    std::array<SolidTemplate,64> solidTemplates{};
+    const auto solidTemplateSlot=[&](const EcstasyDrawCommand& draw)->SolidTemplate& {
+        const auto identity=reinterpret_cast<std::uintptr_t>(draw.instance)^
+            (reinterpret_cast<std::uintptr_t>(draw.texture)>>2)^static_cast<std::uintptr_t>(draw.kind);
+        return solidTemplates[((identity>>4)^(identity>>11))&(solidTemplates.size()-1)];
+    };
+#if !defined(__vita__) && !defined(__SWITCH__)
+    static const bool verifySolidTemplate=[] {const char* value=std::getenv("HP2_VERIFY_SOLID_TEMPLATE");return value && *value=='1';}();
+#else
+    constexpr bool verifySolidTemplate=false;
+#endif
+    std::array<float,2> solidScroll{};
+    const auto solidTemplateEligible=[&](const EcstasyDrawCommand& draw) {
+        return (draw.kind==EcstasyDrawKind::SolidStrip || draw.kind==EcstasyDrawKind::SolidSpecularStrip) &&
+            !draw.cachedOpaqueScenery && !draw.sceneryRunCount && draw.strip && !draw.sampledTarget;
+    };
+    // Per-strip remainder of the solid path for a template hit: geometry
+    // acquisition, index range, vertex preparation and append. Mirrors the
+    // general solid branch below for everything that depends on the strip.
+    const auto continueSolidTemplate=[&](const EcstasyDrawCommand& draw,const SolidTemplate& source) {
+        const auto& strip=*draw.strip;
+        const auto count=strip.positions.size();
+        Require(strip.textureCoordinates.size()==count && strip.colors.size()==count,
+            "Original strip vertex/color/UV extents differ");
+        Require(count<=48,"Vulkan strip exceeds the original packet vertex extent");
+        if(draw.drawFlags&0xc0u)Require(strip.normals.size()==count,
+            "Lit strip lacks its source context, material or signed normal payload");
+        VkDrawBatch batch=source.batch;
+        batch.residentGeometry=false;batch.nativeSpanFirst=0;batch.nativeSpanCount=0;
+        batch.first=static_cast<std::uint32_t>(elementIndices.size());batch.count=0;
+        textureLod[0]=draw.textureQScale;
+        textureLod[1]=draw.kind==EcstasyDrawKind::SolidStrip ? static_cast<std::uint8_t>(strip.autoK)*0.0625f:source.lod1;
+        glyphBoundsIndex=0;
+        VkSolidStripJob job;job.draw=&draw;
+        job.scroll=source.scroll;job.lod=textureLod;
+        job.glyphBoundsIndex=0;job.reflection=false;job.targetSample=false;
+        job.lineTopology=batch.wireframe;
+        bool prepare=false;auto* resident=residentGeometry.Acquire(job,prepare);
+        nativeSolidKinds[draw.kind==EcstasyDrawKind::SolidSpecularStrip ? 2:draw.carShadow!=EcstasyCarShadow::None ? 3:0]+=1;
+        if(!resident)nativeSolidKinds[4]+=1; else if(prepare)nativeSolidKinds[5]+=1;
+        VkSolidTopology topology;
+        if(!resident) {
+            topology=DecodeNativeSolidTopology(strip,job.lineTopology);
+            job.count=topology.count;job.sourceOrder=topology.sourceOrder;
+        }
+        std::uint32_t firstVertex;
+        if(resident) {
+            firstVertex=resident->slot*static_cast<std::uint32_t>(VkResidentGeometryCache::VerticesPerSlot);
+            batch.residentGeometry=true;job.destination=0;job.residentOutput=resident->shadow.data();
+            residentFrameVertices+=job.count;
+            Require(residentFrameIndices+resident->indexCount<=std::numeric_limits<std::uint32_t>::max(),
+                "Native resident frame index count exceeds32-bit draw range");
+            Require(gatheredResidentIndexSpans.size()<std::numeric_limits<std::uint32_t>::max(),
+                "Native resident index span count exceeds32-bit range");
+            batch.first=static_cast<std::uint32_t>(residentFrameIndices);batch.count=resident->indexCount;
+            batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());batch.nativeSpanCount=1;
+            gatheredResidentIndexSpans.push_back(resident);gatheredResidentSpanTokens.push_back(resident->indexToken);residentFrameIndices+=resident->indexCount;
+        } else {
+            Require(output.size()+job.count<std::numeric_limits<std::uint32_t>::max(),
+                "Vulkan frame vertex count exceeds32-bit index range");
+            firstVertex=static_cast<std::uint32_t>(output.size());job.destination=firstVertex;
+            output.resize(output.size()+job.count);prepare=true;
+            for(std::size_t index=0;index<topology.indexCount;++index)
+                elementIndices.push_back(firstVertex+topology.indices[index]);
+        }
+        job.workUnits=prepare ? NativePendingVertexWork(job):0;
+        if(job.workUnits) {
+            if(directSourcePreparation)
+                PrepareNativeSolidStripVertices(job,job.residentOutput ? job.residentOutput:output.data());
+            else {nativePendingWork+=job.workUnits;nativeStripJobs.push_back(job);}
+        }
+        Require(elementIndices.size()<=std::numeric_limits<std::uint32_t>::max(),"Vulkan frame index count exceeds32-bit draw range");
+        if(!batch.residentGeometry)batch.count=static_cast<std::uint32_t>(elementIndices.size())-batch.first;
+        if(batch.count) {
+            if(draw.carShadow!=EcstasyCarShadow::None) {
+                const auto shadow=static_cast<std::size_t>(draw.carShadow)-1;
+                ++profile.shadowStrips[shadow];
+                profile.shadowTriangles[shadow]+=batch.count/3u;
+            }
+            appendBatch(batch);
+        }
+        ++statistics.solidTemplateHits;
+    };
     const auto& sourceCommands=frame.Commands();
     const auto& runStrips=frame.SceneryRunStrips();
     std::uint32_t runResume=0; // next unexpanded strip of sourceCommands[commandAt]
@@ -443,6 +533,14 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         if(draw.cachedOpaqueScenery) {
             if(prepareSceneryPacket(draw,draw.strip))continue;
             ++statistics.sceneryPacketFallbacks;
+        }
+        const SolidTemplate* solidMatch=nullptr;
+        if(ecstasySolidTemplate && solidTemplateEligible(draw)) {
+            const auto& slot=solidTemplateSlot(draw);
+            if(slot.draw && NativeSolidCommandStateEqual(*slot.draw,draw)) {
+                if(!verifySolidTemplate) {continueSolidTemplate(draw,slot);continue;}
+                solidMatch=&slot;
+            }
         }
         const auto shadowStarted=sampleShadowGather && draw.carShadow!=EcstasyCarShadow::None ?
             Clock::now():Clock::time_point{};
@@ -809,7 +907,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             }
             // A resident hit already owns validated first-use topology.
             // The public source snapshot is still checked once per Gather.
-            VkSolidStripJob job;job.draw=&draw;
+            VkSolidStripJob job;job.draw=&draw;solidScroll={{scroll[0],scroll[1]}};
             job.scroll={{scroll[0],scroll[1]}};job.lod=textureLod;
             job.glyphBoundsIndex=glyphBoundsIndex;job.reflection=reflection;job.targetSample=targetSample;
             job.lineTopology=batch.wireframe;
@@ -936,6 +1034,36 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             // are untouched; no sorting or transparency approximation occurs.
             appendBatch(batch);
             step(4);
+        }
+        if(ecstasySolidTemplate && solidTemplateEligible(draw) && batch.nativeGpuPosition &&
+            batch.scissor.extent.width && batch.scissor.extent.height) {
+#if !defined(__vita__) && !defined(__SWITCH__)
+            if(solidMatch) {
+                // Verify: the full path's state must equal the template's.
+                const auto& expected=solidMatch->batch;
+                const float lod1=draw.kind==EcstasyDrawKind::SolidStrip ?
+                    static_cast<std::uint8_t>(draw.strip->autoK)*0.0625f:solidMatch->lod1;
+                const bool same=batch.SameDrawState(expected) && batch.cachedOpaqueScenery==expected.cachedOpaqueScenery &&
+                    batch.nativeGpuPosition==expected.nativeGpuPosition &&
+                    batch.nativeLocalToClip==expected.nativeLocalToClip && batch.nativeClipMapping==expected.nativeClipMapping &&
+                    batch.nativeTextureQScale==expected.nativeTextureQScale && batch.nativeShadingIndex==expected.nativeShadingIndex &&
+                    batch.nativeTransformIndex==expected.nativeTransformIndex && batch.affineUV==expected.affineUV &&
+                    batch.wireframe==expected.wireframe && batch.particle==expected.particle &&
+                    solidScroll==solidMatch->scroll && textureLod[1]==lod1;
+                static std::uint64_t checks=0,mismatches=0;
+                ++checks;if(!same)++mismatches;
+                if((checks&4095u)==0 || (!same && mismatches<8)) {
+                    char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
+                        (unsigned long long)checks,(unsigned long long)mismatches);
+                    platform::RecordSessionEvent("render.solid_template_verify",text);
+                }
+            }
+#endif
+#if defined(__vita__) || defined(__SWITCH__)
+            (void)solidMatch;
+#endif
+            auto& slot=solidTemplateSlot(draw);
+            slot.draw=&draw;slot.batch=batch;slot.scroll=solidScroll;slot.lod1=textureLod[1];
         }
         if(shadowStarted!=Clock::time_point{}) {
             const auto shadow=static_cast<std::size_t>(draw.carShadow)-1;
