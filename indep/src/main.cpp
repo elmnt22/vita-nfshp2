@@ -59,7 +59,7 @@
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
-namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
+namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
 extern uint64_t collisionWitnessWarmMismatches;
@@ -1505,6 +1505,10 @@ bool ApplicationRuntime::Tick()
                     std::snprintf(detail,sizeof(detail),"cars=%llu setup_us=%.1f flares_us=%.1f driver_us=%.1f shadows_us=%.1f body_us=%.1f wheels_us=%.1f wipers_us=%.1f",
                         static_cast<unsigned long long>(e[7]),e[0]/n,e[1]/n,e[2]/n,e[3]/n,e[4]/n,e[5]/n,e[6]/n);
                     s.host.RecordSessionEvent("render.car_split",detail);
+                    auto& t=hp2::carSetupSplitMicros;
+                    std::snprintf(detail,sizeof(detail),"pre=%.1f textures=%.1f culler=%.1f lodbias=%.1f lighting=%.1f changed=%llu unchanged=%llu",
+                        t[5]/n,t[0]/n,t[1]/n,t[2]/n,t[3]/n,(unsigned long long)t[4],(unsigned long long)t[6]);
+                    s.host.RecordSessionEvent("render.car_setup_split",detail);t={};
                     e={};
                 }
                 if(auto& e=hp2::ecstasyModelSplitMicros;e[3]) {
