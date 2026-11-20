@@ -78,6 +78,7 @@ int collisionSeparatePipelined=1; // pipelined separation (Vita sep_pipe_off.txt
 uint64_t collisionSpeculationVerifyBudget=0;
 #if !defined(__vita__)
 #include <stdlib.h>
+void collisionWitnessMemoBypass(bool bypass); // voronoiclip.cpp
 // PC: HP2_COLLISION_SPEC="<mode> [verify budget]".
 static const int collisionSpeculationEnvironment=[] {
     if (const char* value=getenv("HP2_COLLISION_SPEC")) {
@@ -1038,6 +1039,7 @@ void pipelineClose()
 // serial separation.
 float findTimeReference(CollisionSystem* system,CollisionQueuedContact* contact)
 {
+    struct MemoBypass {MemoBypass(){collisionWitnessMemoBypass(true);}~MemoBypass(){collisionWitnessMemoBypass(false);}} memoBypass;
     CollisionShape* first=contact->view.first;
     CollisionShape* second=contact->view.second;
     const float firstTime=first->active ? first->previousTime : 1000.0f;

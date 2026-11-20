@@ -587,9 +587,12 @@ int main(int, char**)
         }
         SceIoStat probe{};
         collisionWitnessClockMicros = []{ return (uint32_t)sceKernelGetProcessTimeLow(); };
-        // Exact speculative collision separation on cores 1/2: verify the
-        // first separations against the serial path, then run speculatively.
-        collisionSpeculationMode = 3; collisionSpeculationVerifyBudget = 2000;
+        // Exact speculative collision separation on cores 1/2 (exact commit
+        // check per query). Serial verification of the first separations is
+        // off by default: it ran at the first race start and is a test, not
+        // a safeguard (PC HP2_COLLISION_SPEC=2 verifies). collision_spec.txt
+        // "3 2000" restores it.
+        collisionSpeculationMode = 3; collisionSpeculationVerifyBudget = 0;
         if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/collision_spec.txt").c_str(), "r")) {
             int mode = 0; unsigned long long budget = 0;
             if (std::fscanf(file, "%d %llu", &mode, &budget) >= 1) { collisionSpeculationMode = mode; collisionSpeculationVerifyBudget = budget; }
@@ -792,10 +795,10 @@ int main(int, char**)
             applicationShowFrameRate = true;
             log.Line("vita.diag", "fps counter on");
         }
-        if (sceIoGetstat((std::string(kDataDirectory) + "/walk_memo_big.txt").c_str(), &probe) >= 0) {
+        if (sceIoGetstat((std::string(kDataDirectory) + "/walk_memo_small.txt").c_str(), &probe) >= 0) {
             extern uint32_t collisionWitnessMemoEntries;
-            collisionWitnessMemoEntries = 131072u;
-            log.Line("vita.diag", "walk memo 131072 entries");
+            collisionWitnessMemoEntries = 65536u;
+            log.Line("vita.diag", "walk memo 65536 entries");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/walk_memo_off.txt").c_str(), &probe) >= 0) {
             extern int collisionWitnessMemo;

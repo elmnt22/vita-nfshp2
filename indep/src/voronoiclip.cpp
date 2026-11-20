@@ -254,11 +254,20 @@ CollisionGeometry* collisionGeometryInitialize(CollisionGeometry* geometry)
     return geometry;
 }
 
+// A slot whose geometry is rebuilt in place (terrain shapes are recycled for
+// other polygons) gets a new generation, so walk memo keys never match
+// across the rebuild even at the same addresses.
+static std::atomic<uint32_t> collisionGeometryGenerations{0};
+static void collisionGeometryTouch(CollisionGeometry* geometry)
+{
+    geometry->generation=collisionGeometryGenerations.fetch_add(1,std::memory_order_relaxed)+1u;
+}
 void collisionGeometryBind(CollisionGeometry* geometry, CollisionFeature* vertices, int16_t vertexCapacity,
                            CollisionFeature* edges, int16_t edgeCapacity,
                            CollisionFeature* faces, int16_t faceCapacity,
                            CollisionPlane* planes, int16_t planeCapacity)
 {
+    collisionGeometryTouch(geometry);
     geometry->vertices = vertices; geometry->edges = edges; geometry->faces = faces; geometry->planes = planes;
     geometry->vertexCapacity = vertexCapacity; geometry->edgeCapacity = edgeCapacity;
     geometry->faceCapacity = faceCapacity; geometry->planeCapacity = planeCapacity;
@@ -315,6 +324,7 @@ CollisionFeature* collisionGeometryNewFace(CollisionGeometry* geometry, const fl
 
 void collisionGeometrySetPlanes(CollisionGeometry* geometry)
 {
+    collisionGeometryTouch(geometry);
     for (int index = 0; index < geometry->vertexCount; ++index) collisionVertexSetPlanes(&geometry->vertices[index]);
     for (int index = 0; index < geometry->faceCount; ++index) collisionFaceSetPlanes(&geometry->faces[index]);
     for (int index = 0; index < geometry->edgeCount; ++index) collisionEdgeSetPlanes(&geometry->edges[index]);
@@ -798,6 +808,7 @@ struct PoseSlot {
 struct WalkKey {
     const void* pointers[4];
     uint32_t poseSlot,poseSequence;
+    uint32_t firstGeneration,secondGeneration;
     int32_t side;
     float points[8];
     float distance;
@@ -822,7 +833,7 @@ uint32_t collisionWitnessMemoEntries=[] {
 #if !defined(__vita__) && !defined(__SWITCH__)
     const char* value=getenv("HP2_WALK_MEMO_ENTRIES");if(value) return (uint32_t)atoi(value);
 #endif
-    return 65536u; // ~8 MB on Vita
+    return 131072u; // ~16 MB (Vita bench: 86-92% race-start hits vs 77-81% at 65536)
 }();
 namespace {
 uint32_t walkMemoEntries=0;
@@ -920,6 +931,7 @@ inline void walkKeyFill(WalkKey& key,const CollisionWitness* witness,uint32_t po
     key.pointers[0]=witness->first;key.pointers[1]=witness->second;
     key.pointers[2]=witness->firstGeometry;key.pointers[3]=witness->secondGeometry;
     key.poseSlot=poseSlot;key.poseSequence=poseSequence;
+    key.firstGeneration=witness->firstGeometry->generation;key.secondGeneration=witness->secondGeometry->generation;
     key.side=witness->side;
     memcpy(key.points,witness->firstPoint,16);memcpy(key.points+4,witness->secondPoint,16);
     key.distance=witness->distance;
@@ -966,6 +978,8 @@ inline bool walkWitnessEqual(const CollisionWitness& x,const CollisionWitness& y
         memcmp(&x.distance,&y.distance,4)==0;
 }
 }
+// Serial verify references walk without the memo (independent reference).
+void collisionWitnessMemoBypass(bool bypass) {walkMemoBypass=bypass;}
 // Advanced once per world frame (pose replacement age).
 void collisionWitnessMemoTick() {walkMemoClock.fetch_add(1,std::memory_order_relaxed);}
 static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
