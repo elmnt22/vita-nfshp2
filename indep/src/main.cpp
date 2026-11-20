@@ -58,6 +58,7 @@
 // Native terminal lifetime API in the proven weatherman.cpp definition path.
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
+extern std::array<std::uint64_t,8> mellowSplitMicros;
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
 namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
@@ -1394,6 +1395,12 @@ bool ApplicationRuntime::Tick()
                         calls[0],calls[1],calls[2],calls[3],calls[4],calls[5],calls[6]);
                     s.host.RecordSessionEvent("render.mover_window",detail);
                     ms={};calls={};
+                    if(auto& t=mellowSplitMicros;t[7]) {
+                        const double n=static_cast<double>(t[7]);
+                        std::snprintf(detail,sizeof(detail),"substeps=%llu per_substep_us setup=%.1f integrate=%.1f prepare=%.1f forces=%.1f ortho=%.1f publish=%.1f terrain=%.1f",
+                            static_cast<unsigned long long>(t[7]),t[0]/n,t[1]/n,t[2]/n,t[3]/n,t[4]/n,t[5]/n,t[6]/n);
+                        s.host.RecordSessionEvent("render.mellow_split",detail);t={};
+                    }
                 }
                 auto& solve=worldCollisionSolveMs;
                 std::snprintf(detail,sizeof(detail),"find_ms=%.3f queue_ms=%.3f resolve_ms=%.3f tail_ms=%.3f "
