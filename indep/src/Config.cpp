@@ -338,7 +338,8 @@ ApplicationLaunchOptions applicationLaunchOptions={
 };
 
 bool applicationDebugToolsEnabled=false;
-bool applicationShowFrameRate=true;
+// Off unless a platform setting enables it (PC/Switch options; Vita show_fps.txt).
+bool applicationShowFrameRate=false;
 bool applicationUnlockAllForTesting=false;
 bool applicationDebugExitRequested=false;
 int32_t applicationScreenPrintf=0;

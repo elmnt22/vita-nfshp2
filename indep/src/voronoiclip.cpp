@@ -817,12 +817,15 @@ struct WalkEntry {
     WalkKey key;
     WalkValue value;
 };
-uint32_t walkMemoEntries=[] {
+}
+uint32_t collisionWitnessMemoEntries=[] {
 #if !defined(__vita__) && !defined(__SWITCH__)
     const char* value=getenv("HP2_WALK_MEMO_ENTRIES");if(value) return (uint32_t)atoi(value);
 #endif
     return 65536u; // ~8 MB on Vita
 }();
+namespace {
+uint32_t walkMemoEntries=0;
 constexpr uint32_t kPoseSlots=8192u;
 WalkEntry* walkMemoTable=nullptr;
 PoseSlot* walkPoseTable=nullptr;
@@ -835,6 +838,7 @@ bool walkMemoEnsure()
     if (walkMemoReady.load(std::memory_order_acquire)) return walkMemoReady.load(std::memory_order_relaxed)>0;
     std::lock_guard<std::mutex> lock(walkMemoAllocate);
     if (!walkMemoReady.load(std::memory_order_relaxed)) {
+        walkMemoEntries=collisionWitnessMemoEntries<4u ? 4u:collisionWitnessMemoEntries;
         walkMemoTable=new (std::nothrow) WalkEntry[walkMemoEntries];
         walkPoseTable=new (std::nothrow) PoseSlot[kPoseSlots];
         if (walkMemoTable && walkPoseTable) {
