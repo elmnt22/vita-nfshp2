@@ -191,6 +191,7 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
 // Scene jobs are short owner-blocking bursts (the caller waits for them), so
 // they may preempt the long-running gather/GL threads on cores 1-2.
 int ecstasySceneWorkerPriority=0; // 0 keeps the default priority
+int ecstasySceneClaimPool=1;
 void ConfigureNativeSceneWorker() noexcept
 {
     (void)sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_1|SCE_KERNEL_CPU_MASK_USER_2);
