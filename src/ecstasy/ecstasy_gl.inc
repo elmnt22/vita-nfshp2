@@ -29,11 +29,13 @@ struct GlMappedBuffer {
     }
     void Ensure(GLenum bufferTarget,std::size_t required) {
         if(name && size>=required)return;
-        Destroy();++glBufferBuilds;
-        target=bufferTarget;
         // Grow by half again: each regrowth leaves the old block allocated
         // until vitaGL's deferred free, so small steps churn GPU memory.
-        const auto grown=size ? size+size/2:std::size_t(0);
+        // (Capacity is read before Destroy, which zeroes it.)
+        const auto previous=size;
+        const auto grown=previous ? previous+previous/2:std::size_t(0);
+        Destroy();++glBufferBuilds;
+        target=bufferTarget;
         size=std::max<std::size_t>((std::max(required,grown)+65535u)&~std::size_t(65535u),65536u);
         glGenBuffers(1,&name);
         glBindBuffer(target,name);

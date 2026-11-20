@@ -40,6 +40,8 @@ typedef struct CollisionGeometry {
     int16_t vertexCapacity, edgeCapacity, faceCapacity, planeCapacity;
     int32_t ownsStorage;
     void* display;
+    /* Host only: changes on every bind or plane rebuild (walk memo key). */
+    uint32_t generation;
 } CollisionGeometry;
 
 /* Serialized links are indices, kept in separate typed storage on the host. */
