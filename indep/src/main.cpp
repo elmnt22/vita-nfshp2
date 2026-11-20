@@ -67,6 +67,7 @@ extern uint64_t collisionWitnessWarmMismatches;
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpecSeparations,collisionSpecAccepted,collisionSpecWasted,collisionSpecMispredicts,
     collisionSpecRounds,collisionSpecVerified,collisionSpecMismatches,collisionFindQueries,collisionSeparateQueries,collisionSeparateCalls;
+extern uint64_t collisionQueuePredicted,collisionQueueFallbacks,collisionQueueChecks,collisionQueueMismatches;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint64_t collisionWitnessKindMicros[9],collisionWitnessKindSteps[9];
 static double soundUpdatePeakMs=0;
@@ -1414,6 +1415,11 @@ bool ApplicationRuntime::Tick()
                 ::collisionFindQueries=::collisionSeparateCalls=::collisionSeparateQueries=0;
                 ::collisionSpecSeparations=::collisionSpecRounds=::collisionSpecAccepted=::collisionSpecWasted=::collisionSpecMispredicts=0;
                 s.host.RecordSessionEvent("render.collision_solve",detail);
+                std::snprintf(detail,sizeof(detail),"predicted_per_frame=%.1f fallbacks_per_frame=%.1f checks=%llu mismatches=%llu",
+                    ::collisionQueuePredicted/count,::collisionQueueFallbacks/count,
+                    static_cast<unsigned long long>(::collisionQueueChecks),static_cast<unsigned long long>(::collisionQueueMismatches));
+                ::collisionQueuePredicted=::collisionQueueFallbacks=0;
+                s.host.RecordSessionEvent("render.queue_pred",detail);
                 {
                     std::snprintf(detail,sizeof(detail),"queries_per_frame=%.1f iterations_per_query=%.2f restarts_per_frame=%.2f exhausted_per_frame=%.2f witness_ms=%.3f warm_ms=%.3f warm_mismatches=%llu",
                         ::collisionWitnessQueries/count,::collisionWitnessQueries?double(::collisionWitnessIterations)/::collisionWitnessQueries:0.0,

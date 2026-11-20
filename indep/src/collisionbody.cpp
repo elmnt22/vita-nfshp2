@@ -14,6 +14,7 @@
 #include "indep/inc/World.hpp"
 
 #include <limits.h>
+#include <stdlib.h>
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
@@ -651,6 +652,117 @@ int32_t collisionPairObsolete(const CollisionSystem* system, const CollisionPair
     return !collisionParticipantEligible(system,pair->first) || !collisionParticipantEligible(system,pair->second);
 }
 
+// Speculative queue queries (exact): before the initial queue pass every
+// pair's witness query runs on helpers from that pair's own witness and
+// frames (nothing in the pass writes another pair's witness or any shape
+// pose). Only random draws are order-dependent: a terminal restart's two
+// vertex draws are made here in pair order from the real state, and a query
+// that restarted earlier is rerun serially.
+int32_t collisionWitnessQueryPredict(CollisionWitness* witness, const float firstFrame[16],
+    const float firstPosition[4], const float secondFrame[16], const float secondPosition[4],
+    int32_t* pending, uint64_t counters[4]);
+unsigned collisionHelperCount();
+void collisionHelperRun(unsigned count,void (*function)(void*,unsigned),void* context);
+extern int collisionSpeculationMode;
+extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
+uint64_t collisionQueuePredicted=0,collisionQueueFallbacks=0,collisionQueueChecks=0,collisionQueueMismatches=0;
+int collisionQueuePrediction=[] {
+#if !defined(__vita__)
+    if(const char* value=getenv("HP2_QUEUE_PRED"))return value[0]=='0' ? 0:1;
+#endif
+    return 1;
+}(); // Vita queue_pred_off.txt: 0
+namespace {
+struct QueuePrediction {
+    CollisionPair* pair;
+    const float* frames[4];
+    CollisionWitness witness;
+    int32_t result,pending;
+    uint64_t counters[4];
+    bool valid;
+};
+std::vector<QueuePrediction> queuePredictions;
+std::vector<int32_t> queuePredictionSlot;
+bool queuePredictionActive=false;
+void queueFrames(const CollisionPair* pair,const float* frames[4]);
+void runQueuePrediction(void* context,unsigned index)
+{
+    auto& entry=static_cast<QueuePrediction*>(context)[index];
+    entry.witness=entry.pair->witness;
+    entry.counters[0]=0;entry.counters[1]=entry.counters[2]=entry.counters[3]=0;
+    entry.result=collisionWitnessQueryPredict(&entry.witness,entry.frames[0],entry.frames[2],
+        entry.frames[1],entry.frames[3],&entry.pending,entry.counters);
+}
+}
+
+void collisionPairPredictQueue(CollisionSystem* system)
+{
+    queuePredictionActive=false;
+    if (!collisionQueuePrediction || collisionHelperCount()==0) return;
+    queuePredictions.clear();
+    for (CollisionPair* pair=system->pairRoot.next;pair!=&system->pairRoot;pair=pair->next) {
+        if (!collisionParticipantEligible(system,pair->first) || !collisionParticipantEligible(system,pair->second)) continue;
+        QueuePrediction entry{};
+        entry.pair=pair;queueFrames(pair,entry.frames);
+        queuePredictions.push_back(entry);
+    }
+    if (queuePredictions.size()<2) return;
+    if (queuePredictionSlot.size()<system->pairCapacity) queuePredictionSlot.assign(system->pairCapacity,-1);
+    collisionHelperRun((unsigned)queuePredictions.size(),runQueuePrediction,queuePredictions.data());
+    for (size_t index=0;index<queuePredictions.size();++index) {
+        auto& entry=queuePredictions[index];
+        entry.valid=entry.pending>=0;
+        queuePredictionSlot[(size_t)(entry.pair-system->pairs)]=(int32_t)index;
+    }
+    queuePredictionActive=true;
+}
+
+void collisionPairPredictQueueEnd(CollisionSystem* system)
+{
+    if (!queuePredictionActive) return;
+    for (const auto& entry:queuePredictions) queuePredictionSlot[(size_t)(entry.pair-system->pairs)]=-1;
+    queuePredictionActive=false;
+}
+
+static int32_t queueWitnessQuery(CollisionSystem* system, CollisionPair* pair, const float* frames[4])
+{
+    QueuePrediction* entry=nullptr;
+    if (queuePredictionActive) {
+        const auto slot=(size_t)(pair-system->pairs);
+        const int32_t index=queuePredictionSlot[slot];
+        if (index>=0) {
+            queuePredictionSlot[slot]=-1; // requeues in the resolve loop query again
+            entry=&queuePredictions[(size_t)index];
+            if (!entry->valid || memcmp(entry->frames,frames,sizeof(entry->frames))!=0) entry=nullptr;
+        }
+    }
+    if (!entry) {
+        if (queuePredictionActive) ++collisionQueueFallbacks;
+        return collisionWitnessQuery(&pair->witness,frames[0],frames[2],frames[1],frames[3],system->randomState);
+    }
+    const auto apply=[&](CollisionWitness& witness,uint32_t& state) {
+        witness=entry->witness;
+        if (entry->pending==1) {
+            witness.first=&witness.firstGeometry->vertices[vectorRandomBounded((uint32_t)witness.firstGeometry->vertexCount,&state)];
+            witness.second=&witness.secondGeometry->vertices[vectorRandomBounded((uint32_t)witness.secondGeometry->vertexCount,&state)];
+        }
+    };
+    if (collisionSpeculationMode==2) {
+        CollisionWitness copy=pair->witness;uint32_t state=*system->randomState;
+        apply(copy,state);
+        const int32_t expected=collisionWitnessQuery(&pair->witness,frames[0],frames[2],frames[1],frames[3],system->randomState);
+        ++collisionQueueChecks;
+        if (expected!=entry->result || state!=*system->randomState || memcmp(&copy,&pair->witness,sizeof(copy))!=0)
+            ++collisionQueueMismatches;
+        return expected;
+    }
+    apply(pair->witness,*system->randomState);
+    collisionWitnessQueries+=entry->counters[0];collisionWitnessIterations+=entry->counters[1];
+    collisionWitnessRestarts+=entry->counters[2];collisionWitnessExhausted+=entry->counters[3];
+    ++collisionQueuePredicted;
+    return entry->result;
+}
+
 void collisionPairQueueContact(CollisionSystem* system, CollisionPair* pair)
 {
     if (!collisionParticipantEligible(system,pair->first) || !collisionParticipantEligible(system,pair->second)) return;
@@ -661,11 +773,9 @@ void collisionPairQueueContact(CollisionSystem* system, CollisionPair* pair)
         system->result=COLLISION_SYSTEM_MISSING_OWNER;
         return;
     }
-    const float* firstFrame=first->active ? frameOf(first) : identity;
-    const float* secondFrame=second->active ? frameOf(second) : identity;
-    const float* firstPosition=first->active ? positionOf(first) : zero;
-    const float* secondPosition=second->active ? positionOf(second) : zero;
-    if (collisionWitnessQuery(&pair->witness,firstFrame,firstPosition,secondFrame,secondPosition,system->randomState)!=2) return;
+    const float* frames[4];
+    queueFrames(pair,frames);
+    if (queueWitnessQuery(system,pair,frames)!=2) return;
     // PAL1D6744/1D6754 bypasses suppression for either static participant.
     // A suppressed moving car must still resolve contacts with the track.
     if (first->active && second->active &&
@@ -1331,4 +1441,18 @@ bool carCollisionAllowsControl(const CarCollisionState *collision)
 {
     if (collision->policy->collisionDisabled || collision->policy->secondaryCollisionDisabled) return false;
     return collisionShapeAllowsContact(collision->shape);
+}
+
+namespace {
+// frames[0..3]: first frame, second frame, first position, second position
+// (the same selection collisionPairQueueContact has always made).
+void queueFrames(const CollisionPair* pair,const float* frames[4])
+{
+    const CollisionShape* first=pair->first->shape;
+    const CollisionShape* second=pair->second->shape;
+    frames[0]=first->active ? frameOf(first) : identity;
+    frames[1]=second->active ? frameOf(second) : identity;
+    frames[2]=first->active ? positionOf(first) : zero;
+    frames[3]=second->active ? positionOf(second) : zero;
+}
 }
