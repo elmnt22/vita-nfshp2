@@ -2040,12 +2040,11 @@ void EcstasyFrame::RenderTargetStrip(const std::vector<frontend::FlailerPolyVert
     Require(phase_==Phase::Building && vertices.size()>=4 && vertices.size()<=128 && vertices.size()%2==0 && source.enabled && destination.enabled &&
         source.id>=8 && source.id<=13 && destination.id==14,
         "Environment remap strip has no original source/destination target");
-    auto owned=std::make_unique<std::vector<frontend::FlailerPolyVertex>>(vertices);
     EcstasyDrawCommand command;command.kind=EcstasyDrawKind::RenderTargetStrip;
-    command.worldStrip=owned.get();command.target=&destination;command.sampledTarget=&source;
+    command.target=&destination;command.sampledTarget=&source;
     command.zWriteEnabled=false;command.rasterState={{0x01000100u,0,0,0}};
-    worldStrips_.push_back(std::move(owned));
-    try {commands_.push_back(command);}catch(...) {worldStrips_.pop_back();throw;}
+    command.worldStrip=TakeWorldStrip(vertices.data(),vertices.size());
+    try {commands_.push_back(command);}catch(...) {--liveWorldStrips_;throw;}
     environmentUpdated_=true;
 }
 EcstasyFrame::~EcstasyFrame()
@@ -3209,29 +3208,42 @@ void EcstasyFrame::RenderPolygon3D(const frontend::FlailerPoly& polygon,
     try {commands_.push_back(command);}catch (...) {worldPolygons_.pop_back();throw;}
 }
 
+std::vector<frontend::FlailerPolyVertex>* EcstasyFrame::TakeWorldStrip(
+    const frontend::FlailerPolyVertex* vertices,std::size_t count)
+{
+    if(liveWorldStrips_==worldStrips_.size())
+        worldStrips_.push_back(std::make_unique<std::vector<frontend::FlailerPolyVertex>>());
+    auto* strip=worldStrips_[liveWorldStrips_].get();
+    strip->assign(vertices,vertices+count);++liveWorldStrips_;
+    return strip;
+}
 void EcstasyFrame::RenderWorldStrip(const std::vector<frontend::FlailerPolyVertex>& vertices,
+    const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view,EcstasyCarShadow shadow)
+{
+    RenderWorldStrip(vertices.data(),vertices.size(),texture,localToWorld,view,shadow);
+}
+void EcstasyFrame::RenderWorldStrip(const frontend::FlailerPolyVertex* vertices,std::size_t count,
     const TextureInfo& texture,const float localToWorld[16],const CarCinematicScreen& view,EcstasyCarShadow shadow)
 {
     Require(phase_==Phase::Building,"Cannot append world strip to a sealed graphics frame");
     Require(localToWorld && view.target && view.target->enabled && view.matricesCalculated &&
         texture.pixels.Data(),"World strip lacks its source target, matrix or texture");
     // PAL1222B8 emits up to2*(64+1) vertices for a convex car-shadow border.
-    Require(vertices.size()>=3 && vertices.size()<=130,"World strip exceeds its original immediate extent");
-    auto owned=std::make_unique<std::vector<frontend::FlailerPolyVertex>>(vertices);
+    Require(vertices && count>=3 && count<=130,"World strip exceeds its original immediate extent");
     EcstasyDrawCommand command;command.kind=EcstasyDrawKind::WorldStrip;
     command.textureQScale=view.pixelScale;
     command.clipToScreen=&CaptureMaterialProjection(texture,CaptureProjection(view));
-    command.worldStrip=owned.get();command.texture=&texture;command.view=&view;command.target=view.target;
+    command.texture=&texture;command.view=&view;command.target=view.target;
     command.carShadow=shadow;
     command.zWriteEnabled=zWriteEnabled_;command.drawFlags=0x200u;
     command.instance=&CaptureInstance(localToWorld,view);
     command.depthSorted=texture.requiresDepthSort;
     if(command.depthSorted) {
-        float depth[4];eMulVector3(depth,view.matrices.worldToView,vertices.front().position.data());
+        float depth[4];eMulVector3(depth,view.matrices.worldToView,vertices[0].position.data());
         command.sortDepth=depth[2];
     }
-    worldStrips_.push_back(std::move(owned));
-    try {commands_.push_back(command);}catch(...) {worldStrips_.pop_back();throw;}
+    command.worldStrip=TakeWorldStrip(vertices,count);
+    try {commands_.push_back(command);}catch(...) {--liveWorldStrips_;throw;}
 }
 
 struct EcstasyFrame::StripCaptureState {
@@ -4884,7 +4896,7 @@ void EcstasyFrame::BeginNextFrame()
     Require(phase_==Phase::Complete,"Only a completed graphics frame can be reused");
     Require(commands_.empty() && pendingAlphaIndices_.empty() && order_.empty() &&
         visibleScratch_.empty() && modelStripScratch_.empty() && modelTextureScratch_.empty() && depthTransfers_.empty() &&
-        retainedStrips_.empty() && worldPolygons_.empty() && worldStrips_.empty() &&
+        retainedStrips_.empty() && worldPolygons_.empty() && liveWorldStrips_==0 &&
         animatedStrips_.empty() && liveParticleGroups_==0 && !textureAnimationResources_ &&
         liveInstances_==0 && liveProjections_==0 && !lastProjection_,
         "Completed graphics frame still owns a submitted borrower");
@@ -4922,7 +4934,7 @@ void EcstasyFrame::Release() noexcept
     worldPolygons_.clear();
     for(std::size_t index=0;index<liveParticleGroups_;++index)particleGroups_[index]->clear();
     liveParticleGroups_=0;
-    worldStrips_.clear();
+    liveWorldStrips_=0;
     for(auto& strip:animatedStrips_)ReturnPosedStrip(strip); // unpooled strips are freed below
     animatedStrips_.clear();
     for (auto* strip:retainedStrips_)strip->pool->Complete(*strip);
