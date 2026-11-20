@@ -107,6 +107,7 @@ int ecstasyHalfResSkipAlphaTest=1; // Vita halfres_atest.txt: 0 (keep the redund
 // Splitting the display scene stores+reloads colour and depth (~4 ms), so the
 // half pass is used only on frames with heavy particle fill (screens covered).
 double ecstasyHalfResMinScreens=6.0;
+double ecstasyQuarterResMinScreens=40.0; // 0 disables (Vita quarterres_off.txt)
 int ecstasyHalfResSync=0,ecstasyHalfResDepthFlip=0,ecstasyHalfResCompositeFlip=0; // orientation (Vita halfres_dflip/_cflip.txt)
 std::vector<std::uint64_t> ecstasyScreenshotFrames,ecstasyDisplayShotFrames; // Vita dshots.txt: on-screen copies         // Vita shots.txt: frame numbers to save
 int ecstasyParallelSkinStrips=[] {
