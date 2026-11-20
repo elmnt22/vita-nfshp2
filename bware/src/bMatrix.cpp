@@ -131,6 +131,14 @@ float* vectorMatrixTranspose(float output[16], const float matrix[16])
 
 void vectorMatrixTransformPoint(float output[4], const float matrix[16], const float input[4])
 {
+#if NFSHP2_NATIVE_NEON
+    if (bMatrixNeonEnabled) {
+        // {x, y, z, 1} built in registers (no store-forwarding stall).
+        const float32x2_t high = vld1_lane_f32(input + 2, vdup_n_f32(1.0f), 0);
+        vst1q_f32(output, bNeonTransformMatrix(matrix, vcombine_f32(vld1_f32(input), high)));
+        return;
+    }
+#endif
     const float point[4] = {input[0], input[1], input[2], 1.0f};
     vectorMatrixTransform(output, matrix, point);
 }

@@ -725,13 +725,23 @@ WorldAudioResult AudioDevice::Pump()
         const auto lockStarted=std::chrono::steady_clock::now();
         std::unique_lock<std::mutex> batchLock(state_->mutex);
         lockWaitMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lockStarted).count();
+        state_->statistics.lockWaitMilliseconds+=lockWaitMs;
         check(state_->commands.Pump(state_->queue,256,[this,&requests,&applySumMs](const auto& request) {
+            const auto preStarted=std::chrono::steady_clock::now();
             state_->PreDecode(request);
             ++requests;
             const auto applyStarted=std::chrono::steady_clock::now();
             const auto applied=state_->Apply(request);
-            const auto applyMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-applyStarted).count();
+            const auto applyFinished=std::chrono::steady_clock::now();
+            const auto applyMs=std::chrono::duration<double,std::milli>(applyFinished-applyStarted).count();
             applySumMs+=applyMs;
+            {
+                auto& stats=state_->statistics;
+                stats.preDecodeMilliseconds+=std::chrono::duration<double,std::milli>(applyStarted-preStarted).count();
+                stats.applyMilliseconds+=applyMs;++stats.requests;
+                const auto kind=static_cast<std::size_t>(request.kind);
+                if(kind<40) {stats.kindMilliseconds[kind]+=applyMs;++stats.kindCounts[kind];}
+            }
             if(applyMs>state_->statistics.applyPeakMilliseconds) {
                 state_->statistics.applyPeakMilliseconds=applyMs;
                 state_->statistics.applyPeakKind=static_cast<int>(request.kind);

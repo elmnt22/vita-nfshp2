@@ -137,6 +137,14 @@ WorldAudioInstance* bSound::SampleAt(size_t index) noexcept
     return const_cast<WorldAudioInstance*>(static_cast<const bSound*>(this)->SampleAt(index));
 }
 
+bool bSound::AnySampleRetiring(int32_t state) const noexcept
+{
+    for (const auto& sample:samples_) if (sample.occupied && sample.retiring==state) return true;
+    for (const auto& block:expandedSamples_)
+        for (const auto& sample:block) if (sample.occupied && sample.retiring==state) return true;
+    return false;
+}
+
 bool bSound::OwnsSample(const WorldAudioInstance* sample) const noexcept
 {
     const auto address=reinterpret_cast<uintptr_t>(sample);
