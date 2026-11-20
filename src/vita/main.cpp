@@ -787,6 +787,16 @@ int main(int, char**)
             hp2::ecstasyAsyncMirrorScenery = 0;
             log.Line("vita.diag", "async mirror scenery off");
         }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/show_fps.txt").c_str(), &probe) >= 0) {
+            extern bool applicationShowFrameRate;
+            applicationShowFrameRate = true;
+            log.Line("vita.diag", "fps counter on");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/walk_memo_big.txt").c_str(), &probe) >= 0) {
+            extern uint32_t collisionWitnessMemoEntries;
+            collisionWitnessMemoEntries = 131072u;
+            log.Line("vita.diag", "walk memo 131072 entries");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/walk_memo_off.txt").c_str(), &probe) >= 0) {
             extern int collisionWitnessMemo;
             collisionWitnessMemo = 0;
