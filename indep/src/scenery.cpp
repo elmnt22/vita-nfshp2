@@ -1099,13 +1099,19 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     std::vector<std::pair<std::size_t,std::size_t>> serialRanges;
     if(verifying)serialRanges.assign(draws.size(),{0,0});
     // Sampled split of the serial emit: 1 main view in 16.
-    static unsigned emitSampleTick=0;
-    static std::array<double,6> emitSample{}; // light, prepare, capture, emit, rejected, views
-    static double emitSampleDraws=0,emitSampleBatched=0;
-    const bool sampleEmit=view.id==1 && (++emitSampleTick&15u)==0;
+    // Separate accumulators for the main view (t1) and the mirror (t3).
+    const std::size_t sampleView=view.id==3 ? 1:0;
+    static std::array<unsigned,2> emitSampleTicks{};
+    static std::array<std::array<double,6>,2> emitSamples{}; // light, prepare, capture, emit, rejected, views
+    static std::array<double,2> emitSampleDrawsAll{},emitSampleBatchedAll{};
+    auto& emitSample=emitSamples[sampleView];
+    auto& emitSampleDraws=emitSampleDrawsAll[sampleView];auto& emitSampleBatched=emitSampleBatchedAll[sampleView];
+    const bool sampleEmit=(view.id==1 || view.id==3) && (++emitSampleTicks[sampleView]&15u)==0;
     const auto sampleBatchedBefore=splitBatched;
     const auto sampleRejectedMsBefore=splitModelMs;
     hp2::ecstasyEmitSampling=sampleEmit;
+    static std::array<std::array<std::uint64_t,5>,2> emitCounterViews{};
+    if(sampleEmit)hp2::ecstasyEmitCounters={};
     hp2::ecstasyEmitSampleMs={};
     for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
         auto& draw=draws[drawIndex];
@@ -1137,13 +1143,17 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     hp2::ecstasyEmitSampling=false;
     if(sampleEmit) {
         for(std::size_t index=0;index<3;++index)emitSample[1+index]+=hp2::ecstasyEmitSampleMs[index];
+        for(std::size_t index=0;index<5;++index)emitCounterViews[sampleView][index]+=hp2::ecstasyEmitCounters[index];
         emitSample[4]+=splitModelMs-sampleRejectedMsBefore;emitSample[5]+=1;
         emitSampleDraws+=static_cast<double>(draws.size());emitSampleBatched+=static_cast<double>(splitBatched-sampleBatchedBefore);
         if(emitSample[5]>=16) {
             const double n=emitSample[5];
             char text[256];
-            std::snprintf(text,sizeof(text),"views=%.0f draws=%.1f batched=%.1f light_ms=%.3f prepare_ms=%.3f capture_ms=%.3f emit_ms=%.3f rejected_ms=%.3f",
-                n,emitSampleDraws/n,emitSampleBatched/n,emitSample[0]/n,emitSample[1]/n,emitSample[2]/n,emitSample[3]/n,emitSample[4]/n);
+            auto& c=emitCounterViews[sampleView];
+            std::snprintf(text,sizeof(text),"view=%d views=%.0f draws=%.1f batched=%.1f light_ms=%.3f prepare_ms=%.3f capture_ms=%.3f emit_ms=%.3f rejected_ms=%.3f runs=%.1f box_tests=%.1f strip_tests=%.1f commands=%.1f culled_models=%.1f",
+                static_cast<int>(view.id),n,emitSampleDraws/n,emitSampleBatched/n,emitSample[0]/n,emitSample[1]/n,emitSample[2]/n,emitSample[3]/n,emitSample[4]/n,
+                c[0]/n,c[1]/n,c[2]/n,c[3]/n,c[4]/n);
+            c={};
             platform::RecordSessionEvent("render.scenery_emit_sample",text);
             emitSample={};emitSampleDraws=emitSampleBatched=0;
         }
