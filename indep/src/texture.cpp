@@ -1,3 +1,4 @@
+#include <array>
 #include "Texture.hpp"
 #include "CarLoader.hpp"
 #include "Fred.hpp"
@@ -31,7 +32,9 @@ TextureInfo* TexturePackRegistry::ResolveLoadedTexture(EditorMarkerResources& ca
     for(std::size_t index=0;index<packs.size();++index) {
         auto* pack=packs[index];if(&pack->CatalogueRoot()!=root)continue;
         if(auto* texture=pack->GetLoadedTexture(key)) {
-            packs.erase(packs.begin()+static_cast<std::ptrdiff_t>(index));packs.insert(packs.begin(),pack);
+            // Move-to-front (same order as erase+insert, no reallocation).
+            if(index)std::rotate(packs.begin(),packs.begin()+static_cast<std::ptrdiff_t>(index),
+                packs.begin()+static_cast<std::ptrdiff_t>(index)+1);
             texture->descriptor->used=1;return texture;
         }
     }
@@ -185,14 +188,25 @@ public:
     std::unordered_map<std::uint32_t,std::vector<std::size_t>> byKey;
     bool keyIndexValid{};
     bool published{true};
+    // Bit filter over byKey's keys (built with it): a clear bit proves the
+    // key is absent, so cross-pack misses skip the hash lookup.
+    std::array<std::uint64_t,8> keyFilter{};
+    static unsigned KeyFilterBit(std::uint32_t key) noexcept {return (key^(key>>9)^(key>>18)^(key>>27))&511u;}
+    bool MayContain(std::uint32_t key) const noexcept {
+        const auto bit=KeyFilterBit(key);return (keyFilter[bit>>6]>>(bit&63u))&1u;
+    }
     void EnsureKeyIndex() noexcept {
         if(keyIndexValid)return;
         try {
             decltype(byKey) rebuilt;
             rebuilt.reserve(textures.size());
-            for(std::size_t i=0;i<textures.size();++i)
-                rebuilt[textures[i].descriptor->key].push_back(i);
-            byKey.swap(rebuilt);
+            std::array<std::uint64_t,8> filter{};
+            for(std::size_t i=0;i<textures.size();++i) {
+                const auto key=textures[i].descriptor->key;
+                rebuilt[key].push_back(i);
+                const auto bit=KeyFilterBit(key);filter[bit>>6]|=std::uint64_t{1}<<(bit&63u);
+            }
+            byKey.swap(rebuilt);keyFilter=filter;
             keyIndexValid=true;
         } catch (...) {
             // A failed optional index does not change original lookups.
@@ -390,6 +404,7 @@ TextureInfo* TexturePack::GetTexture(std::uint32_t key)
     if(!metadata || !metadata->published)return nullptr;
     metadata->EnsureKeyIndex();
     if(metadata->keyIndexValid) {
+        if(!metadata->MayContain(key))return nullptr;
         const auto found=metadata->byKey.find(key);
         if(found==metadata->byKey.end())return nullptr;
         return &metadata->textures[found->second.front()];
@@ -406,6 +421,7 @@ TextureInfo* TexturePack::GetLoadedTexture(std::uint32_t key)
     if(!metadata || !metadata->published)return nullptr;
     metadata->EnsureKeyIndex();
     if(metadata->keyIndexValid) {
+        if(!metadata->MayContain(key))return nullptr;
         const auto found=metadata->byKey.find(key);
         if(found==metadata->byKey.end())return nullptr;
         for(const auto index:found->second) {
