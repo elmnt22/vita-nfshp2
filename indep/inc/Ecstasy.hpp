@@ -1774,6 +1774,10 @@ inline void NativeScenePoolWait(std::condition_variable& condition,std::unique_l
             nativeScenePoolRecoveries.fetch_add(1,std::memory_order_relaxed);
     }
 }
+#if defined(__vita__)
+// Vita scene pool claim model (scene_claim_off.txt: 0 = semaphore barrier).
+extern int ecstasySceneClaimPool;
+#endif
 class NativeSceneWorkerPool final {
 public:
 #if defined(__vita__)
@@ -1822,6 +1826,38 @@ public:
             const auto slot=static_cast<unsigned>(workers_.size());
             workers_.emplace_back([this,slot] { Worker(slot); });
         }
+#if defined(__vita__)
+        if(ecstasySceneClaimPool && count<kClaimClosed) {
+            // Claim model: the caller runs chunks itself and waits only for
+            // chunks already claimed. A worker preempted by the gather/GL
+            // thread before claiming never holds up the batch.
+            function_=[](void* taskContext,std::size_t index) {
+                (*static_cast<Task*>(taskContext))(index);
+            };
+            context_=&task;
+            floatingPoint_.Capture();
+            size_=count;
+            const auto shares=static_cast<std::size_t>(workers)*8;
+            chunk_=std::max<std::size_t>(1,std::min<std::size_t>(32,count/shares+(count%shares!=0)));
+            canceled_.store(false,std::memory_order_relaxed);
+            failure_=nullptr;
+            claimGeneration_=(claimGeneration_+1)&0xfffu;
+            claimState_.store(claimGeneration_<<20);
+            const unsigned wake=std::min<unsigned>(workers-1,static_cast<unsigned>(workers_.size()));
+            if(wake)sceKernelSignalSema(wakeSema_,static_cast<int>(wake));
+            ExecuteClaims(claimGeneration_,false);
+            claimState_.store((claimGeneration_<<20)|kClaimClosed);
+            while(claimInFlight_.load()!=0) {}
+            std::exception_ptr failure;
+            {
+                std::lock_guard<std::mutex> guard(mutex_);
+                failure=failure_;
+            }
+            function_=nullptr;context_=nullptr;
+            if(failure)std::rethrow_exception(failure);
+            return;
+        }
+#endif
         {
             std::lock_guard<std::mutex> guard(mutex_);
             function_=[](void* taskContext,std::size_t index) {
@@ -1858,6 +1894,55 @@ public:
         if(failure)std::rethrow_exception(failure);
     }
 private:
+#if defined(__vita__)
+    static constexpr std::uint32_t kClaimClosed=0xfffffu;
+    bool ClaimChunk(std::uint32_t generation,std::size_t& first,std::size_t& last) noexcept {
+        std::uint32_t state=claimState_.load();
+        for(;;) {
+            if((state>>20)!=generation || (state&kClaimClosed)==kClaimClosed)return false;
+            const std::size_t next=state&kClaimClosed;
+            if(next>=size_ || canceled_.load(std::memory_order_relaxed))return false;
+            const std::size_t end=next+std::min(chunk_,size_-next);
+            if(claimState_.compare_exchange_weak(state,(generation<<20)|static_cast<std::uint32_t>(end))) {
+                first=next;last=end;return true;
+            }
+        }
+    }
+    // Runs chunks of the given generation until none are left. Workers
+    // (helper=true) run at a raised priority only while they hold work.
+    void ExecuteClaims(std::uint32_t generation,bool helper) noexcept {
+        std::size_t first,last;
+        if(!ClaimChunk(generation,first,last))return;
+        const int idlePriority=helper ? sceKernelGetThreadCurrentPriority():0;
+        if(helper)(void)sceKernelChangeThreadPriority(0,110);
+        {
+            struct ExecutionScope {
+                bool previous{NativeSceneExecutingJobs()};
+                NativeSceneFloatingPointState previousFloatingPoint;
+                explicit ExecutionScope(const NativeSceneFloatingPointState& floatingPoint) {
+                    NativeSceneExecutingJobs()=true;
+                    floatingPoint.Apply();
+                }
+                ~ExecutionScope() {
+                    previousFloatingPoint.Apply();
+                    NativeSceneExecutingJobs()=previous;
+                }
+            } execution(floatingPoint_);
+            try {
+                do {
+                    for(auto index=first;index<last;++index)function_(context_,index);
+                } while(ClaimChunk(generation,first,last));
+            } catch(...) {
+                {
+                    std::lock_guard<std::mutex> guard(mutex_);
+                    if(!failure_)failure_=std::current_exception();
+                }
+                canceled_.store(true,std::memory_order_release);
+            }
+        }
+        if(helper)(void)sceKernelChangeThreadPriority(0,idlePriority);
+    }
+#endif
     void Execute() noexcept {
         struct ExecutionScope {
             bool previous{NativeSceneExecutingJobs()};
@@ -1899,6 +1984,12 @@ private:
                 std::lock_guard<std::mutex> guard(mutex_);
                 if(stopping_)return;
             }
+            if(ecstasySceneClaimPool) {
+                claimInFlight_.fetch_add(1);
+                ExecuteClaims(claimState_.load()>>20,true);
+                claimInFlight_.fetch_sub(1);
+                continue;
+            }
             Execute();
             bool last;
             {
@@ -1930,6 +2021,9 @@ private:
     std::condition_variable wake_,completed_;
 #if defined(__vita__)
     SceUID wakeSema_{-1},doneSema_{-1};
+    std::atomic<std::uint32_t> claimState_{kClaimClosed};
+    std::atomic<unsigned> claimInFlight_{0};
+    std::uint32_t claimGeneration_{};
 #endif
     std::vector<std::thread> workers_;
     void (*function_)(void*,std::size_t){};
