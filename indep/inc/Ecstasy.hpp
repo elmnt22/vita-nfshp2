@@ -982,6 +982,14 @@ public:
     const std::vector<const EditorMarkerSolidGeometry::Strip*>& SceneryRunStrips() const noexcept {return sceneryRunStrips_;}
     Phase State() const noexcept {return phase_;}
     std::size_t CapturedInstanceCount() const noexcept {return liveInstances_;}
+    // Diagnostic only (emit_twice): drop commands/instances/run strips
+    // appended after the given marks (a repeated capture pass is discarded).
+    void DiagCaptureOnly(const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* context) {
+        (void)CaptureInstance(localToWorld,view,context);(void)CaptureProjection(view);
+    }
+    void DiagTruncateCapture(std::size_t commands,std::size_t instances,std::size_t runStrips) noexcept {
+        commands_.resize(commands);liveInstances_=instances;sceneryRunStrips_.resize(runStrips);lastLightContext_=nullptr;lastLightKey_=0;
+    }
     std::size_t CapturedProjectionCount() const noexcept {return liveProjections_;}
     // Capture original eSetZWriteState in the native packet stream. The
     // returned state and bool normalization match PAL1033C8.
@@ -1072,9 +1080,15 @@ public:
         std::int32_t worldFrames=0,const SceneLightContext* lightContext=nullptr,
         const std::vector<std::array<float,16>>* boneMatrices=nullptr);
     // Static opaque scenery uses ordered bindings and GPU frustum clipping.
+    // projection: this view's CaptureProjection result taken by the caller
+    // (unchanged for the whole call sequence). lightKey: nonzero identifies
+    // lightContext's immutable contents (see CaptureInstance).
     bool RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
         const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
-        bool cullStrips=false);
+        bool cullStrips=false,const EcstasyDrawProjection* projection=nullptr,std::uint64_t lightKey=0);
+    // A fresh nonzero light key for a caller-owned context that stays
+    // unchanged while the key is used in this frame.
+    std::uint64_t NewLightKey() noexcept {return ++lightKeyCounter_;}
     // RenderOpaqueSceneryBatch in parts (strip runs on). Prepare (owner
     // thread) refreshes the batch cache and tests eligibility; Emit reads
     // only the prepared batch, the view and its inputs (any thread) and
@@ -1118,7 +1132,7 @@ private:
     std::uint64_t reusedOpaqueSceneryStrips_{};
     std::array<double,2> carShadowCaptureMilliseconds_{};
     const EcstasyDrawInstance& CaptureInstance(const float localToWorld[16],
-        const CarCinematicScreen& view,const SceneLightContext* lightContext=nullptr);
+        const CarCinematicScreen& view,const SceneLightContext* lightContext=nullptr,std::uint64_t lightKey=0);
     const EcstasyDrawProjection& CaptureProjection(const CarCinematicScreen& view);
     struct StripCaptureState;
     StripCaptureState CaptureStripState() const;
@@ -1143,6 +1157,8 @@ private:
     std::deque<EcstasyDrawProjection> capturedProjections_;
     std::size_t liveInstances_{},liveProjections_{};
     const SceneLightContext* lastLightContext_{}; // most recent owned instance snapshot
+    // Key of the source whose contents equal *lastLightContext_ (0 none).
+    std::uint64_t lastLightKey_{},lightKeyCounter_{};
     const EcstasyDrawProjection* lastProjection_{};
     std::uint32_t nextFeedbackGroup_{};
     // Building: commands_ is append-only storage. The logical command
@@ -1946,6 +1962,11 @@ inline std::array<std::uint64_t,5> ecstasyEmitCounters{};
 // Diagnostic-only cost bounds (Vita diag_nocars.txt / diag_noscenery.txt):
 // skip car / scenery rendering entirely. Never set by default.
 inline bool ecstasyDiagSkipCars=false,ecstasyDiagSkipScenery=false;
+// Diagnostic (Vita emit_twice.txt): repeat each main-view scenery emit loop
+// once (discarded) and time both passes: cold vs warm caches.
+inline bool ecstasyDiagEmitTwice=false;
+inline std::array<std::uint64_t,3> ecstasyDiagEmitTwiceMicros{}; // first, second, views
+inline std::array<std::uint64_t,10> ecstasyDiagEmitAblation{}; // micros[5], views[5]
 // Diagnostic census of car-part strips (PC HP2_CAR_CENSUS=1): renders,
 // models, strips, depth-sorted, 0x40 specular, 0x100 reflection, clip1,
 // boned strips, run breaks (state change between consecutive strips).

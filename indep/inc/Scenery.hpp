@@ -181,6 +181,15 @@ private:
     };
     std::vector<RenderDraw> drawScratch_;
     std::unordered_map<const EditorMarkerSolid*,OpaqueSceneryBatch> opaqueBatches_;
+    // Direct-mapped front of opaqueBatches_ (entries are never erased and
+    // unordered_map references are stable, so cached pointers stay valid).
+    std::array<std::pair<const EditorMarkerSolid*,OpaqueSceneryBatch*>,2048> opaqueBatchCache_{};
+    OpaqueSceneryBatch& OpaqueBatchFor(const EditorMarkerSolid* solid) {
+        const auto bits=reinterpret_cast<std::uintptr_t>(solid);
+        auto& slot=opaqueBatchCache_[((bits>>3)^(bits>>14))&2047u];
+        if(slot.first!=solid || !slot.second) {slot.first=solid;slot.second=&opaqueBatches_[solid];}
+        return *slot.second;
+    }
     std::vector<RenderNode> nodeScratch_;
     std::vector<RenderSectionCapture> sectionCaptureScratch_;
     std::vector<std::optional<SceneLightContext>> lightContextScratch_;

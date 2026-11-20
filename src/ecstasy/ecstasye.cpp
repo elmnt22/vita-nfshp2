@@ -1952,7 +1952,7 @@ void EcstasyFrame::AdvanceTextureAnimationsAfterCompletion(ResourceRegistry& res
 EcstasyFrame::EcstasyFrame()=default;
 
 const EcstasyDrawInstance& EcstasyFrame::CaptureInstance(const float localToWorld[16],
-    const CarCinematicScreen& view,const SceneLightContext* lightContext)
+    const CarCinematicScreen& view,const SceneLightContext* lightContext,std::uint64_t lightKey)
 {
     Require(phase_==Phase::Building && localToWorld && view.matricesCalculated,"Draw instance lost its active capture, transform or projection");
     if(liveInstances_==capturedInstances_.size())capturedInstances_.emplace_back();
@@ -1960,11 +1960,14 @@ const EcstasyDrawInstance& EcstasyFrame::CaptureInstance(const float localToWorl
     eMulMatrix(instance.localToClip.data(),localToWorld,view.matrices.worldToClip);
     instance.sharedLightContext=nullptr;
     if(!lightContext)instance.lightContext.reset();
-    else if(lastLightContext_ && (lastLightContext_==lightContext ||
+    else if(lastLightContext_ && ((lightKey && lightKey==lastLightKey_) || lastLightContext_==lightContext ||
         std::memcmp(lastLightContext_,lightContext,sizeof(SceneLightContext))==0)) {
+        // A matching key: these contents were compared/copied into
+        // *lastLightContext_ and neither has changed (the memcmp is equal).
         instance.lightContext.reset();instance.sharedLightContext=lastLightContext_;
+        lastLightKey_=lightKey;
     } else {
-        instance.lightContext=*lightContext;lastLightContext_=&*instance.lightContext;
+        instance.lightContext=*lightContext;lastLightContext_=&*instance.lightContext;lastLightKey_=lightKey;
     }
     ++liveInstances_;
     return instance;
@@ -3590,6 +3593,9 @@ int ecstasySceneJobsSerial=0; // Vita default 1 (main.cpp)
 // PC HP2_SCENE_JOBS_SERIAL=1 exercises the Vita serial paths.
 int ecstasySceneJobsSerial=[] {const char* value=std::getenv("HP2_SCENE_JOBS_SERIAL");return value && *value=='1' ? 1:0;}();
 #endif
+// Serial scenery capture: one projection snapshot per view and a light key
+// for the shared world context (exact; Vita scenery_fast_off.txt: 0).
+int ecstasyFastSceneryCapture=1;
 int ecstasyParallelSceneryPrepare=1;
 int ecstasySceneryFastMerge=1; // run union-box cull + template merge (Vita fastmerge_off.txt)
 // Solid strip template: a solid command equal to an earlier one of this
@@ -3975,7 +3981,7 @@ void EcstasyFrame::EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const E
 
 bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
     const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
-    bool cullStrips)
+    bool cullStrips,const EcstasyDrawProjection* viewProjection,std::uint64_t lightKey)
 {
     using SampleClock=std::chrono::steady_clock;
     const bool sampling=ecstasyEmitSampling;
@@ -3991,8 +3997,8 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
     sample(0);
     Require(phase_==Phase::Building && view.target && view.target->enabled && view.matricesCalculated,
         "Opaque scenery batch lost its live view");
-    const auto& instance=CaptureInstance(localToWorld,view,lightContext);
-    const auto& projection=CaptureProjection(view);
+    const auto& instance=CaptureInstance(localToWorld,view,lightContext,lightKey);
+    const auto& projection=viewProjection ? *viewProjection:CaptureProjection(view);
     sample(1);
     if(ecstasySceneryRuns) {
         EmitOpaqueSceneryRuns(batch,model,localToWorld,view,instance,projection,cullStrips,commands_,sceneryRunStrips_);
@@ -4939,7 +4945,7 @@ void EcstasyFrame::Release() noexcept
     animatedStrips_.clear();
     for (auto* strip:retainedStrips_)strip->pool->Complete(*strip);
     retainedStrips_.clear();
-    liveInstances_=0;liveProjections_=0;lastProjection_=nullptr;lastLightContext_=nullptr;
+    liveInstances_=0;liveProjections_=0;lastProjection_=nullptr;lastLightContext_=nullptr;lastLightKey_=0;
 }
 // Indexed texture fast decode (exact; PC HP2_VERIFY_TEX_DECODE=1 checks it
 // against the per-texel form). 0 = per-texel form only.

@@ -17,7 +17,8 @@
 #include <set>
 
 namespace { int32_t currentZoneNumber=-1; } // PAL3302B0.
-namespace hp2 { extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelSceneryPrepare; }
+extern uint32_t (*collisionWitnessClockMicros)();
+namespace hp2 { extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelSceneryPrepare; }
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
 
 SceneryInstance* sceneryFindInstanceByIndex(const Scenery* scenery,int32_t section,int32_t instance)
@@ -936,6 +937,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     const auto splitPrepared=std::chrono::steady_clock::now();
     auto* resources=models_->resourceRegistry;
     std::optional<SceneLightContext> worldContext;
+    std::uint64_t worldContextKey=0; // frame light key of *worldContext
     std::vector<std::size_t> lightJobs;
     // Lighting is per-draw pure owner input (no shared writes), so the pool
     // takes it once there is enough work to amortize the wakeup.
@@ -973,7 +975,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         if(!(draw.identity || (draw.model->solid && (draw.model->solid->renderFlags&0x1c0u))))return nullptr;
         Require(resources,"Scenery light context lost its canonical resource registry");
         if(draw.identity) {
-            if(!worldContext)worldContext=frame.SetupWorldLightContext(*resources,view);
+            if(!worldContext) {worldContext=frame.SetupWorldLightContext(*resources,view);worldContextKey=frame.NewLightKey();}
             return &*worldContext;
         }
         // PAL150F9C calls elSetupLightContext for IsLit models;
@@ -1113,6 +1115,43 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     static std::array<std::array<std::uint64_t,5>,2> emitCounterViews{};
     if(sampleEmit)hp2::ecstasyEmitCounters={};
     hp2::ecstasyEmitSampleMs={};
+    const bool emitTwice=hp2::ecstasyDiagEmitTwice && view.id==1 && !sampleEmit && collisionWitnessClockMicros && !verifying;
+    const auto twiceCommands=frame.Commands().size(),twiceInstances=frame.CapturedInstanceCount(),twiceRuns=frame.SceneryRunStrips().size();
+    const auto twiceSplit=splitBatched,twiceRejected=splitRejected,twiceRejectedStrips=splitRejectedStrips,
+        twiceOver=splitOverLimit,twiceOverStrips=splitOverLimitStrips,twiceModelCommands=splitModelCommands;
+    const auto twiceModelMs=splitModelMs;
+    static unsigned twiceViewCounter=0;
+    const unsigned ablation=emitTwice ? (twiceViewCounter++)%5u:0u;
+    const EcstasyDrawProjection* viewProjection=nullptr;
+    const bool fastSceneryCapture=hp2::ecstasyFastSceneryCapture!=0;
+    for(int twicePass=emitTwice ? 0:1;twicePass<2;++twicePass) {
+    const std::uint32_t twiceStart=emitTwice ? collisionWitnessClockMicros():0u;
+    if(emitTwice && twicePass==0) {
+        // Diagnostic ablation pass (discarded): 0 full batched path,
+        // 1 prepare+capture (no emit), 2 prepare+allocate/fill, 3 full
+        // without strip culling, 4 lookup+prepare.
+        const auto& projection=frame.SceneryProjection(view);(void)projection;
+        for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
+            auto& draw=draws[drawIndex];
+            std::optional<SceneLightContext> localContext;
+            const SceneLightContext* context=lightContextFor(drawIndex,localContext);
+            const auto* solid=draw.model->solid;
+            const bool stripCull=draw.clip==1 && hp2::ecstasySceneryStripCull && hp2::ecstasySceneryRuns;
+            const bool gpuClip=draw.clip==1 && solid && solid->geometry &&
+                (stripCull || solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips);
+            if(!(solid && (draw.clip==2 || gpuClip)))continue;
+            auto& batch=opaqueBatches_[draw.model->solid];
+            if(ablation==0 || ablation==3) {(void)frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context,ablation==0 && stripCull);continue;}
+            if(!frame.PrepareOpaqueSceneryBatch(batch,*draw.model,context!=nullptr) || ablation==4)continue;
+            if(ablation==1) {frame.DiagCaptureOnly(draw.matrix.data(),view,context);continue;}
+            auto& instance=frame.AllocateInstance();
+            EcstasyFrame::FillInstance(instance,draw.matrix.data(),view,context);
+        }
+        hp2::ecstasyDiagEmitAblation[ablation]+=collisionWitnessClockMicros()-twiceStart;
+        ++hp2::ecstasyDiagEmitAblation[5+ablation];
+        frame.DiagTruncateCapture(twiceCommands,twiceInstances,twiceRuns);
+        continue;
+    }
     for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
         auto& draw=draws[drawIndex];
         std::optional<SceneLightContext> localContext;
@@ -1129,9 +1168,14 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         const bool gpuClip=draw.clip==1 && solid && solid->geometry &&
             (stripCull || solid->geometry->strips.size()<=nativeGpuSceneryClipMaximumStrips);
         if(solid && (draw.clip==2 || gpuClip)) {
-            auto& batch=opaqueBatches_[draw.model->solid];
+            auto& batch=OpaqueBatchFor(draw.model->solid);
             const auto commandsBefore=frame.Commands().size();
-            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context,stripCull)) {
+            // The view projection is captured once per view (the serial
+            // draws capture the same snapshot); the world context has a key.
+            if(!viewProjection)viewProjection=&frame.SceneryProjection(view);
+            if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context,stripCull,
+                fastSceneryCapture ? viewProjection:nullptr,
+                fastSceneryCapture && worldContext && context==&*worldContext ? worldContextKey:0)) {
                 if(verifying)serialRanges[drawIndex]={commandsBefore,frame.Commands().size()};
                 ++splitBatched;continue;
             }
@@ -1139,6 +1183,19 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         } else if(solid && solid->geometry) {++splitOverLimit;splitOverLimitStrips+=solid->geometry->strips.size();}
         }
         renderRejected(drawIndex,context);
+    }
+    if(emitTwice) {
+        hp2::ecstasyDiagEmitTwiceMicros[static_cast<std::size_t>(twicePass)]+=collisionWitnessClockMicros()-twiceStart;
+        (void)twiceSplit;(void)twiceRejected;(void)twiceRejectedStrips;(void)twiceOver;(void)twiceOverStrips;(void)twiceModelCommands;(void)twiceModelMs;
+        if(false) {
+        } else if(++hp2::ecstasyDiagEmitTwiceMicros[2]>=150) {
+            auto& t=hp2::ecstasyDiagEmitTwiceMicros;auto& a=hp2::ecstasyDiagEmitAblation;
+            const auto per=[&](int m) {return a[5+m] ? a[m]/1000.0/a[5+m]:0.0;};
+            char text[200];std::snprintf(text,sizeof(text),"views=%llu real_ms=%.3f full=%.3f capture=%.3f alloc_fill=%.3f no_cull=%.3f prepare=%.3f",
+                static_cast<unsigned long long>(t[2]),t[1]/1000.0/t[2],per(0),per(1),per(2),per(3),per(4));
+            platform::RecordSessionEvent("render.emit_ablation",text);t={};a={};
+        }
+    }
     }
     hp2::ecstasyEmitSampling=false;
     if(sampleEmit) {

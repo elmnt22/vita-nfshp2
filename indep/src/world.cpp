@@ -680,11 +680,13 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
     for (CollisionShape* shape=system->space->root.next;shape!=&system->space->root;shape=shape->next)
         if (shape->active && shape->dirty) collisionSystemFindPairs(system,system->participants[shape->id]);
     solvePhase(0);
+    collisionPairPredictQueue(system);
     for (pair=system->pairRoot.next;pair!=&system->pairRoot;pair=pair->next) {
         pair->processedCount=0;
         collisionPairQueueContact(system,pair);
-        if (system->result!=COLLISION_SYSTEM_OK) return system->result;
+        if (system->result!=COLLISION_SYSTEM_OK) {collisionPairPredictQueueEnd(system);return system->result;}
     }
+    collisionPairPredictQueueEnd(system);
     solvePhase(1);
     system->responseIterations=0;
     while (system->contactRoot.next!=&system->contactRoot && system->responseIterations<20) {
