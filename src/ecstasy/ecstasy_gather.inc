@@ -485,8 +485,23 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     const auto& sourceCommands=frame.Commands();
     const auto& runStrips=frame.SceneryRunStrips();
     std::uint32_t runResume=0; // next unexpanded strip of sourceCommands[commandAt]
+#if defined(__GNUC__)
+    std::size_t prefetchedCommand=0;
+#endif
     for (std::size_t commandAt=0;commandAt<sourceCommands.size();) {
         const EcstasyDrawCommand* current=&sourceCommands[commandAt];
+#if defined(__GNUC__)
+        // Vita main RAM is latency bound (~176 MB/s streaming without
+        // prefetch): request the command and instance a few draws ahead.
+        if(commandAt+3<sourceCommands.size() && prefetchedCommand<commandAt+3) {
+            prefetchedCommand=commandAt+3;
+            const auto* ahead=reinterpret_cast<const char*>(&sourceCommands[prefetchedCommand]);
+            for(std::size_t line=0;line<sizeof(EcstasyDrawCommand);line+=32)__builtin_prefetch(ahead+line);
+            if(const auto* instance=sourceCommands[commandAt+2].instance)
+                for(std::size_t line=0;line<sizeof(float)*16;line+=32)
+                    __builtin_prefetch(reinterpret_cast<const char*>(instance)+line);
+        }
+#endif
         if(current->sceneryRunCount) {
             // Each strip of the run is the per-strip command it replaced.
             // Cached strips need no copy; a strip that leaves the cached

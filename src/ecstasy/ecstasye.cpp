@@ -1936,8 +1936,14 @@ const EcstasyDrawInstance& EcstasyFrame::CaptureInstance(const float localToWorl
     if(liveInstances_==capturedInstances_.size())capturedInstances_.emplace_back();
     auto& instance=capturedInstances_[liveInstances_];
     eMulMatrix(instance.localToClip.data(),localToWorld,view.matrices.worldToClip);
-    if(lightContext)instance.lightContext=*lightContext;
-    else instance.lightContext.reset();
+    instance.sharedLightContext=nullptr;
+    if(!lightContext)instance.lightContext.reset();
+    else if(lastLightContext_ && (lastLightContext_==lightContext ||
+        std::memcmp(lastLightContext_,lightContext,sizeof(SceneLightContext))==0)) {
+        instance.lightContext.reset();instance.sharedLightContext=lastLightContext_;
+    } else {
+        instance.lightContext=*lightContext;lastLightContext_=&*instance.lightContext;
+    }
     ++liveInstances_;
     return instance;
 }
@@ -2473,9 +2479,13 @@ void EcstasyFrame::AttachSolidPolys()
     }
     const auto output=rangeEnd-alphaCount;
     auto partMark=attachStarted;
+    // Part timers sample every 8th flush (scaled): a Vita clock read costs
+    // ~0.76 us and there are ~85 flushes per frame.
+    const bool sampleParts=(ecstasyAttachSolidCalls&7u)==0;
     const auto part=[&](int index) {
+        if(!sampleParts)return;
         const auto now=std::chrono::steady_clock::now();
-        ecstasyAttachSolidPartMs[index]+=std::chrono::duration<double,std::milli>(now-partMark).count();
+        ecstasyAttachSolidPartMs[index]+=8.0*std::chrono::duration<double,std::milli>(now-partMark).count();
         partMark=now;
     };
     part(0);
@@ -3674,6 +3684,7 @@ void EcstasyFrame::FillInstance(EcstasyDrawInstance& instance,const float localT
     const CarCinematicScreen& view,const SceneLightContext* lightContext)
 {
     eMulMatrix(instance.localToClip.data(),localToWorld,view.matrices.worldToClip);
+    instance.sharedLightContext=nullptr;
     if(lightContext)instance.lightContext=*lightContext;
     else instance.lightContext.reset();
 }
@@ -3772,13 +3783,26 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
     const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
     bool cullStrips)
 {
-    if(!PrepareOpaqueSceneryBatch(batch,model,lightContext!=nullptr))return false;
+    using SampleClock=std::chrono::steady_clock;
+    const bool sampling=ecstasyEmitSampling;
+    SampleClock::time_point mark{};
+    const auto sample=[&](std::size_t index) {
+        if(!sampling)return;
+        const auto now=SampleClock::now();
+        if(index<3)ecstasyEmitSampleMs[index]+=std::chrono::duration<double,std::milli>(now-mark).count();
+        mark=now;
+    };
+    sample(3);
+    if(!PrepareOpaqueSceneryBatch(batch,model,lightContext!=nullptr)) {sample(0);return false;}
+    sample(0);
     Require(phase_==Phase::Building && view.target && view.target->enabled && view.matricesCalculated,
         "Opaque scenery batch lost its live view");
     const auto& instance=CaptureInstance(localToWorld,view,lightContext);
     const auto& projection=CaptureProjection(view);
+    sample(1);
     if(ecstasySceneryRuns) {
         EmitOpaqueSceneryRuns(batch,model,localToWorld,view,instance,projection,cullStrips,commands_,sceneryRunStrips_);
+        sample(2);
         return true;
     }
     const auto& geometry=*model.solid->geometry;
@@ -4524,7 +4548,7 @@ void EcstasyFrame::Release() noexcept
     animatedStrips_.clear();
     for (auto* strip:retainedStrips_)strip->pool->Complete(*strip);
     retainedStrips_.clear();
-    liveInstances_=0;liveProjections_=0;lastProjection_=nullptr;
+    liveInstances_=0;liveProjections_=0;lastProjection_=nullptr;lastLightContext_=nullptr;
 }
 std::vector<std::uint8_t> DecodeTextureMipRgba(const TextureInfo& texture,
     std::uint32_t level,std::size_t sourceOffset,std::size_t sourceBytes,

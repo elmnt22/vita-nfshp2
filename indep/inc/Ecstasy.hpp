@@ -798,6 +798,9 @@ enum class EcstasyCarShadow : std::uint8_t { None,Sun,Road };
 struct EcstasyDrawInstance {
     std::array<float,16> localToClip{};
     std::optional<SceneLightContext> lightContext;
+    // Byte-identical to an earlier instance's snapshot in the same frame
+    // (world-lit scenery): borrow it instead of copying 280 bytes again.
+    const SceneLightContext* sharedLightContext{};
 };
 struct EcstasyDrawProjection {
     std::array<std::array<float,16>,3> matrices{};
@@ -858,7 +861,9 @@ struct EcstasyDrawCommand {
     std::uint64_t alphaGroup{};
     std::array<std::uint8_t,4> vertexOrder{{0,1,2,3}};
     const SceneLightContext* LightContext() const noexcept {
-        return instance && instance->lightContext ? &*instance->lightContext:nullptr;
+        if(!instance)return nullptr;
+        if(instance->sharedLightContext)return instance->sharedLightContext;
+        return instance->lightContext ? &*instance->lightContext:nullptr;
     }
     const std::array<float,16>& LocalToClip() const noexcept {
         static constexpr std::array<float,16> empty{};
@@ -1115,6 +1120,7 @@ private:
     std::deque<EcstasyDrawInstance> capturedInstances_;
     std::deque<EcstasyDrawProjection> capturedProjections_;
     std::size_t liveInstances_{},liveProjections_{};
+    const SceneLightContext* lastLightContext_{}; // most recent owned instance snapshot
     const EcstasyDrawProjection* lastProjection_{};
     std::uint32_t nextFeedbackGroup_{};
     // Building: commands_ is append-only storage. The logical command
@@ -1903,6 +1909,10 @@ inline NativeSceneWorkerPool& NativeSceneThreadPool() {
 // thread pool is constructed and there are no locks/condition variables.
 // Vita diagnostic (scene_jobs_serial.txt): run every scene job inline.
 extern int ecstasySceneJobsSerial;
+// Sampled scenery emit split (diagnostic): RenderOpaqueSceneryBatch adds
+// prepare / capture / emit ms here while the caller has sampling enabled.
+inline bool ecstasyEmitSampling=false;
+inline std::array<double,3> ecstasyEmitSampleMs{};
 template<class Task>
 void RunNativeSceneJobs(std::size_t count,Task&& task,
     std::size_t minimumParallelJobs=512,unsigned requestedWorkers=0)
