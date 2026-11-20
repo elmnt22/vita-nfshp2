@@ -738,6 +738,8 @@ void collisionPairPredictQueueEnd(CollisionSystem* system)
     queuePredictionActive=false;
 }
 
+extern uint64_t collisionSplitMicros[8],collisionSplitCounts[8];
+uint32_t collisionSplitNow();
 static int32_t queueWitnessQuery(CollisionSystem* system, CollisionPair* pair, const float* frames[4])
 {
     QueuePrediction* entry=nullptr;
@@ -752,7 +754,10 @@ static int32_t queueWitnessQuery(CollisionSystem* system, CollisionPair* pair, c
     }
     if (!entry) {
         if (queuePredictionActive) ++collisionQueueFallbacks;
-        return collisionWitnessQuery(&pair->witness,frames[0],frames[2],frames[1],frames[3],system->randomState);
+        const uint32_t start=collisionSplitNow();
+        const int32_t result=collisionWitnessQuery(&pair->witness,frames[0],frames[2],frames[1],frames[3],system->randomState);
+        collisionSplitMicros[1]+=collisionSplitNow()-start;++collisionSplitCounts[1];
+        return result;
     }
     const auto apply=[&](CollisionWitness& witness,uint32_t& state) {
         witness=entry->witness;
@@ -789,7 +794,10 @@ void collisionPairQueueContact(CollisionSystem* system, CollisionPair* pair)
     }
     const float* frames[4];
     queueFrames(pair,frames);
-    if (queueWitnessQuery(system,pair,frames)!=2) return;
+    const uint32_t queryStart=collisionSplitNow();
+    const int32_t queued=queueWitnessQuery(system,pair,frames);
+    collisionSplitMicros[0]+=collisionSplitNow()-queryStart;++collisionSplitCounts[0];
+    if (queued!=2) return;
     // PAL1D6744/1D6754 bypasses suppression for either static participant.
     // A suppressed moving car must still resolve contacts with the track.
     if (first->active && second->active &&

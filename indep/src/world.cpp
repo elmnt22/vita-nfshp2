@@ -654,6 +654,8 @@ uint16_t worldCalculateDebugChecksum(World* world, uint32_t seed,
 }
 
 void collisionSpeculationArm(int on);
+extern uint64_t collisionSplitMicros[8],collisionSplitCounts[8];
+uint32_t collisionSplitNow();
 CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed)
 {
     (void)elapsed;
@@ -693,7 +695,9 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         CollisionQueuedContact* contact=system->contactRoot.next;
         CollisionParticipant* first=contact->pair->first;
         CollisionParticipant* second=contact->pair->second;
+        const uint32_t resolveStart=collisionSplitNow();
         collisionContactResolve(system,contact);
+        collisionSplitMicros[4]+=collisionSplitNow()-resolveStart;++collisionSplitCounts[4];
         if (system->result!=COLLISION_SYSTEM_OK) return system->result;
         ++contact->pair->processedCount;
         if (first->shape->active) collisionQueueRemoveShape(system,first->shape);
@@ -709,7 +713,9 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
             else if (owner->shape->active && owner->shape->dirty) affected[affectedCount++]=owner;
         }
         ++system->responseIterations;
+        const uint32_t pairsStart=collisionSplitNow();
         for (size_t index=0;index<affectedCount;++index) collisionSystemFindPairs(system,affected[index]);
+        collisionSplitMicros[5]+=collisionSplitNow()-pairsStart;++collisionSplitCounts[5];
         if (affectedCount) collisionPairPredictQueue(system,affected,affectedCount);
         for (pair=system->pairRoot.next;pair!=&system->pairRoot;pair=pair->next)
             if (pair->processedCount<2)
@@ -732,6 +738,7 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         impact=next;
     }
     solvePhase(3);
+    ++collisionSplitCounts[7];
     return system->result;
 }
 
