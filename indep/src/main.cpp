@@ -77,6 +77,7 @@ extern uint64_t collisionWitnessKindMicros[9],collisionWitnessKindSteps[9];
 static double soundUpdatePeakMs=0;
 extern std::array<double,8> carMoverModeMs;
 extern std::array<std::uint32_t,8> carMoverModeCalls;
+extern std::atomic<uint64_t> collisionWitnessCacheChecks,collisionWitnessCacheMismatches;
 namespace hp2 { void InitDisplaySystem(const GameResources& files,GameTime& clock); }
 extern std::array<double,4> worldCollisionSubPhaseMs; // indep/src/world.cpp diagnostic
 extern std::array<double,4> worldCollisionSolveMs;
@@ -1419,6 +1420,13 @@ bool ApplicationRuntime::Tick()
                 ::collisionFindQueries=::collisionSeparateCalls=::collisionSeparateQueries=0;
                 ::collisionSpecSeparations=::collisionSpecRounds=::collisionSpecAccepted=::collisionSpecWasted=::collisionSpecMispredicts=0;
                 s.host.RecordSessionEvent("render.collision_solve",detail);
+                {
+                    if(const auto checks=::collisionWitnessCacheChecks.load()) {
+                        std::snprintf(detail,sizeof(detail),"checks=%llu mismatches=%llu",static_cast<unsigned long long>(checks),
+                            static_cast<unsigned long long>(::collisionWitnessCacheMismatches.load()));
+                        s.host.RecordSessionEvent("render.witness_cache_verify",detail);
+                    }
+                }
                 {
                     const double runs=::collisionPoolRuns ? static_cast<double>(::collisionPoolRuns):1.0;
                     std::snprintf(detail,sizeof(detail),"runs_per_frame=%.1f main_tasks=%.1f helper_tasks=%.1f run_us=%.1f wait_us=%.1f main_task_us=%.1f helper_task_us=%.1f",
