@@ -54,7 +54,7 @@ extern int collisionWitnessWarmProbe;
 extern int collisionQueuePrediction;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
+namespace hp2 { extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -723,6 +723,10 @@ int main(int, char**)
         // inline jobs measured faster on heavy tracks (track 64 traverse
         // 5.5 -> 1.4 ms/view). scene_jobs_parallel.txt restores the pool.
         hp2::ecstasySceneJobsSerial = 1;
+        if (sceIoGetstat((std::string(kDataDirectory) + "/scene_claim_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasySceneClaimPool = 0;
+            log.Line("vita.diag", "scene claim pool off");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/scene_jobs_parallel.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneJobsSerial = 0;
             log.Line("vita.diag", "scene jobs parallel");
@@ -764,6 +768,11 @@ int main(int, char**)
             collisionWitnessBench = 1;
             collisionWitnessBenchLog = [](const char* text) { benchLog->Line("vita.witness_bench", text); };
             log.Line("vita.diag", "witness bench armed");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/requeue_pred_off.txt").c_str(), &probe) >= 0) {
+            extern int collisionRequeuePrediction;
+            collisionRequeuePrediction = 0;
+            log.Line("vita.diag", "requeue prediction off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/sep_pipe_off.txt").c_str(), &probe) >= 0) {
             extern int collisionSeparatePipelined;

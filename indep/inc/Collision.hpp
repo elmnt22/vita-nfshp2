@@ -206,7 +206,7 @@ int32_t collisionPairObsolete(const CollisionSystem* system, const CollisionPair
 void collisionQueueRemoveShape(CollisionSystem* system, const CollisionShape* shape);
 void collisionPairQueueContact(CollisionSystem* system, CollisionPair* pair);
 // Exact speculative witness queries for the initial queue pass (helpers).
-void collisionPairPredictQueue(CollisionSystem* system);
+void collisionPairPredictQueue(CollisionSystem* system,CollisionParticipant* const* affected=nullptr,size_t affectedCount=0);
 void collisionPairPredictQueueEnd(CollisionSystem* system);
 void collisionSystemFindPairs(CollisionSystem* system, CollisionParticipant* participant);
 CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed);

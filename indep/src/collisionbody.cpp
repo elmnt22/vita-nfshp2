@@ -695,12 +695,26 @@ void runQueuePrediction(void* context,unsigned index)
 }
 }
 
-void collisionPairPredictQueue(CollisionSystem* system)
+// Resolve-loop requeues (affected!=nullptr): the same exactness argument
+// holds. A requeue pass reads the post-response poses and writes only the
+// queued pair's witness, the random state, contacts and car tick stamps;
+// a pair queued twice in one pass (both participants affected) uses the
+// prediction once and queries serially the second time.
+int collisionRequeuePrediction=1; // Vita requeue_pred_off.txt: 0
+void collisionPairPredictQueue(CollisionSystem* system,CollisionParticipant* const* affected,size_t affectedCount)
 {
     queuePredictionActive=false;
     if (!collisionQueuePrediction || collisionHelperCount()==0) return;
+    if (affected && !collisionRequeuePrediction) return;
     queuePredictions.clear();
     for (CollisionPair* pair=system->pairRoot.next;pair!=&system->pairRoot;pair=pair->next) {
+        if (affected) {
+            if (pair->processedCount>=2) continue;
+            bool involved=false;
+            for (size_t index=0;index<affectedCount && !involved;++index)
+                involved=pair->first==affected[index] || pair->second==affected[index];
+            if (!involved) continue;
+        }
         if (!collisionParticipantEligible(system,pair->first) || !collisionParticipantEligible(system,pair->second)) continue;
         QueuePrediction entry{};
         entry.pair=pair;queueFrames(pair,entry.frames);
