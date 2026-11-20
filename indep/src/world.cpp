@@ -710,12 +710,14 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         }
         ++system->responseIterations;
         for (size_t index=0;index<affectedCount;++index) collisionSystemFindPairs(system,affected[index]);
+        if (affectedCount) collisionPairPredictQueue(system,affected,affectedCount);
         for (pair=system->pairRoot.next;pair!=&system->pairRoot;pair=pair->next)
             if (pair->processedCount<2)
                 for (size_t index=0;index<affectedCount;++index)
                     if (pair->first==affected[index] || pair->second==affected[index]) {
                         collisionPairQueueContact(system,pair);
                     }
+        collisionPairPredictQueueEnd(system);
         if (system->result!=COLLISION_SYSTEM_OK) return system->result;
     }
     solvePhase(2);
