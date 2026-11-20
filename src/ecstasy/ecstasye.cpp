@@ -51,12 +51,18 @@
 #include <vector>
 #include <atomic>
 #include <exception>
+#include <thread>
 #include <cstdio>
 #include <sstream>
 #include <iterator>
 #include <list>
 #include <memory_resource>
 #include <type_traits>
+#include <cstddef>
+unsigned collisionHelperPoolSize();
+void collisionHelperPublish(unsigned count,void (*function)(void*,unsigned),void* context);
+bool collisionHelperClaim(unsigned& index);
+void collisionHelperClose();
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -3597,6 +3603,22 @@ int ecstasySceneJobsSerial=[] {const char* value=std::getenv("HP2_SCENE_JOBS_SER
 // Serial scenery capture: one projection snapshot per view and a light key
 // for the shared world context (exact; Vita scenery_fast_off.txt: 0).
 int ecstasyFastSceneryCapture=1;
+// Rear-view (view3) scenery captured on a collision helper concurrently with
+// view1 (exact; see SceneryResources::AsyncCapture). Off by default while
+// a Vita hang is investigated (Vita async_mirror.txt: on); PC
+// HP2_ASYNC_MIRROR=1, =2 also verifies each one.
+int ecstasyAsyncMirrorScenery=[] {
+#if defined(__vita__) || defined(__SWITCH__)
+    return 0;
+#else
+    const char* value=std::getenv("HP2_ASYNC_MIRROR");return value ? std::atoi(value):0;
+#endif
+}();
+// views, merged, state/matrix fallbacks, aborts, inline runs, wait us, job us, verify mismatches
+std::uint64_t ecstasyAsyncMirrorStats[12]{}; // [8..11] abort reasons
+// Diagnostic phase (Vita watchdog): main 1 launched, 2 finishing, 3 closing,
+// 4 merged/done; job +10: 10 waiting for view1 zones, 11 rendering, 12 done.
+std::atomic<int> ecstasyAsyncMirrorPhase{0};
 int ecstasyParallelSceneryPrepare=1;
 int ecstasySceneryFastMerge=1; // run union-box cull + template merge (Vita fastmerge_off.txt)
 // Solid strip template: a solid command equal to an earlier one of this
@@ -3757,6 +3779,54 @@ void EcstasyFrame::FillInstance(EcstasyDrawInstance& instance,const float localT
     if(lightContext)instance.lightContext=*lightContext;
     else instance.lightContext.reset();
 }
+
+EcstasyFrame& EcstasyFrame::AsyncSceneryFrame(std::size_t index)
+{
+    auto& slot=asyncScenery_[index&1u];
+    if(!slot)slot=std::make_unique<EcstasyFrame>();
+    return *slot;
+}
+void EcstasyFrame::PrepareAsyncScenery(EcstasyFrame& aux) const
+{
+    Require(phase_==Phase::Building,"Async scenery capture needs a building frame");
+    aux.commands_.clear();aux.sceneryRunStrips_.clear();
+    aux.liveInstances_=0;aux.liveProjections_=0;aux.lastProjection_=nullptr;aux.lastLightContext_=nullptr;aux.lastLightKey_=0;
+    aux.zWriteEnabled_=zWriteEnabled_;aux.dashboardProjection_=dashboardProjection_;aux.inGameMaterials_=inGameMaterials_;
+    aux.environment_=environment_;aux.environmentApplicationState_=environmentApplicationState_;
+    aux.phase_=Phase::Building;
+}
+bool EcstasyFrame::AsyncSceneryStateMatches(const EcstasyFrame& aux) const noexcept
+{
+    return aux.zWriteEnabled_==zWriteEnabled_ && aux.dashboardProjection_==dashboardProjection_ &&
+        aux.inGameMaterials_==inGameMaterials_ && aux.environment_==environment_ &&
+        aux.environmentApplicationState_==environmentApplicationState_;
+}
+#if !defined(__vita__) && !defined(__SWITCH__)
+bool EcstasyFrame::AsyncSceneryCommandsEqual(const EcstasyFrame& a,const EcstasyFrame& b)
+{
+    if(a.commands_.size()!=b.commands_.size())return false;
+    for(std::size_t at=0;at<a.commands_.size();++at) {
+        const auto& x=a.commands_[at];const auto& y=b.commands_[at];
+        bool same=x.kind==y.kind && x.strip==y.strip && x.model==y.model && x.texture==y.texture &&
+            x.view==y.view && x.target==y.target && x.drawFlags==y.drawFlags && x.lightMaterial==y.lightMaterial &&
+            x.clipClass==y.clipClass && std::memcmp(&x.textureQScale,&y.textureQScale,4)==0 &&
+            x.cachedOpaqueScenery==y.cachedOpaqueScenery && x.nativeRenderEggState==y.nativeRenderEggState &&
+            x.sceneryRunCount==y.sceneryRunCount && x.zWriteEnabled==y.zWriteEnabled && x.alphaGroup==y.alphaGroup &&
+            x.feedbackGroup==y.feedbackGroup && x.rasterState==y.rasterState &&
+            (x.clipToScreen!=nullptr)==(y.clipToScreen!=nullptr) && (x.instance!=nullptr)==(y.instance!=nullptr);
+        if(same && x.clipToScreen)same=*x.clipToScreen==*y.clipToScreen;
+        if(same && x.instance) {
+            same=x.instance->localToClip==y.instance->localToClip &&
+                (x.LightContext()!=nullptr)==(y.LightContext()!=nullptr) &&
+                (!x.LightContext() || std::memcmp(x.LightContext(),y.LightContext(),sizeof(SceneLightContext))==0);
+        }
+        for(std::uint32_t strip=0;same && strip<x.sceneryRunCount;++strip)
+            same=a.sceneryRunStrips_[x.sceneryRunFirst+strip]==b.sceneryRunStrips_[y.sceneryRunFirst+strip];
+        if(!same)return false;
+    }
+    return true;
+}
+#endif
 
 std::uint32_t EcstasyFrame::AppendSceneryRunStrips(const std::vector<const EditorMarkerSolidGeometry::Strip*>& strips)
 {
@@ -4631,12 +4701,88 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         worldSplit[part]+=std::chrono::duration<double,std::milli>(now-worldSplitMark).count();
         worldSplitMark=now;
     };
+    // Asynchronous rear-view scenery (exact). Launched before view1 so it
+    // overlaps view1's scenery and world tail; merged at view3's position.
+    struct AsyncMirrorJob {
+        SceneryResources* scenery{};const CarCinematicScreen* view{};EcstasyFrame* aux{};
+        std::uint32_t mask{};std::int32_t worldFrames{};
+        SceneryResources::AsyncCapture capture;
+        std::atomic<int> collectReady{0};
+        std::exception_ptr failure;
+        std::uint32_t micros{};
+        static void Run(void* context,unsigned index) {
+            if(index!=0)return;
+            auto& job=*static_cast<AsyncMirrorJob*>(context);
+            const auto started=std::chrono::steady_clock::now();
+            ecstasyAsyncMirrorPhase.fetch_add(10);
+#if !defined(__vita__) && !defined(__SWITCH__)
+            // Race testing: start late so the job overlaps view1's tail.
+            static const int delay=[] {const char* v=std::getenv("HP2_ASYNC_MIRROR_DELAY_US");return v ? std::atoi(v):0;}();
+            if(delay>0)std::this_thread::sleep_for(std::chrono::microseconds(delay));
+#endif
+            try {job.scenery->Render(*job.view,*job.aux,job.mask,job.worldFrames,true,&job.capture);}
+            catch(...) {job.failure=std::current_exception();}
+            ecstasyAsyncMirrorPhase.fetch_add(2);
+            job.micros=static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-started).count());
+        }
+    };
+    struct AsyncMirror {
+        AsyncMirrorJob job;
+        bool launched{},finished{};
+        CarCinematicScreen screen{};CarCinematicViewFrame camera{};
+        void Finish() {
+            if(!launched || finished)return;
+            finished=true;
+            job.collectReady.store(1,std::memory_order_release);
+            ecstasyAsyncMirrorPhase.fetch_add(1);
+            unsigned index;
+            while(collisionHelperClaim(index)) {
+                if(index==0)++ecstasyAsyncMirrorStats[4];
+                AsyncMirrorJob::Run(&job,index);
+            }
+            ecstasyAsyncMirrorPhase.fetch_add(1);
+            collisionHelperClose();
+            ecstasyAsyncMirrorPhase.fetch_add(1);
+        }
+        ~AsyncMirror() {if(job.scenery)job.scenery->SetCollectSignal(nullptr);Finish();}
+    } asyncMirror;
+    if(ecstasyAsyncMirrorScenery && scenery && scene.emitRaceGeometry && scene.parameters &&
+        active(views.screens[1]) && !active(views.screens[2]) && active(views.screens[3]) &&
+        views.screens[3].id==3 && collisionHelperPoolSize()>0) {
+        auto& view=views.screens[3];
+        Require(ecstasyViewCalculateMatrices(&views,&view,0,0,0)==CAR_CINEMATIC_OK,
+            "Original world projection could not be calculated");
+        std::uint32_t mask=(views.presentationLayout==3 || views.presentationLayout==4) ? 0x10u:0x11u;
+        if(scene.parameters->reverse==0)mask|=8u;
+        if(scene.parameters->reverse==1)mask|=4u;
+        auto& aux=frame.AsyncSceneryFrame(0);
+        frame.PrepareAsyncScenery(aux);
+        auto& job=asyncMirror.job;
+        job.scenery=scenery;job.view=&view;job.aux=&aux;job.mask=mask;job.worldFrames=scene.clock->worldTimeFrames;
+        asyncMirror.screen=view;asyncMirror.camera=view.view->current;
+        job.capture.collectReady=&job.collectReady; // the job waits for view1's zone lookup
+        scenery->SetCollectSignal(&job.collectReady);
+        asyncMirror.launched=true;
+        ++ecstasyAsyncMirrorStats[0];
+        ecstasyAsyncMirrorPhase.store(1);
+        collisionHelperPublish(2,&AsyncMirrorJob::Run,&job);
+    }
     for(std::size_t i=1;i<10;++i) {
         auto& view=views.screens[i];if(!active(view))continue;
         worldSplitMark=CaptureClock::now();
         // PAL113030..11304C supplies32 only to the cubemap culling far
         // override. Raster/depth projection retains the actual camera range.
         const float clipFar=view.id>=4 && view.id<10 ? 32.0f:0.0f;
+        const bool mergeMirror=asyncMirror.launched && i==3;
+        if(asyncMirror.launched && i>=2 && !asyncMirror.finished) {
+            const auto waitStarted=std::chrono::steady_clock::now();
+            asyncMirror.Finish();
+            ecstasyAsyncMirrorStats[5]+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-waitStarted).count());
+            ecstasyAsyncMirrorStats[6]+=asyncMirror.job.micros;
+            if(asyncMirror.job.failure)std::rethrow_exception(asyncMirror.job.failure);
+        }
         Require(ecstasyViewCalculateMatrices(&views,&view,0,0,clipFar)==CAR_CINEMATIC_OK,
             "Original world projection could not be calculated");
         ecstasyViewSetCurrent(&views,&view);
@@ -4658,13 +4804,63 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             if(scene.parameters->reverse==0)mask|=8u;
             if(scene.parameters->reverse==1)mask|=4u;
             const auto sceneryStarted=std::chrono::steady_clock::now();
-            scenery->Render(view,frame,mask,scene.clock->worldTimeFrames,scene.emitRaceGeometry);
+            bool merged=false;
+            if(mergeMirror) {
+                // Exact only if nothing the job read changed before view3.
+                constexpr auto first=offsetof(CarCinematicScreen,pixelScale);
+                constexpr auto last=offsetof(CarCinematicScreen,matricesCalculated)+1;
+                auto& job=asyncMirror.job;auto& aux=*job.aux;
+                const bool same=job.mask==mask && !job.capture.abort &&
+                    std::memcmp(reinterpret_cast<const char*>(&view)+first,reinterpret_cast<const char*>(&asyncMirror.screen)+first,last-first)==0 &&
+                    view.view==asyncMirror.screen.view &&
+                    std::memcmp(&view.view->current,&asyncMirror.camera,sizeof(asyncMirror.camera))==0 &&
+                    frame.AsyncSceneryStateMatches(aux);
+                if(job.capture.abort) {++ecstasyAsyncMirrorStats[3];++ecstasyAsyncMirrorStats[7+(job.capture.abortReason&3 ? job.capture.abortReason:4)];}
+                else if(!same)++ecstasyAsyncMirrorStats[2];
+#if !defined(__vita__) && !defined(__SWITCH__)
+                if(same && ecstasyAsyncMirrorScenery==2) {
+                    // Rerun the same capture here (no concurrency) and compare.
+                    auto& check=frame.AsyncSceneryFrame(1);
+                    frame.PrepareAsyncScenery(check);
+                    SceneryResources::AsyncCapture again;
+                    scenery->Render(view,check,mask,scene.clock->worldTimeFrames,true,&again);
+                    bool equal=!again.abort && again.rejected.size()==job.capture.rejected.size() &&
+                        EcstasyFrame::AsyncSceneryCommandsEqual(aux,check);
+                    for(std::size_t at=0;equal && at<again.rejected.size();++at) {
+                        const auto& x=again.rejected[at];const auto& y=job.capture.rejected[at];
+                        equal=x.command==y.command && x.model==y.model && x.matrix==y.matrix && x.clip==y.clip &&
+                            x.context.has_value()==y.context.has_value() &&
+                            (!x.context || std::memcmp(&*x.context,&*y.context,sizeof(SceneLightContext))==0);
+                    }
+                    if(!equal)++ecstasyAsyncMirrorStats[7];
+                }
+#endif
+                if(same) {
+                    const auto& commands=aux.Commands();
+                    const auto runBase=frame.AppendSceneryRunStrips(aux.SceneryRunStrips());
+                    std::size_t at=0;
+                    for(auto& rejected:job.capture.rejected) {
+                        frame.AppendOpaqueSceneryCommands(commands.data()+at,rejected.command-at,runBase);
+                        at=rejected.command;
+                        frame.RenderModel(*rejected.model,rejected.matrix.data(),view,rejected.clip==2 ? 4u:0u,1.0f,
+                            scene.clock->worldTimeFrames,rejected.context ? &*rejected.context:nullptr);
+                    }
+                    frame.AppendOpaqueSceneryCommands(commands.data()+at,commands.size()-at,runBase);
+                    ++ecstasyAsyncMirrorStats[1];
+                    merged=true;
+                }
+            }
+            if(!merged)scenery->Render(view,frame,mask,scene.clock->worldTimeFrames,scene.emitRaceGeometry);
             if(scene.sceneryCaptureTiming || scene.sceneryFrameTiming) {
                 const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now()-sceneryStarted).count());
                 if(scene.sceneryCaptureTiming)scene.sceneryCaptureTiming->Observe(elapsed);
                 if(scene.sceneryFrameTiming)scene.sceneryFrameTiming->Observe(elapsed);
             }
+        }
+        if(i==1 && asyncMirror.launched) {
+            scenery->SetCollectSignal(nullptr);
+            asyncMirror.job.collectReady.store(1,std::memory_order_release);
         }
         worldSplitAt(1);
         // PAL113250 follows StuffScenery11321C and precedes the sun and
