@@ -11,6 +11,7 @@
 #include "indep/inc/Player.hpp"
 std::array<double,4> worldCollisionSubPhaseMs{};
 // Diagnostic split of collisionSystemStep: obsolete+find, queue, resolve loop, tail.
+void collisionWitnessMemoTick();
 std::array<double,4> worldCollisionSolveMs{};
 #include "indep/inc/World.hpp"
 #include "indep/inc/RaceCoordinator.hpp"
@@ -672,6 +673,7 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         SpeculationScope() {collisionSpeculationArm(1);}
         ~SpeculationScope() {collisionSpeculationArm(0);}
     } speculationScope;
+    collisionWitnessMemoTick();
     using SolveClock=std::chrono::steady_clock;
     auto solveMark=SolveClock::now();
     const auto solvePhase=[&](int index) {
