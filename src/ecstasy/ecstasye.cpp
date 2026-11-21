@@ -5249,10 +5249,23 @@ void EcstasyFrame::CollectTexturePrewarm()
         state.appended.clear();
     }
 }
+// Vita defer_order_off.txt: Seal materializes the command order itself.
+int ecstasyDeferOrder=1;
 void EcstasyFrame::Seal()
 {
     Require(phase_==Phase::Building,"Graphics frame was already sealed");
-    AttachAlphaPolys();MaterializeOrder();CollectTexturePrewarm();phase_=Phase::Ready;
+    AttachAlphaPolys();
+    if(ecstasyDeferOrder) {
+        SyncOrder();
+        Require(pendingAlphaIndices_.empty() && order_.size()==commands_.size(),"Sealed native command order lost a command");
+        orderDeferred_=true;
+    } else MaterializeOrder();
+    CollectTexturePrewarm();phase_=Phase::Ready;
+}
+void EcstasyFrame::FinalizeOrder()
+{
+    if(!orderDeferred_)return;
+    orderDeferred_=false;MaterializeOrder();
 }
 void EcstasyFrame::MarkSubmitted()
 {
@@ -5307,7 +5320,7 @@ void EcstasyFrame::ReturnPosedStrip(std::unique_ptr<EditorMarkerSolidGeometry::S
 void EcstasyFrame::Release() noexcept
 {
     textureAnimationResources_=nullptr;environmentCameraFaces_=0;
-    commands_.clear();sceneryRunStrips_.clear();prewarmTextures_.clear();pendingAlphaIndices_.clear();order_.clear();orderTail_=0;orderScratch_.clear();attachSwap_.clear();visibleScratch_.clear();depthTransfers_.clear();
+    commands_.clear();sceneryRunStrips_.clear();prewarmTextures_.clear();pendingAlphaIndices_.clear();order_.clear();orderTail_=0;orderDeferred_=false;orderScratch_.clear();attachSwap_.clear();visibleScratch_.clear();depthTransfers_.clear();
     modelStripScratch_.clear();modelTextureScratch_.clear();
     for(auto& chunk:modelCaptureScratch_) {
         chunk.commands.clear();chunk.animatedStrips.clear();chunk.alphaGroups=0;
@@ -11701,6 +11714,7 @@ EcstasyVulkanDevice::EcstasyVulkanDevice(const EcstasyVulkanOptions& options):st
 EcstasyVulkanDevice::~EcstasyVulkanDevice()=default;
 void EcstasyVulkanDevice::Render(EcstasyFrame& frame)
 {
+    frame.FinalizeOrder();
     try {(void)storage_->Render(&frame);}
     catch(const std::exception& error) {
         platform::RecordSessionEvent("renderer.frame.failed",error.what());throw;
