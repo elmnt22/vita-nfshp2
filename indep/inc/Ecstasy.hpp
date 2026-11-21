@@ -1169,6 +1169,13 @@ private:
     };
     void Release() noexcept;
     std::vector<EcstasyDrawCommand> commands_;
+    // Texture prewarm (renderer cache only): loaded images recorded as first
+    // used in an earlier session, uploaded ahead of their first draw.
+    std::vector<std::pair<const TextureInfo*,bool>> prewarmTextures_;
+    void CollectTexturePrewarm();
+public:
+    const std::vector<std::pair<const TextureInfo*,bool>>& PrewarmTextures() const noexcept {return prewarmTextures_;}
+private:
     // Deque growth preserves references. Value-only slots are reused after
     // every source command and preparation worker has released its borrow.
     std::deque<EcstasyDrawInstance> capturedInstances_;
