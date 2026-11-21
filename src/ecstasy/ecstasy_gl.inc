@@ -1276,14 +1276,57 @@ void EcstasyVulkanDevice::Storage::GlThread()
     }
 }
 
+// Phase 0 GPU timeline (Vita gpu_timeline.txt, diagnostic only): every
+// frame records when the GL thread began/ended its submit and returned from
+// the swap, plus the display scene's fence (vitaGL ends every scene with
+// query_fence.value++). A watcher thread polls the fence region and stamps
+// when the GPU finished each frame, so steady-state GPU throughput and GPU
+// starvation (waiting for the submit) can be separated without draining.
+int ecstasyGpuTimeline=0;
+struct GpuTimelineRecord {
+    std::uint64_t submitBegin{},submitEnd{},swapEnd{};
+    std::uint32_t fence{},draws{};
+    std::atomic<std::uint64_t> done{0};
+};
+static GpuTimelineRecord gpuTimeline[128];
+static std::atomic<std::uint32_t> gpuTimelineHead{0};
+static void* GpuTimelineWatcher(void*)
+{
+    std::uint32_t next=0;
+    for(;;) {
+        const auto head=gpuTimelineHead.load(std::memory_order_acquire);
+        const std::uint32_t observed=*static_cast<volatile std::uint32_t*>(query_fence.address);
+        const auto now=sceKernelGetSystemTimeWide();
+        while(next!=head) {
+            auto& record=gpuTimeline[next%128u];
+            if(static_cast<std::int32_t>(observed-record.fence)<0)break;
+            record.done.store(now,std::memory_order_release);++next;
+        }
+        sceKernelDelayThread(200);
+    }
+    return nullptr;
+}
+
 void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
 {
     using Clock=std::chrono::steady_clock;
+    const auto timelineBegin=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
+    const auto timelineDrawnBefore=drawnBatches;
+    static bool timelineStarted=false;
+    if(ecstasyGpuTimeline && !timelineStarted) {
+        timelineStarted=true;
+        pthread_t watcher;pthread_attr_t attributes;pthread_attr_init(&attributes);
+        pthread_attr_setstacksize(&attributes,16*1024);
+        if(pthread_create(&watcher,&attributes,GpuTimelineWatcher,nullptr)==0)pthread_detach(watcher);
+        else ecstasyGpuTimeline=0;
+        pthread_attr_destroy(&attributes);
+        platform::RecordSessionEvent("renderer.gpu_timeline",ecstasyGpuTimeline ? "watcher started":"watcher failed");
+    }
     const auto milliseconds=[](Clock::duration duration) {return std::chrono::duration<double,std::milli>(duration).count();};
     // G0 GPU probe: one frame in 16 drains the GPU first, so the finish
     // after its swap measures that frame's GPU work alone.
     static unsigned gpuProbePhase=0;
-    const bool gpuProbeFrame=platform::nativeDiagnosticsEnabled && (gpuProbePhase++%16u)==0;
+    const bool gpuProbeFrame=!ecstasyGpuTimeline && platform::nativeDiagnosticsEnabled && (gpuProbePhase++%16u)==0;
     if(gpuProbeFrame)sceGxmFinish(gxm_context);
     const auto renderBegin=Clock::now();
     struct GpuFrameCounts {unsigned draws,blended,passes,scissorUpdates,alphaTested;double textureBytes;std::vector<GLuint> seen;};
@@ -1837,7 +1880,30 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     if(vsync>=0)vglWaitVblankStart(vsync ? GL_TRUE:GL_FALSE);
     glRenderStage=4;
     const auto swapStarted=Clock::now();
+    const auto timelineSubmitEnd=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
     vglSwapBuffers(GL_FALSE);
+    if(ecstasyGpuTimeline) {
+        const auto head=gpuTimelineHead.load(std::memory_order_relaxed);
+        auto& record=gpuTimeline[head%128u];
+        record.submitBegin=timelineBegin;record.submitEnd=timelineSubmitEnd;record.swapEnd=sceKernelGetSystemTimeWide();
+        record.fence=query_fence.value;record.draws=static_cast<std::uint32_t>(drawnBatches-timelineDrawnBefore);
+        record.done.store(0,std::memory_order_relaxed);
+        gpuTimelineHead.store(head+1,std::memory_order_release);
+        // Report the frame 16 back (long done): one line per frame, times
+        // relative to the previous frame's GPU completion.
+        if(head>=17) {
+            const auto& frame=gpuTimeline[(head-16)%128u];
+            const auto& previous=gpuTimeline[(head-17)%128u];
+            const auto done=frame.done.load(std::memory_order_acquire),before=previous.done.load(std::memory_order_acquire);
+            if(done && before) {
+                char detail[200];
+                std::snprintf(detail,sizeof(detail),"n=%u sb=%lld se=%lld sw=%lld done=%lld draws=%u",head-16,
+                    static_cast<long long>(frame.submitBegin-before),static_cast<long long>(frame.submitEnd-before),
+                    static_cast<long long>(frame.swapEnd-before),static_cast<long long>(done-before),frame.draws);
+                platform::RecordSessionEvent("renderer.gpu_tl",detail);
+            }
+        }
+    }
     {
         // G0: swap time every frame; on probe frames (GPU drained at frame
         // start) the time to finish after the swap, and the whole frame.

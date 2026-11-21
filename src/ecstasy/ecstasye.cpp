@@ -5605,6 +5605,7 @@ void graphicsNotifyPresentationComplete() noexcept {
 extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface; // vitaGL's display depth surface
 extern "C" SceGxmRenderTarget* gxm_render_target;               // vitaGL's display render target
 extern "C" SceGxmContext* gxm_context;
+extern "C" SceGxmNotification query_fence;                       // vitaGL: every scene end writes ++value
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <pthread.h>
