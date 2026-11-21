@@ -2748,6 +2748,7 @@ void EcstasyFrame::TransferZBufferRect(std::shared_ptr<SunDepthSamples> destinat
     request.consumedBoundsValid=consumedBounds!=nullptr;
     if(consumedBounds)request.consumedBounds=*consumedBounds;
     request.maximumDepth=view.target->format==0x31 ? 16777215u:65535u;
+    request.sampleBounds=request.destination->bounds;
     std::copy(view.matrices.clipToScreen,view.matrices.clipToScreen+16,request.clipToScreen.begin());
     depthTransfers_.push_back(request);
 }

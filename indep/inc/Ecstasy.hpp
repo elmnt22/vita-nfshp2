@@ -929,6 +929,9 @@ struct EcstasyDepthTransfer {
     // next rectangle. Keep those actual inputs for native preparation reuse.
     std::array<std::int32_t,4> consumedBounds{};
     bool consumedBoundsValid{};
+    // The tile bounds the next StuffSun counts (destination bounds when the
+    // request was made). vitaGL counts clear samples inside them only.
+    std::array<std::int32_t,4> sampleBounds{};
 };
 
 struct OpaqueSceneryBatch {
