@@ -5600,6 +5600,7 @@ void graphicsNotifyPresentationComplete() noexcept {
 #include "src/ecstasy/vk_pod.hpp"
 #include <vitaGL.h>
 #include <psp2/gxm.h>
+#include <psp2/kernel/processmgr.h>
 #include <malloc.h>
 #include <psp2/display.h>
 extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface; // vitaGL's display depth surface
