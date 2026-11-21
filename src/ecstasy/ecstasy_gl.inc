@@ -67,6 +67,11 @@ struct GlFramePacket {
     std::vector<std::uint32_t> indices;
     std::vector<VkDrawBatch> batches;
     std::vector<std::array<float,4>> glyphBounds;
+    // Resident geometry of each span (entry + its index token at gather
+    // time). Owned by the packet: the next Gather refills the storage copy
+    // while the GL thread reads this one (instancing groups by it).
+    std::vector<const VkResidentGeometryEntry*> residentSpans;
+    std::vector<std::uint64_t> residentSpanTokens;
     std::vector<GlPendingTexture> uploads;
     std::vector<GlTexture*> deletes;
     struct TextureRef {GlTexture* texture{};std::uint32_t width{},height{};};
@@ -1381,6 +1386,9 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     packet.depthTransfers=frame->DepthTransfers();
     std::swap(packet.vertices,data);std::swap(packet.indices,elementIndices);
     std::swap(packet.batches,batches);std::swap(packet.glyphBounds,gatheredGlyphBounds);
+    // Gather clears both before refilling them.
+    std::swap(packet.residentSpans,gatheredResidentIndexSpans);
+    std::swap(packet.residentSpanTokens,gatheredResidentSpanTokens);
     packet.gatherMilliseconds=statistics.gatherMilliseconds;
     {
         static double lastCoverage=0.0;
@@ -1671,10 +1679,14 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             if(a.nativeSpanCount!=b.nativeSpanCount || a.residentIndices!=b.residentIndices)return false;
             if(a.alphaTestRedundant!=b.alphaTestRedundant)return false;
             if(!b.SameDrawState(a))return false;
-            if(static_cast<std::size_t>(a.nativeSpanFirst)+a.nativeSpanCount>gatheredResidentIndexSpans.size() ||
-                static_cast<std::size_t>(b.nativeSpanFirst)+b.nativeSpanCount>gatheredResidentIndexSpans.size())return false;
+            // The packet's own span copy (never the storage one Gather refills).
+            const auto& spans=packet.residentSpans;const auto& tokens=packet.residentSpanTokens;
+            if(static_cast<std::size_t>(a.nativeSpanFirst)+a.nativeSpanCount>spans.size() ||
+                static_cast<std::size_t>(b.nativeSpanFirst)+b.nativeSpanCount>spans.size() ||
+                tokens.size()!=spans.size())return false;
             for(std::uint32_t at=0;at<a.nativeSpanCount;++at)
-                if(gatheredResidentIndexSpans[a.nativeSpanFirst+at]!=gatheredResidentIndexSpans[b.nativeSpanFirst+at])return false;
+                if(spans[a.nativeSpanFirst+at]!=spans[b.nativeSpanFirst+at] ||
+                    tokens[a.nativeSpanFirst+at]!=tokens[b.nativeSpanFirst+at])return false;
             return true;
         };
         auto* rows=reinterpret_cast<float*>(instanceStream.mapped);
