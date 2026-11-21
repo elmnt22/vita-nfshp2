@@ -987,7 +987,7 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
         "#define FUNC %u\n#define TEXTURING %u\n#define ATEST %u\n#define SHOWCASE %u\n#define AFIX %u\n"
         "#define CLAMPTL %u\n#define GPUPOS %u\n#define SHADE %u\n#define AFFINE %u\n#define DEPTHTEX %u\n#define TRIVIALVS %u\n"
         "#define INST %u\n",
-        function,texturing,alphaTest,showcase,fixedAlpha,clamp,gpuPosition,shade,affine,depthTexture,ecstasyGpuDiag==2 ? 1u:0u,instanced);
+        function,texturing,alphaTest,showcase,fixedAlpha,clamp,gpuPosition,shade,affine,depthTexture,(ecstasyGpuDiag==2||ecstasyGpuDiag==7) ? 1u:0u,instanced);
     const auto compile=[&](GLenum kind,const char* body)->GLuint {
         const char* prelude=kind==GL_VERTEX_SHADER ? "":
             ecstasyFragmentMediump ? "precision mediump float;\n":"precision highp float;\n";
@@ -1007,7 +1007,7 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     };
     const auto compileStarted=std::chrono::steady_clock::now();
     bool cached=false;
-    if(const auto binary=ecstasyGpuDiag==2 ? std::vector<std::uint8_t>{}:GlReadProgramCache(key|(ecstasyFragmentMediump ? 0x80000000u:0u));!binary.empty()) {
+    if(const auto binary=(ecstasyGpuDiag==2||ecstasyGpuDiag==7) ? std::vector<std::uint8_t>{}:GlReadProgramCache(key|(ecstasyFragmentMediump ? 0x80000000u:0u));!binary.empty()) {
         program.program=glCreateProgram();
         glProgramBinary(program.program,0,binary.data(),static_cast<GLsizei>(binary.size()));
         GLint linked=0;glGetProgramiv(program.program,GL_LINK_STATUS,&linked);
@@ -1040,7 +1040,7 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
         platform::RecordSessionEvent("renderer.vitagl.link_failed",detail);
         glDeleteProgram(program.program);program.program=0;program.failed=true;return program;
     }
-    if(ecstasyGpuDiag!=2)GlWriteProgramCache(key|(ecstasyFragmentMediump ? 0x80000000u:0u),program.program);
+    if(ecstasyGpuDiag!=2 && ecstasyGpuDiag!=7)GlWriteProgramCache(key|(ecstasyFragmentMediump ? 0x80000000u:0u),program.program);
     }
     const auto location=[&](const char* name) {return glGetUniformLocation(program.program,name);};
     program.m0=location("u_m0");program.m1=location("u_m1");program.m2=location("u_m2");program.m3=location("u_m3");
@@ -1521,7 +1521,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             const bool redundantTest=halfMode && batch.alphaTest==1 && !batch.depthWrite && !blend.fixedAlpha &&
                 ecstasyHalfResSkipAlphaTest;
             const bool checkElided=ecstasyAlphaCheck && (batch.alphaTestRedundant || ecstasyAlphaCheck==2) && batch.alphaTest==2 && !redundantTest;
-            const bool noTest=redundantTest || (batch.alphaTestRedundant && !ecstasyAlphaCheck) || ecstasyGpuDiag==5;
+            const bool noTest=redundantTest || (batch.alphaTestRedundant && !ecstasyAlphaCheck) || ecstasyGpuDiag==5 || ecstasyGpuDiag==7;
             key|=(static_cast<std::uint32_t>(checkElided ? 3:noTest ? 0:std::clamp(batch.alphaTest,0,2)))<<3;
             if(gpuProbeFrame && batch.alphaTest && !noTest)++gpuCounts.alphaTested;
             key|=(batch.showcaseEnvironmentBlend ? 1u:0u)<<5;
@@ -1619,7 +1619,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                     const auto& texture=packet.textures[batch.texture];
                     name=texture.texture ? texture.texture->name:0;texWidth=texture.width;texHeight=texture.height;
                 }
-                if(ecstasyGpuDiag==1 && !sampled) {
+                if((ecstasyGpuDiag==1||ecstasyGpuDiag==7) && !sampled) {
                     if(!gpuDiagWhite) {
                         static const std::uint8_t white[4]={255,255,255,128};
                         glGenTextures(1,&gpuDiagWhite);glBindTexture(GL_TEXTURE_2D,gpuDiagWhite);
