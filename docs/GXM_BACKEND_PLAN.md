@@ -1,6 +1,6 @@
 # Native GXM backend plan (replace vitaGL)
 
-Status: research done 2026-11-21. Waiting for the user's go on Phase 0.
+Status: Phase 0 done 2026-11-21 (results below). Waiting for the user's go on Phase 1.
 
 ## Why
 
@@ -41,6 +41,25 @@ Goal: split the heavy-window frame into GPU busy time and GPU starved time.
 3. Decision:
    - **GPU starved:** heavy GPU intervals are mostly under 33 ms with vsync off, and the GPU waits for submits. Native GXM fixes most misses. Go to Phase 1.
    - **GPU busy:** heavy GPU intervals stay at 34 ms or more. Native GXM saves only 1-3 ms of GPU time, which is not enough alone. Report back. The levers are then GPU work: lower resolution in heavy frames (needs approval), cheaper cutout shading, fewer mirror draws.
+
+### Phase 0 results (2026-11-21, `gpu_timeline.txt`, bench 24 1, track 64)
+
+Per-frame GPU completion stamps (fence watcher thread), race frames only. Vsync on and off gave the same numbers, so vsync is not a factor.
+
+| | vsync on | vsync off |
+|---|---|---|
+| race frames | 4755 | 4896 |
+| GPU interval >= 33.4 ms (heavy) | 687 (14%) | 689 |
+| GPU interval >= 41.7 ms | 95 | 91 |
+| heavy frames where the GPU sat idle > 3 ms waiting for the kick | 458 | 462 |
+| ... GL thread started only after the GPU was idle (packet late from upstream), avg 8.2 ms late, then 14 ms submit | 350 | 361 |
+| ... GL thread started in time but the submit was too slow (13 ms) | 108 | 101 |
+| heavy frames whose post-kick GPU work alone is >= 33.4 ms | 232 | 231 |
+
+- Heavy frames: GL submit averages 12 ms (20 ms in > 42 ms frames). It sits on the GPU critical path.
+- Projection with the same GPU work and a faster submit: x0.5 -> 301 heavy / 64 over 42; x0.3 -> 265 / 57; x0.2 -> 255 / 55.
+- **Verdict: mixed.** A native submit removes about 60% of the heavy frames and about 40% of the > 42 ms misses. The rest is true GPU work (about 230 frames, ~5%) and must be cut separately: cutout discard, mirror draws, resolution in heavy frames (needs approval).
+- Packets arriving late from the gather thread (350 frames, 8 ms) are a second CPU lever outside the renderer.
 
 ## Phase 1: GXM core (if Phase 0 says go)
 
