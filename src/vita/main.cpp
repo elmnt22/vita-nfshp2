@@ -54,7 +54,7 @@ extern int collisionWitnessWarmProbe;
 extern int collisionQueuePrediction;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
+namespace hp2 { extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasyGpuDiag; extern int ecstasyModelRunCache; extern int ecstasyTexturePrewarm; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -717,6 +717,21 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/affine_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyAffineUV = 0;
             log.Line("vita.diag", "affine uv off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/texture_prewarm_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyTexturePrewarm = 0;
+            log.Line("vita.diag", "texture prewarm off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/model_run_cache_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyModelRunCache = 0;
+            log.Line("vita.diag", "model run cache off");
+        }
+        if (FILE* diag = std::fopen((std::string(kDataDirectory) + "/gpu_diag.txt").c_str(), "r")) {
+            int mode = 0;
+            if (std::fscanf(diag, "%d", &mode) == 1) hp2::ecstasyGpuDiag = mode;
+            std::fclose(diag);
+            char text[48];std::snprintf(text, sizeof(text), "gpu diagnostic mode %d", hp2::ecstasyGpuDiag);
+            log.Line("vita.diag", text);
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/vsync_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyForceNoVsync = 1;

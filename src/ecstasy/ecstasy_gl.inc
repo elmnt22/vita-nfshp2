@@ -169,7 +169,9 @@ void main()
     gl_Position=p;
     v_uvq=a_uvq;
     v_col=a_col;
-#if SHADE
+#if SHADE && TRIVIALVS
+    v_uvq=a_uvq;v_col=a_col+u_shade[1]*0.0+u_mat[0]*0.0+u_flags*0.0+u_flags2*0.0;
+#elif SHADE
     vec4 parameters=u_shade[1];
     vec3 coordinates=vec3(a_uvq.xy+parameters.yz,a_uvq.z);
     vec4 result=vec4(a_col.rgb,parameters.x);
@@ -321,6 +323,9 @@ struct EcstasyVulkanDevice::Storage {
     EcstasyVulkanFrameStatistics statistics;
     std::map<std::int32_t,VkDrawTarget> renderedTargets;
     VkResidentGeometryCache residentGeometry;
+    std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> modelRunRecords;
+    std::vector<const EditorMarkerSolidGeometry::Strip*> modelRunScratchStrips;
+    std::vector<VkResidentGeometryEntry*> modelRunScratchEntries,modelRunScratchReplay;
     VkResidentIndexCache residentIndexCache;
     VkSceneryPacketCache sceneryPackets;
     std::uint64_t nextTextureGeneration{};
@@ -377,7 +382,7 @@ struct EcstasyVulkanDevice::Storage {
     // Hardware-depth half pass: one fullscreen copy of the scene depth into
     // the half buffer's depth, then particles use the fixed-function LEQUAL
     // test (same compare as the DEPTHTEX discard, no per-fragment discard).
-    bool halfPrewarmed{};GLuint halfDepthCopyProgram{};GLint halfDepthCopyMap{-1};bool halfDepthCopyFailed{},halfHardwareDepth{};
+    bool halfPrewarmed{};GLuint gpuDiagWhite{};GLuint halfDepthCopyProgram{};GLint halfDepthCopyMap{-1};bool halfDepthCopyFailed{},halfHardwareDepth{};
     GLint halfCompositeFlip{-1};
     bool halfCompositeFailed{};
     std::uint64_t halfRuns{},halfBatches{},halfDepthWrites{};
@@ -605,6 +610,7 @@ struct EcstasyVulkanDevice::Storage {
             options.width,options.height,4096u);
     }
     void UploadTexture(const TextureInfo& texture,std::size_t index,bool repeatedPadding);
+    bool PrewarmAllowed() const noexcept {return true;}
     // Base-level decodes recorded by UploadTexture during Gather and run
     // after its command loop (in parallel when several): the same decode of
     // the same sealed-frame bytes into the same pending upload.
@@ -693,6 +699,7 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
     for(std::uint32_t level=0;level<levels;++level)sourceBytes+=baseBytes>>(2u*level);
     Require(sourceBytes<=texture.pixels.size,"vitaGL texture lost part of its authored mip chain");
     if(textures[index].generation)LogReupload(textures[index],texture);
+    else EcstasyRecordTextureFirstUse(texture,repeatedPadding);
     auto& target=textures[index];
     auto* handle=glTextureOf(target);
     if(!handle) {handle=new GlTexture;target.image.image=reinterpret_cast<VkImage>(handle);}
@@ -706,10 +713,10 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
         static unsigned logged=0;
         if(logged<800) {
             ++logged;
-            char detail[160];
-            std::snprintf(detail,sizeof(detail),"frame=%llu key=%08x pack=%p size=%ux%u psm=%02x levels=%u reupload=%d",
+            char detail[200];
+            std::snprintf(detail,sizeof(detail),"frame=%llu key=%08x pack=%s size=%ux%u psm=%02x levels=%u reupload=%d",
                 static_cast<unsigned long long>(completedFrameSerial),texture.descriptor->key,
-                static_cast<const void*>(texture.pack),width,height,wire[0x4a],levels,textures[index].generation ? 1:0);
+                texture.pack ? texture.pack->Name().c_str():"none",width,height,wire[0x4a],levels,textures[index].generation ? 1:0);
             platform::RecordSessionEvent("renderer.vitagl.texture_upload",detail);
         }
     }
@@ -807,6 +814,10 @@ void GlWriteProgramCache(std::uint32_t key,GLuint program)
 
 int ecstasyAffineUV=1; // Vita affine_off.txt restores the projective divide everywhere
 int ecstasyForceNoVsync=0;
+// Vita gpu_diag.txt N (diagnostic only, wrong images on purpose): 1 = every
+// texture a 1x1 white, 2 = lit vertex shading replaced by the plain path,
+// 3 = every draw scissored to 8x8 pixels, 4 = particle (half-eligible) draws skipped.
+int ecstasyGpuDiag=0;
 int ecstasyFragmentMediump=0; // Vita frag_mediump.txt (A/B: GPU fragment cost)
 GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
 {
@@ -818,8 +829,8 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     char defines[320];
     std::snprintf(defines,sizeof(defines),
         "#define FUNC %u\n#define TEXTURING %u\n#define ATEST %u\n#define SHOWCASE %u\n#define AFIX %u\n"
-        "#define CLAMPTL %u\n#define GPUPOS %u\n#define SHADE %u\n#define AFFINE %u\n#define DEPTHTEX %u\n",
-        function,texturing,alphaTest,showcase,fixedAlpha,clamp,gpuPosition,shade,affine,depthTexture);
+        "#define CLAMPTL %u\n#define GPUPOS %u\n#define SHADE %u\n#define AFFINE %u\n#define DEPTHTEX %u\n#define TRIVIALVS %u\n",
+        function,texturing,alphaTest,showcase,fixedAlpha,clamp,gpuPosition,shade,affine,depthTexture,ecstasyGpuDiag==2 ? 1u:0u);
     const auto compile=[&](GLenum kind,const char* body)->GLuint {
         const char* prelude=kind==GL_VERTEX_SHADER ? "":
             ecstasyFragmentMediump ? "precision mediump float;\n":"precision highp float;\n";
@@ -839,7 +850,7 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     };
     const auto compileStarted=std::chrono::steady_clock::now();
     bool cached=false;
-    if(const auto binary=GlReadProgramCache(key|(ecstasyFragmentMediump ? 0x80000000u:0u));!binary.empty()) {
+    if(const auto binary=ecstasyGpuDiag==2 ? std::vector<std::uint8_t>{}:GlReadProgramCache(key|(ecstasyFragmentMediump ? 0x80000000u:0u));!binary.empty()) {
         program.program=glCreateProgram();
         glProgramBinary(program.program,0,binary.data(),static_cast<GLsizei>(binary.size()));
         GLint linked=0;glGetProgramiv(program.program,GL_LINK_STATUS,&linked);
@@ -867,7 +878,7 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
         platform::RecordSessionEvent("renderer.vitagl.link_failed",detail);
         glDeleteProgram(program.program);program.program=0;program.failed=true;return program;
     }
-    GlWriteProgramCache(key|(ecstasyFragmentMediump ? 0x80000000u:0u),program.program);
+    if(ecstasyGpuDiag!=2)GlWriteProgramCache(key|(ecstasyFragmentMediump ? 0x80000000u:0u),program.program);
     }
     const auto location=[&](const char* name) {return glGetUniformLocation(program.program,name);};
     program.m0=location("u_m0");program.m1=location("u_m1");program.m2=location("u_m2");program.m3=location("u_m3");
@@ -1102,7 +1113,15 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
 {
     using Clock=std::chrono::steady_clock;
     const auto milliseconds=[](Clock::duration duration) {return std::chrono::duration<double,std::milli>(duration).count();};
+    // G0 GPU probe: one frame in 16 drains the GPU first, so the finish
+    // after its swap measures that frame's GPU work alone.
+    static unsigned gpuProbePhase=0;
+    const bool gpuProbeFrame=platform::nativeDiagnosticsEnabled && (gpuProbePhase++%16u)==0;
+    if(gpuProbeFrame)sceGxmFinish(gxm_context);
     const auto renderBegin=Clock::now();
+    struct GpuFrameCounts {unsigned draws,blended,passes;double textureBytes;std::vector<GLuint> seen;};
+    static GpuFrameCounts gpuCounts{};
+    if(gpuProbeFrame) {gpuCounts.draws=gpuCounts.blended=gpuCounts.passes=0;gpuCounts.textureBytes=0;gpuCounts.seen.clear();}
     glRenderStage=5;
     for(auto& upload:packet.uploads) {
         auto* texture=upload.texture;
@@ -1352,8 +1371,24 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                     const auto& texture=packet.textures[batch.texture];
                     name=texture.texture ? texture.texture->name:0;texWidth=texture.width;texHeight=texture.height;
                 }
+                if(ecstasyGpuDiag==1 && !sampled) {
+                    if(!gpuDiagWhite) {
+                        static const std::uint8_t white[4]={255,255,255,128};
+                        glGenTextures(1,&gpuDiagWhite);glBindTexture(GL_TEXTURE_2D,gpuDiagWhite);
+                        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,white);
+                        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+                        activeTexture=~0u;
+                    }
+                    name=gpuDiagWhite;
+                }
+                if(gpuProbeFrame && std::find(gpuCounts.seen.begin(),gpuCounts.seen.end(),name)==gpuCounts.seen.end()) {
+                    gpuCounts.seen.push_back(name);gpuCounts.textureBytes+=4.0*texWidth*texHeight;
+                }
                 if(name!=activeTexture) {glBindTexture(GL_TEXTURE_2D,name);activeTexture=name;}
             }
+            if(gpuProbeFrame) {++gpuCounts.draws;if(blend.enable)++gpuCounts.blended;}
+            if(ecstasyGpuDiag==3)glScissor(0,0,8,8);
             if(program.fparam>=0) {
                 const float texelX=texWidth ? 1.0f/static_cast<float>(texWidth):0.0f;
                 const float texelY=texHeight ? 1.0f/static_cast<float>(texHeight):0.0f;
@@ -1458,6 +1493,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 resetState();
                 continue;
             }
+            if(ecstasyGpuDiag==4 && halfEligible(batches[list[at]])) {++at;continue;}
             drawOne(list[at++]);
         }
         if(!offscreen && !halfPrewarmed && ecstasyHalfResParticles && !halfCompositeFailed) {
@@ -1490,6 +1526,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         for(const auto dependency:targetDependencies[static_cast<std::size_t>(id)])self(self,dependency);
         if(id==0 || !targetBatches[static_cast<std::size_t>(id)].empty()) {
             const std::uint32_t passStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+            if(gpuProbeFrame)++gpuCounts.passes;
             drawPass(id);
             if(collisionWitnessClockMicros) {
                 const std::uint32_t elapsed=collisionWitnessClockMicros()-passStarted;
@@ -1534,23 +1571,29 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     const auto swapStarted=Clock::now();
     vglSwapBuffers(GL_FALSE);
     {
-        // Diagnostic: swap time, and (one frame in 16) how long the GPU
-        // still needs after the swap returns. sceGxmFinish stalls only that
-        // sampled frame's pipelining.
-        static double swapSum=0,finishSum=0;static unsigned swapCount=0,finishCount=0,finishPhase=0;
+        // G0: swap time every frame; on probe frames (GPU drained at frame
+        // start) the time to finish after the swap, and the whole frame.
+        static double swapSum=0,finishSum=0,frameSum=0,drawSum=0,blendSum=0,passSum=0,textureSum=0,vertexSum=0;
+        static unsigned swapCount=0,finishCount=0;
         const auto swapped=Clock::now();
         swapSum+=milliseconds(swapped-swapStarted);++swapCount;
-        if(platform::nativeDiagnosticsEnabled && (finishPhase++%16u)==0) {
+        if(gpuProbeFrame) {
             sceGxmFinish(gxm_context);
-            finishSum+=milliseconds(Clock::now()-swapped);++finishCount;
+            const auto finished=Clock::now();
+            finishSum+=milliseconds(finished-swapped);frameSum+=milliseconds(finished-renderBegin);++finishCount;
+            drawSum+=gpuCounts.draws;blendSum+=gpuCounts.blended;passSum+=gpuCounts.passes;
+            textureSum+=gpuCounts.textureBytes;vertexSum+=static_cast<double>(packet.vertices.size());
         }
         if(swapCount>=300) {
-            char detail[160];
-            std::snprintf(detail,sizeof(detail),"swap_ms=%.2f gpu_after_swap_ms=%.2f finish_samples=%u submit_ms=%.2f vsync=%d",
-                swapSum/swapCount,finishCount ? finishSum/finishCount:0.0,finishCount,
-                milliseconds(submitDone-renderBegin),options.vsync ? 1:0);
+            const double n=finishCount ? finishCount:1.0;
+            char detail[320];
+            std::snprintf(detail,sizeof(detail),"swap_ms=%.2f gpu_after_swap_ms=%.2f gpu_frame_ms=%.2f finish_samples=%u submit_ms=%.2f vsync=%d diag=%d "
+                "draws=%.0f blended=%.0f passes=%.1f texture_kb=%.0f stream_vertices=%.0f",
+                swapSum/swapCount,finishSum/n,frameSum/n,finishCount,
+                milliseconds(submitDone-renderBegin),options.vsync ? 1:0,ecstasyGpuDiag,
+                drawSum/n,blendSum/n,passSum/n,textureSum/n/1024.0,vertexSum/n);
             platform::RecordSessionEvent("renderer.vitagl.gpu_probe",detail);
-            swapSum=finishSum=0;swapCount=finishCount=0;
+            swapSum=finishSum=frameSum=drawSum=blendSum=passSum=textureSum=vertexSum=0;swapCount=finishCount=0;
         }
     }
     // dshots.txt "N": after N frames that used the half pass, copy the next

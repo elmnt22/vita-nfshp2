@@ -38,6 +38,8 @@
 #include "bware/inc/bMath.hpp"
 #include "bware/inc/bMath.hpp"
 #include <cstring>
+#include <mutex>
+#include <set>
 #include <algorithm>
 #ifdef __vita__
 #include <psp2/kernel/threadmgr.h>
@@ -5099,10 +5101,122 @@ void EcstasyFrame::MarkSceneHistoryBoundary(const EcstasyRenderTarget& display,b
     MarkCommandBoundary();
 }
 
+// Texture prewarm (Vita texture_prewarm_off.txt / PC HP2_TEXTURE_PREWARM=0
+// off). The renderer records each image's first upload as "pack key
+// padding" in texture_prewarm.txt; once that pack's images are loaded in a
+// later session, Seal hands them to the renderer, which uploads them
+// through its ordinary cache path before they are first drawn. Cache
+// contents only: the same image bytes, no game state is read or changed
+// beyond the texture lookup.
+int ecstasyTexturePrewarm=1;
+namespace {
+struct TexturePrewarmState {
+    std::mutex mutex;
+    bool loaded{};
+    std::set<std::string> known;
+    std::vector<std::string> appended;
+    std::unordered_map<std::string,std::vector<std::pair<std::uint32_t,bool>>> byPack;
+    struct Pack {std::string name;std::vector<std::pair<std::uint32_t,bool>> pending;std::size_t cursor{};};
+    std::unordered_map<const TexturePack*,Pack> packs;
+    std::vector<TexturePack*> lastPacks;
+    std::uint32_t sealsSinceFlush{};
+};
+TexturePrewarmState& TexturePrewarm() {static TexturePrewarmState state;return state;}
+const char* TexturePrewarmPath() noexcept
+{
+#if defined(__vita__)
+    return "ux0:data/NFSHP2N/texture_prewarm.txt";
+#else
+    return "Saves/texture_prewarm.txt";
+#endif
+}
+bool TexturePrewarmEnabled() noexcept
+{
+#if !defined(__vita__) && !defined(__SWITCH__)
+    static const bool enabled=[] {const char* value=std::getenv("HP2_TEXTURE_PREWARM");return !value || *value!='0';}();
+    return enabled && ecstasyTexturePrewarm;
+#else
+    return ecstasyTexturePrewarm!=0;
+#endif
+}
+void LoadTexturePrewarm(TexturePrewarmState& state)
+{
+    state.loaded=true;
+    FILE* file=std::fopen(TexturePrewarmPath(),"r");
+    if(!file)return;
+    char line[256];
+    while(std::fgets(line,sizeof(line),file)) {
+        char name[200];unsigned key=0;int padding=0;
+        if(std::sscanf(line,"%199s %x %d",name,&key,&padding)!=3)continue;
+        char text[240];std::snprintf(text,sizeof(text),"%s %08x %d",name,key,padding ? 1:0);
+        if(!state.known.insert(text).second)continue;
+        state.byPack[name].push_back({key,padding!=0});
+    }
+    std::fclose(file);
+}
+}
+// Renderer (gather thread): an image's first upload in this session.
+void EcstasyRecordTextureFirstUse(const TextureInfo& texture,bool repeatedPadding)
+{
+    if(!TexturePrewarmEnabled() || !texture.pack || !texture.descriptor)return;
+    const auto& name=texture.pack->Name();
+    if(name.empty() || name.size()>=200 || name.find_first_of(" \t\r\n")!=std::string::npos)return;
+    char text[240];std::snprintf(text,sizeof(text),"%s %08x %d",name.c_str(),texture.descriptor->key,repeatedPadding ? 1:0);
+    auto& state=TexturePrewarm();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if(state.known.size()>=16384 || !state.known.insert(text).second)return;
+    state.appended.push_back(text);
+}
+void EcstasyFrame::CollectTexturePrewarm()
+{
+    prewarmTextures_.clear();
+    if(!TexturePrewarmEnabled())return;
+    auto& state=TexturePrewarm();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if(!state.loaded)LoadTexturePrewarm(state);
+    const auto& packs=texturePackRegistry.packs;
+    if(packs!=state.lastPacks) {
+        // Forget packs that left the registry (an address may be reused).
+        for(auto at=state.packs.begin();at!=state.packs.end();)
+            if(std::find(packs.begin(),packs.end(),at->first)==packs.end())at=state.packs.erase(at); else ++at;
+        state.lastPacks=packs;
+    }
+    std::size_t lookups=0;
+    for(const auto* pack:packs) {
+        if(!pack || pack->HasPendingReads())continue;
+        auto found=state.packs.find(pack);
+        if(found==state.packs.end() || found->second.name!=pack->Name()) {
+            TexturePrewarmState::Pack entry;entry.name=pack->Name();
+            if(const auto list=state.byPack.find(entry.name);list!=state.byPack.end())entry.pending=list->second;
+            found=state.packs.insert_or_assign(pack,std::move(entry)).first;
+        }
+        auto& entry=found->second;
+        for(std::size_t tries=entry.pending.size();tries && lookups<256;--tries,++lookups) {
+            if(entry.cursor>=entry.pending.size())entry.cursor=0;
+            const auto wanted=entry.pending[entry.cursor];
+            const TextureInfo* texture=nullptr;
+            try {texture=const_cast<TexturePack*>(pack)->GetLoadedTexture(wanted.first);}
+            catch(...) {texture=nullptr;}
+            if(texture && texture->descriptor && texture->descriptor->authoredRecord &&
+                texture->descriptor->authoredRecordSize>=164) {
+                prewarmTextures_.push_back({texture,!wanted.second});
+                entry.pending[entry.cursor]=entry.pending.back();entry.pending.pop_back();
+            } else ++entry.cursor;
+        }
+    }
+    if(++state.sealsSinceFlush>=300 && !state.appended.empty()) {
+        state.sealsSinceFlush=0;
+        if(FILE* file=std::fopen(TexturePrewarmPath(),"a")) {
+            for(const auto& line:state.appended)std::fprintf(file,"%s\n",line.c_str());
+            std::fclose(file);
+        }
+        state.appended.clear();
+    }
+}
 void EcstasyFrame::Seal()
 {
     Require(phase_==Phase::Building,"Graphics frame was already sealed");
-    AttachAlphaPolys();MaterializeOrder();phase_=Phase::Ready;
+    AttachAlphaPolys();MaterializeOrder();CollectTexturePrewarm();phase_=Phase::Ready;
 }
 void EcstasyFrame::MarkSubmitted()
 {
@@ -5157,7 +5271,7 @@ void EcstasyFrame::ReturnPosedStrip(std::unique_ptr<EditorMarkerSolidGeometry::S
 void EcstasyFrame::Release() noexcept
 {
     textureAnimationResources_=nullptr;environmentCameraFaces_=0;
-    commands_.clear();sceneryRunStrips_.clear();pendingAlphaIndices_.clear();order_.clear();orderTail_=0;orderScratch_.clear();attachSwap_.clear();visibleScratch_.clear();depthTransfers_.clear();
+    commands_.clear();sceneryRunStrips_.clear();prewarmTextures_.clear();pendingAlphaIndices_.clear();order_.clear();orderTail_=0;orderScratch_.clear();attachSwap_.clear();visibleScratch_.clear();depthTransfers_.clear();
     modelStripScratch_.clear();modelTextureScratch_.clear();
     for(auto& chunk:modelCaptureScratch_) {
         chunk.commands.clear();chunk.animatedStrips.clear();chunk.alphaGroups=0;
@@ -7353,6 +7467,18 @@ bool NativeResidentGeometryKey(const VkSolidStripJob& job,VkResidentGeometryKey&
 // snapshotted once per frame; FE and IG variants retain their actual tables.
 // calls, last-input hits, slot hits, lit record builds, unlit builds, dedupe hits
 std::array<std::uint64_t,6> nativeShadingCounters{};
+// Model-run cache (Vita model_run_cache_off.txt, PC HP2_RUN_CACHE=0 off,
+// 2 verify): a car part run's continuation strips, recorded with the exact
+// resident entries Acquire gave them, replayed as one span range + batch.
+int ecstasyModelRunCache=1;
+// hits, misses, replayed strips, verify checks, verify mismatches
+std::array<std::uint64_t,5> nativeModelRunCounters{};
+struct VkModelRunRecord {
+    std::vector<const EditorMarkerSolidGeometry::Strip*> strips;
+    std::vector<std::uint32_t> slots;
+    std::vector<std::uint64_t> tokens;
+    bool wireframe{},solidKind{};float lod1{};
+};
 // Last Gather's resident geometry events: new entries, evictions, source
 // captures (byte copies), variant reuses.
 std::array<std::uint32_t,4> nativeGatherResidentEvents{};
@@ -7739,18 +7865,7 @@ public:
             resolved->token=token;FrameSource(token)=resolved;
         }
         auto& source=*resolved;
-        if(source.validatedGather!=gather_) {
-            const auto revision=token->nativeVertexRevision;
-            const bool compared=validationsReady_ && source.queuedValidationGather==gather_;
-            const bool sameRevision=revision!=0 && revision==source.vertexRevision;
-            const bool matches=sameRevision || (compared ? validations_[source.queuedValidation].matches:
-                source.generation && source.Matches(*token));
-            if(!matches) {source.Capture(*token);++nativeGatherResidentEvents[2];}
-            source.vertexRevision=revision;
-            // Publication stays at the original first used strip. A
-            // completed comparison alone never marks source bytes valid.
-            source.validatedGather=gather_;
-        }
+        ValidateSource(source,token);
         for(std::size_t at=0;at<source.variantCount;++at) {
             auto& entry=*entries_[source.variants[at]];
             if(entry.sourceGeneration==source.generation && entry.key==key) {
@@ -7813,6 +7928,26 @@ public:
         entries_[slot]=std::move(owned);source.variants[source.variantCount++]=slot;
         Touch(entry);prepare=true;cached=&entry;return &entry;
     }
+    // Model-run cache: the entry Acquire returned for this strip in an
+    // earlier Gather, if it is still that exact entry (same slot object,
+    // index token, source strip and key), its source bytes validate exactly
+    // as Acquire would, and it needs no preparation. Otherwise null; the
+    // caller then takes the ordinary Acquire path for the whole run.
+    VkResidentGeometryEntry* Reacquire(const EditorMarkerSolidGeometry::Strip* token,std::uint32_t slot,
+        std::uint64_t indexToken,const VkResidentGeometryKey& key) {
+        if(!Capacity() || slot>=entries_.size())return nullptr;
+        auto* entry=entries_[slot].get();
+        if(!entry || entry->indexToken!=indexToken || entry->source!=token || !(entry->key==key) || !entry->prepared)return nullptr;
+        auto* source=FindSource(token);
+        if(!source)return nullptr;
+        ValidateSource(*source,token);
+        if(entry->sourceGeneration!=source->generation)return nullptr;
+        const auto identity=reinterpret_cast<std::uintptr_t>(token);
+        const auto hash=(identity>>4)^(identity>>12)^(identity>>20)^
+            (static_cast<std::size_t>(key.words[1])*0x9e3779b9u)^key.words[0]^key.words[2];
+        frameEntries_[hash&(frameEntries_.size()-1)]=entry;
+        Touch(*entry);return entry;
+    }
     // Hint only: warms the lookup slot and source of a strip about to be
     // acquired (scenery runs walk strips whose sources are cold).
     void Prefetch(const EditorMarkerSolidGeometry::Strip* token) const noexcept {
@@ -7846,6 +7981,19 @@ private:
         const auto found=sources_.find(token);
         if(found==sources_.end())return nullptr;
         cached=found->second.get();return cached;
+    }
+    void ValidateSource(VkResidentGeometrySource& source,const EditorMarkerSolidGeometry::Strip* token) {
+        if(source.validatedGather==gather_)return;
+        const auto revision=token->nativeVertexRevision;
+        const bool compared=validationsReady_ && source.queuedValidationGather==gather_;
+        const bool sameRevision=revision!=0 && revision==source.vertexRevision;
+        const bool matches=sameRevision || (compared ? validations_[source.queuedValidation].matches:
+            source.generation && source.Matches(*token));
+        if(!matches) {source.Capture(*token);++nativeGatherResidentEvents[2];}
+        source.vertexRevision=revision;
+        // Publication stays at the original first used strip. A
+        // completed comparison alone never marks source bytes valid.
+        source.validatedGather=gather_;
     }
     void ForgetSource(const EditorMarkerSolidGeometry::Strip* token) {
         auto& cached=FrameSource(token);
@@ -8526,6 +8674,9 @@ struct EcstasyVulkanDevice::Storage {
     VkNativeBuffer residentVertices,residentStaging;
     VkNativeBuffer residentIndices,residentIndexStaging;
     VkResidentGeometryCache residentGeometry;
+    std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> modelRunRecords;
+    std::vector<const EditorMarkerSolidGeometry::Strip*> modelRunScratchStrips;
+    std::vector<VkResidentGeometryEntry*> modelRunScratchEntries,modelRunScratchReplay;
     VkResidentIndexCache residentIndexCache;
     VkSceneryPacketCache sceneryPackets;
     std::uint64_t nextTextureGeneration{};
@@ -9125,6 +9276,7 @@ struct EcstasyVulkanDevice::Storage {
     void StopPipelineWorker() noexcept;
     void SavePipelineCache() noexcept;
     void UploadTexture(const TextureInfo& texture,std::size_t index,bool repeatedPadding);
+    bool PrewarmAllowed() const noexcept {return !nativeSubmissionPending;}
     // Reused across frames. Input commands belong to the sealed source frame;
     // workers only read that frame and write disjoint completed vertex slots.
     std::vector<VkSolidStripJob> nativeStripJobs;
@@ -10213,6 +10365,7 @@ VkPipeline EcstasyVulkanDevice::Storage::CompilePipeline(const VkDrawBatch& batc
 void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std::size_t index,bool repeatedPadding)
 {
     Require(!nativeSubmissionPending,"Texture upload cannot replace an in-flight native image");
+    if(index<textures.size() && !textures[index].generation)EcstasyRecordTextureFirstUse(texture,repeatedPadding);
 
     Require(index<textures.size() && textures.size()<=4096,"Frame exceeds the Vulkan descriptor allocation capacity");
     // Decode and validate before destroying the previous cache entry. A

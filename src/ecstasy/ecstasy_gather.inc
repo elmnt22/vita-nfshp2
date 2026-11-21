@@ -114,6 +114,8 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         resolved.indices[context]=found->second;resolved.contexts|=mask;
         return found->second;
     };
+    // Texture prewarm: the ordinary resolve/upload path, ahead of first draw.
+    if(PrewarmAllowed())for(const auto& [texture,forcedClamp]:frame.PrewarmTextures())(void)resolveTexture(*texture,forcedClamp);
     // Logical targets can share one physical attachment. Use the original
     // source identity and keep the raster cache local to this Gather.
     struct TargetRaster {
@@ -427,7 +429,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // acquisition, index range, vertex preparation and append. Mirrors the
     // general solid branch below for everything that depends on the strip.
     const auto continueSolidTemplate=[&](const EcstasyDrawCommand& draw,const SolidTemplate& source,
-        const EditorMarkerSolidGeometry::Strip* runStrip=nullptr) {
+        const EditorMarkerSolidGeometry::Strip* runStrip=nullptr,VkResidentGeometryEntry** residentOut=nullptr) {
         const bool timeTemplate=sampleCategories && (templateTimeIndex++&7u)==0;
         const auto templateStarted=timeTemplate ? Clock::now():Clock::time_point{};
         struct TemplateTimer {
@@ -457,6 +459,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         job.lineTopology=batch.wireframe;
         const auto acquireStarted=timeTemplate ? Clock::now():Clock::time_point{};
         bool prepare=false;auto* resident=residentGeometry.Acquire(job,prepare);
+        if(residentOut)*residentOut=resident;
         if(timeTemplate)nativeGatherStepMilliseconds[11]+=std::chrono::duration<double,std::milli>(Clock::now()-acquireStarted).count();
         nativeSolidKinds[draw.kind==EcstasyDrawKind::SolidSpecularStrip ? 2:draw.carShadow!=EcstasyCarShadow::None ? 3:0]+=1;
         if(!resident)nativeSolidKinds[4]+=1; else if(prepare)nativeSolidKinds[5]+=1;
@@ -505,6 +508,127 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     };
     const auto& sourceCommands=frame.Commands();
     const auto& runStrips=frame.SceneryRunStrips();
+    // Model-run cache. A recorded run replays only when every continuation
+    // strip is the same strip pointer and its earlier resident entry is
+    // still that exact, prepared entry with exactly validated source bytes.
+    // The per-strip path would then append the same spans and merge the same
+    // contiguous batches (equal state, adjacent index and span ranges), so
+    // one combined span range and batch is the identical output.
+#if !defined(__vita__) && !defined(__SWITCH__)
+    static const int modelRunCacheMode=[] {const char* value=std::getenv("HP2_RUN_CACHE");return value ? std::atoi(value):1;}();
+#else
+    const int modelRunCacheMode=ecstasyModelRunCache;
+#endif
+    const EcstasyDrawCommand* runRecording=nullptr;
+    std::vector<const EditorMarkerSolidGeometry::Strip*>& recordStrips=modelRunScratchStrips;
+    std::vector<VkResidentGeometryEntry*>& recordEntries=modelRunScratchEntries;
+    recordStrips.clear();recordEntries.clear();
+    struct ModelRunVerify {
+        const EcstasyDrawCommand* run{};
+        std::size_t spansBefore{},batchesBefore{};
+        VkDrawBatch backBefore,expected;bool hadBack{};
+        std::vector<VkResidentGeometryEntry*> entries;
+    } modelRunVerify;
+    const auto runLod1=[](const EcstasyDrawCommand& draw,const SolidTemplate& slot,const EditorMarkerSolidGeometry::Strip& strip) {
+        return draw.kind==EcstasyDrawKind::SolidStrip ? static_cast<std::uint8_t>(strip.autoK)*0.0625f:slot.lod1;
+    };
+    const auto replayModelRun=[&](const EcstasyDrawCommand& run,const EcstasyDrawCommand& draw,const SolidTemplate& slot)->bool {
+        const std::size_t count=run.sceneryRunCount-1u;
+        const auto* strips=&runStrips[run.sceneryRunFirst+1u];
+        const auto found=modelRunRecords.find(strips[0]);
+        const bool solidKind=draw.kind==EcstasyDrawKind::SolidStrip;
+        if(found==modelRunRecords.end()) {++nativeModelRunCounters[1];return false;}
+        const auto& record=found->second;
+        if(record.strips.size()!=count || std::memcmp(record.strips.data(),strips,count*sizeof(strips[0])) ||
+            record.wireframe!=slot.batch.wireframe || record.solidKind!=solidKind ||
+            (!solidKind && std::memcmp(&record.lod1,&slot.lod1,sizeof(float)))) {++nativeModelRunCounters[1];return false;}
+        auto& entries=modelRunScratchReplay;entries.resize(count);
+        for(std::size_t at=0;at<count;++at) {
+            VkResidentGeometryKey key;
+            key.words[0]=slot.batch.wireframe ? 1u:0u;
+            const float lod1=runLod1(draw,slot,*strips[at]);
+            std::memcpy(&key.words[1],&lod1,sizeof(float));key.words[2]=0;
+            auto* entry=residentGeometry.Reacquire(strips[at],record.slots[at],record.tokens[at],key);
+            if(!entry || !entry->indexCount) {++nativeModelRunCounters[1];return false;}
+            entries[at]=entry;
+        }
+        VkDrawBatch batch=slot.batch;
+        batch.residentGeometry=true;batch.first=static_cast<std::uint32_t>(residentFrameIndices);
+        Require(gatheredResidentIndexSpans.size()+count<std::numeric_limits<std::uint32_t>::max(),
+            "Native resident index span count exceeds32-bit range");
+        batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());
+        batch.nativeSpanCount=static_cast<std::uint32_t>(count);
+        std::size_t indices=0;for(const auto* entry:entries)indices+=entry->indexCount;
+        Require(residentFrameIndices+indices<=std::numeric_limits<std::uint32_t>::max(),
+            "Native resident frame index count exceeds32-bit draw range");
+        batch.count=static_cast<std::uint32_t>(indices);
+        if(modelRunCacheMode==2) {
+            // Verify: the ordinary path runs and must produce this.
+            modelRunVerify.run=&run;modelRunVerify.spansBefore=gatheredResidentIndexSpans.size();
+            modelRunVerify.batchesBefore=batches.size();modelRunVerify.hadBack=!batches.empty();
+            if(modelRunVerify.hadBack)modelRunVerify.backBefore=batches.back();
+            modelRunVerify.expected=batch;modelRunVerify.entries=entries;
+            return true;
+        }
+        for(auto* entry:entries) {
+            gatheredResidentIndexSpans.push_back(entry);gatheredResidentSpanTokens.push_back(entry->indexToken);
+            residentFrameVertices+=entry->count;
+        }
+        residentFrameIndices+=indices;
+        textureLod[0]=draw.textureQScale;textureLod[1]=runLod1(draw,slot,*strips[count-1]);glyphBoundsIndex=0;
+        appendBatch(batch);
+        const auto kind=draw.kind==EcstasyDrawKind::SolidSpecularStrip ? 2:draw.carShadow!=EcstasyCarShadow::None ? 3:0;
+        nativeSolidKinds[kind]+=static_cast<double>(count);
+        if(draw.carShadow!=EcstasyCarShadow::None) {
+            const auto shadow=static_cast<std::size_t>(draw.carShadow)-1;
+            profile.shadowStrips[shadow]+=count;profile.shadowTriangles[shadow]+=batch.count/3u;
+        }
+        statistics.solidTemplateHits+=count;nativeGatherCounters[0]+=count;
+        ++nativeModelRunCounters[0];nativeModelRunCounters[2]+=count;
+        return true;
+    };
+    const auto finishModelRunRecord=[&](const EcstasyDrawCommand& run,const EcstasyDrawCommand& draw,const SolidTemplate& slot) {
+        if(recordStrips.size()+1u!=run.sceneryRunCount)return;
+        if(modelRunRecords.size()>=4096)modelRunRecords.clear();
+        auto& record=modelRunRecords[recordStrips[0]];
+        record.strips=recordStrips;record.slots.resize(recordEntries.size());record.tokens.resize(recordEntries.size());
+        for(std::size_t at=0;at<recordEntries.size();++at) {
+            record.slots[at]=recordEntries[at]->slot;record.tokens[at]=recordEntries[at]->indexToken;
+        }
+        record.wireframe=slot.batch.wireframe;record.solidKind=draw.kind==EcstasyDrawKind::SolidStrip;record.lod1=slot.lod1;
+    };
+    const auto checkModelRunVerify=[&] {
+        auto& verify=modelRunVerify;
+        bool same=gatheredResidentIndexSpans.size()==verify.spansBefore+verify.entries.size();
+        for(std::size_t at=0;same && at<verify.entries.size();++at)
+            same=gatheredResidentIndexSpans[verify.spansBefore+at]==verify.entries[at] &&
+                gatheredResidentSpanTokens[verify.spansBefore+at]==verify.entries[at]->indexToken;
+        VkDrawBatch expected=verify.expected;
+        std::size_t expectedSize=verify.batchesBefore+1;
+        if(verify.hadBack && expected.Continues(verify.backBefore)) {
+            auto merged=verify.backBefore;merged.count+=expected.count;merged.nativeSpanCount+=expected.nativeSpanCount;
+            expected=merged;expectedSize=verify.batchesBefore;
+        }
+        if(same)same=batches.size()==expectedSize && !batches.empty();
+        if(same) {
+            const auto& actual=batches.back();
+            same=actual.SameDrawState(expected) && actual.first==expected.first && actual.count==expected.count &&
+                actual.residentGeometry==expected.residentGeometry && actual.nativeSpanFirst==expected.nativeSpanFirst &&
+                actual.nativeSpanCount==expected.nativeSpanCount && actual.nativeLocalToClip==expected.nativeLocalToClip &&
+                actual.nativeClipMapping==expected.nativeClipMapping && actual.nativeShadingIndex==expected.nativeShadingIndex &&
+                actual.nativeTextureQScale==expected.nativeTextureQScale && actual.nativeTransformIndex==expected.nativeTransformIndex;
+        }
+        ++nativeModelRunCounters[3];
+        if(!same)++nativeModelRunCounters[4];
+        if((nativeModelRunCounters[3]&4095u)==0 || (!same && nativeModelRunCounters[4]==1)) {
+            char text[128];
+            std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu replay_hits=%llu misses=%llu",
+                (unsigned long long)nativeModelRunCounters[3],(unsigned long long)nativeModelRunCounters[4],
+                (unsigned long long)nativeModelRunCounters[0],(unsigned long long)nativeModelRunCounters[1]);
+            platform::RecordSessionEvent("render.model_run_verify",text);
+        }
+        verify.run=nullptr;
+    };
     std::uint32_t runResume=0; // next unexpanded strip of sourceCommands[commandAt]
     const EcstasyDrawCommand* modelRunSingle=nullptr; // first-strip command of the current model run
 #if defined(__GNUC__)
@@ -529,20 +653,41 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             // path as the per-strip command it replaced; later strips reuse
             // that command's solid template (the same state, another strip).
             const auto& run=*current;
+            const auto stripIndex=runResume;
             const auto* strip=runStrips[run.sceneryRunFirst+runResume];
             const bool first=runResume==0;
             if(++runResume>=run.sceneryRunCount) {runResume=0;++commandAt;}
             else residentGeometry.Prefetch(runStrips[run.sceneryRunFirst+runResume]);
             if(sampleCategories) {nativeGatherStepMilliseconds[14]+=1.0;if(first)nativeGatherStepMilliseconds[13]+=1.0;}
+            if(first)runRecording=nullptr;
             if(!first && modelRunSingle && ecstasySolidTemplate && !verifySolidTemplate) {
                 const auto& slot=solidTemplateSlot(*modelRunSingle);
                 if(slot.draw==modelRunSingle) {
                     if(sampleCategories)nativeGatherStepMilliseconds[15]+=1.0;
                     categoryTimer.Enter(run);
-                    continueSolidTemplate(*modelRunSingle,slot,strip);
+                    if(stripIndex==1 && modelRunCacheMode) {
+                        const bool replayed=replayModelRun(run,*modelRunSingle,slot);
+                        if(replayed && modelRunCacheMode==1) {
+                            if(runResume) {runResume=0;++commandAt;}
+                            continue;
+                        }
+                        runRecording=&run;recordStrips.clear();recordEntries.clear();
+                    }
+                    VkResidentGeometryEntry* resident=nullptr;
+                    continueSolidTemplate(*modelRunSingle,slot,strip,runRecording==&run ? &resident:nullptr);
+                    if(runRecording==&run) {
+                        if(!resident || !resident->indexCount)runRecording=nullptr;
+                        else {recordStrips.push_back(strip);recordEntries.push_back(resident);}
+                        if(runRecording && stripIndex+1==run.sceneryRunCount) {
+                            finishModelRunRecord(run,*modelRunSingle,slot);runRecording=nullptr;
+                        }
+                    }
+                    if(stripIndex+1==run.sceneryRunCount && modelRunVerify.run==&run)checkModelRunVerify();
                     continue;
                 }
             }
+            if(runRecording==&run)runRecording=nullptr;
+            if(modelRunVerify.run==&run)modelRunVerify.run=nullptr;
             sceneryRunFallbacks.push_back(run);
             auto& single=sceneryRunFallbacks.back();
             single.strip=strip;single.sceneryRunCount=0;single.sceneryRunFirst=0;
