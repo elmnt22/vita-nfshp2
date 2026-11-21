@@ -293,6 +293,24 @@ struct GlProgram {
     float flip{};
     bool transformValid{},parametersValid{},flipValid{};
     std::uint32_t shading{UINT32_MAX};
+    // Direct GXM path (Vita gxm_off.txt off): the same compiled GXP pair,
+    // patched and bound by the port. Uniform values live in CPU shadows of
+    // each default uniform buffer, copied to vitaGL's uniform pool on change.
+    int directState{}; // 0 untried, 1 ready, -1 unavailable (GL path)
+    const SceGxmProgram* vertexGxp{};
+    const SceGxmProgram* fragmentGxp{};
+    SceGxmShaderPatcherId fragmentId{};
+    SceGxmVertexProgram* vertexProgram{};
+    std::array<std::pair<std::uint32_t,SceGxmFragmentProgram*>,8> fragmentPrograms{};
+    std::size_t fragmentProgramCount{};
+    int uM0{-1},uM1{-1},uM2{-1},uM3{-1},uClipmap{-1},uYflip{-1},uShade{-1},uMat{-1},uFlags{-1},uFlags2{-1};
+    int uFparam{-1},uDepthmap{-1},textureUnit{-1},depthUnit{-1};
+    std::vector<float> vertexUniforms,fragmentUniforms;
+    void* vertexBlock{};void* fragmentBlock{};
+    bool vertexDirty{true},fragmentDirty{true};
+    std::array<float,20> dTransform{};std::array<float,4> dParameters{};float dFlip{};
+    bool dTransformValid{},dParametersValid{},dFlipValid{},dDepthmapValid{};
+    std::uint32_t dShading{UINT32_MAX},dDepthmapDivisor{};
 };
 
 struct GlBlendState {
@@ -455,6 +473,16 @@ struct EcstasyVulkanDevice::Storage {
     bool residentVerticesAllocated{},residentIndicesAllocated{};
     SceUInt64 lastSlowPrepareLog{},lastSlowSubmitLog{};
     std::uint64_t skippedBatches{},drawnBatches{};
+    // Direct GXM path ownership: GXM state issued by the port since vitaGL
+    // last drew (vitaGL's eager state must be re-applied before it draws
+    // again), and GL activity since the port last drew (the port's GXM state
+    // cache is stale and vitaGL may owe a scene begin or scissor mask).
+    bool gxmDirectTouched{},glTouchedSinceDirect{true};
+    GlMappedBuffer linearIndices;
+    std::uint64_t directDraws{},directFallbacks{},directScissorSyncs{},directSetupFailures{};
+    bool GxmSetup(GlProgram& program,std::uint32_t key,bool instanced);
+    SceGxmFragmentProgram* GxmFragment(GlProgram& program,const SceGxmBlendInfo& blend);
+    void EnterGl() {if(gxmDirectTouched) {vglHp2Invalidate();gxmDirectTouched=false;}glTouchedSinceDirect=true;}
 
     explicit Storage(const EcstasyVulkanOptions& value):options(value)
     {
@@ -1068,6 +1096,168 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     return program;
 }
 
+int ecstasyGxmDirect=1; // Vita gxm_off.txt: every draw through vitaGL
+int ecstasyGxmParity=0; // Vita gxm_parity.txt: shot frames drawn twice (vitaGL shot +100000000, then direct)
+bool EcstasyVulkanDevice::Storage::GxmSetup(GlProgram& program,std::uint32_t key,bool instanced)
+{
+    if(program.directState)return program.directState>0;
+    program.directState=-1;
+    const auto fail=[&](const char* why) {
+        ++directSetupFailures;
+        char detail[160];std::snprintf(detail,sizeof(detail),"key=%03x reason=%s",key,why);
+        platform::RecordSessionEvent("renderer.gxm.setup_failed",detail);
+        // Name dump of the vertex program's parameters (first failure only).
+        static bool dumped=false;
+        if(!dumped && program.vertexGxp) {
+            dumped=true;
+            const auto count=sceGxmProgramGetParameterCount(program.vertexGxp);
+            for(unsigned at=0;at<count;++at) {
+                const auto* parameter=sceGxmProgramGetParameter(program.vertexGxp,at);
+                std::snprintf(detail,sizeof(detail),"vertex param=%s category=%d type=%d index=%u container=%u",
+                    sceGxmProgramParameterGetName(parameter),static_cast<int>(sceGxmProgramParameterGetCategory(parameter)),
+                    static_cast<int>(sceGxmProgramParameterGetType(parameter)),sceGxmProgramParameterGetResourceIndex(parameter),
+                    sceGxmProgramParameterGetContainerIndex(parameter));
+                platform::RecordSessionEvent("renderer.gxm.param",detail);
+            }
+        }
+        return false;
+    };
+    SceGxmShaderPatcherId vertexId{};
+    if(!vglHp2ProgramInfo(program.program,&program.vertexGxp,&program.fragmentGxp,&vertexId,&program.fragmentId))
+        return fail("program_info");
+    // Vertex attributes: VkVertex (68-byte stream 0) and, for INST, the
+    // 80-byte instance table rows (stream 1), the same layout the GL path binds.
+    struct AttributeSpec {const char* name;unsigned stream,offset,components;};
+    const AttributeSpec specs[]={
+        {"a_pos",0,static_cast<unsigned>(offsetof(VkVertex,position)),4},{"a_uvq",0,static_cast<unsigned>(offsetof(VkVertex,uvq)),3},
+        {"a_col",0,static_cast<unsigned>(offsetof(VkVertex,color)),4},{"a_nrm",0,static_cast<unsigned>(offsetof(VkVertex,normal)),3},
+        {"a_i0",1,0,4},{"a_i1",1,16,4},{"a_i2",1,32,4},{"a_i3",1,48,4},{"a_i4",1,64,4}};
+    std::array<SceGxmVertexAttribute,9> attributes{};unsigned attributeCount=0;
+    for(const auto& spec:specs) {
+        if(spec.stream==1 && !instanced)continue;
+        const auto* parameter=sceGxmProgramFindParameterByName(program.vertexGxp,spec.name);
+        if(!parameter) {
+            if(!std::strcmp(spec.name,"a_pos"))return fail("no_a_pos");
+            continue; // optimised out
+        }
+        if(sceGxmProgramParameterGetCategory(parameter)!=SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE)return fail("attribute_category");
+        auto& attribute=attributes[attributeCount++];
+        attribute.streamIndex=static_cast<unsigned short>(spec.stream);
+        attribute.offset=static_cast<unsigned short>(spec.offset);
+        attribute.format=SCE_GXM_ATTRIBUTE_FORMAT_F32;
+        attribute.componentCount=static_cast<unsigned char>(spec.components);
+        attribute.regIndex=static_cast<unsigned short>(sceGxmProgramParameterGetResourceIndex(parameter));
+    }
+    std::array<SceGxmVertexStream,2> streams{};
+    streams[0].stride=static_cast<unsigned short>(sizeof(VkVertex));streams[0].indexSource=SCE_GXM_INDEX_SOURCE_INDEX_32BIT;
+    streams[1].stride=80;streams[1].indexSource=SCE_GXM_INDEX_SOURCE_INSTANCE_32BIT;
+    if(sceGxmShaderPatcherCreateVertexProgram(gxm_shader_patcher,vertexId,attributes.data(),attributeCount,
+        streams.data(),instanced ? 2u:1u,&program.vertexProgram)<0 || !program.vertexProgram)return fail("vertex_patch");
+    // Default-buffer float uniforms (offsets in 32-bit words, as vitaGL).
+    const auto uniform=[&](const SceGxmProgram* gxp,const char* name,int& offset)->bool {
+        offset=-1;
+        const auto* parameter=sceGxmProgramFindParameterByName(gxp,name);
+        if(!parameter)return true;
+        if(sceGxmProgramParameterGetCategory(parameter)!=SCE_GXM_PARAMETER_CATEGORY_UNIFORM ||
+            sceGxmProgramParameterGetType(parameter)!=SCE_GXM_PARAMETER_TYPE_F32 ||
+            sceGxmProgramParameterGetContainerIndex(parameter)!=SCE_GXM_MAX_UNIFORM_BUFFERS)return false;
+        offset=static_cast<int>(sceGxmProgramParameterGetResourceIndex(parameter));
+        return true;
+    };
+    bool uniformsOk=uniform(program.vertexGxp,"u_m0",program.uM0) && uniform(program.vertexGxp,"u_m1",program.uM1) &&
+        uniform(program.vertexGxp,"u_m2",program.uM2) && uniform(program.vertexGxp,"u_m3",program.uM3) &&
+        uniform(program.vertexGxp,"u_clipmap",program.uClipmap) && uniform(program.vertexGxp,"u_yflip",program.uYflip) &&
+        uniform(program.vertexGxp,"u_shade",program.uShade) && uniform(program.vertexGxp,"u_mat",program.uMat) &&
+        uniform(program.vertexGxp,"u_flags",program.uFlags) && uniform(program.vertexGxp,"u_flags2",program.uFlags2) &&
+        uniform(program.fragmentGxp,"u_fparam",program.uFparam) && uniform(program.fragmentGxp,"u_depthmap",program.uDepthmap);
+    if(!uniformsOk)return fail("uniform_type");
+    const auto sampler=[&](const char* name)->int {
+        const auto* parameter=sceGxmProgramFindParameterByName(program.fragmentGxp,name);
+        if(!parameter || sceGxmProgramParameterGetCategory(parameter)!=SCE_GXM_PARAMETER_CATEGORY_SAMPLER)return -1;
+        return static_cast<int>(sceGxmProgramParameterGetResourceIndex(parameter));
+    };
+    program.textureUnit=sampler("u_tex");program.depthUnit=sampler("u_depth");
+    if(((key>>2)&1u) && program.textureUnit<0)return fail("no_texture_sampler");
+    if(((key>>11)&1u) && program.depthUnit<0)return fail("no_depth_sampler");
+    program.vertexUniforms.assign(sceGxmProgramGetDefaultUniformBufferSize(program.vertexGxp)/4u,0.0f);
+    program.fragmentUniforms.assign(sceGxmProgramGetDefaultUniformBufferSize(program.fragmentGxp)/4u,0.0f);
+    const auto fits=[](const std::vector<float>& buffer,int offset,std::size_t floats) {
+        return offset<0 || static_cast<std::size_t>(offset)+floats<=buffer.size();
+    };
+    if(!fits(program.vertexUniforms,program.uM0,4) || !fits(program.vertexUniforms,program.uM1,4) ||
+        !fits(program.vertexUniforms,program.uM2,4) || !fits(program.vertexUniforms,program.uM3,4) ||
+        !fits(program.vertexUniforms,program.uClipmap,4) || !fits(program.vertexUniforms,program.uYflip,1) ||
+        !fits(program.vertexUniforms,program.uShade,19*4) || !fits(program.vertexUniforms,program.uMat,16) ||
+        !fits(program.vertexUniforms,program.uFlags,4) || !fits(program.vertexUniforms,program.uFlags2,4) ||
+        !fits(program.fragmentUniforms,program.uFparam,4) || !fits(program.fragmentUniforms,program.uDepthmap,4))
+        return fail("uniform_bounds");
+    program.directState=1;
+    char detail[200];
+    std::snprintf(detail,sizeof(detail),"key=%03x attributes=%u vertex_uniform_words=%u fragment_uniform_words=%u tex_unit=%d depth_unit=%d",
+        key,attributeCount,static_cast<unsigned>(program.vertexUniforms.size()),static_cast<unsigned>(program.fragmentUniforms.size()),
+        program.textureUnit,program.depthUnit);
+    platform::RecordSessionEvent("renderer.gxm.program",detail);
+    return true;
+}
+
+SceGxmFragmentProgram* EcstasyVulkanDevice::Storage::GxmFragment(GlProgram& program,const SceGxmBlendInfo& blend)
+{
+    static_assert(sizeof(SceGxmBlendInfo)==4,"SceGxmBlendInfo is one word");
+    std::uint32_t code{};std::memcpy(&code,&blend,sizeof(code));
+    for(std::size_t at=0;at<program.fragmentProgramCount;++at)
+        if(program.fragmentPrograms[at].first==code)return program.fragmentPrograms[at].second;
+    SceGxmFragmentProgram* fragment{};
+    if(sceGxmShaderPatcherCreateFragmentProgram(gxm_shader_patcher,program.fragmentId,SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+        SCE_GXM_MULTISAMPLE_NONE,&blend,program.vertexGxp,&fragment)<0)return nullptr;
+    if(program.fragmentProgramCount<program.fragmentPrograms.size())
+        program.fragmentPrograms[program.fragmentProgramCount++]={code,fragment};
+    else program.fragmentPrograms[(code>>3)%program.fragmentPrograms.size()]={code,fragment}; // patcher keeps the old one alive
+    return fragment;
+}
+
+namespace {
+SceGxmBlendFactor GxmFactor(GLenum factor) noexcept
+{
+    switch(factor) {
+        case GL_ZERO:return SCE_GXM_BLEND_FACTOR_ZERO;
+        case GL_SRC_ALPHA:return SCE_GXM_BLEND_FACTOR_SRC_ALPHA;
+        case GL_ONE_MINUS_SRC_ALPHA:return SCE_GXM_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        case GL_DST_ALPHA:return SCE_GXM_BLEND_FACTOR_DST_ALPHA;
+        case GL_ONE_MINUS_DST_ALPHA:return SCE_GXM_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+        default:return SCE_GXM_BLEND_FACTOR_ONE;
+    }
+}
+SceGxmBlendFunc GxmEquation(GLenum equation) noexcept
+{
+    return equation==GL_FUNC_SUBTRACT ? SCE_GXM_BLEND_FUNC_SUBTRACT:
+        equation==GL_FUNC_REVERSE_SUBTRACT ? SCE_GXM_BLEND_FUNC_REVERSE_SUBTRACT:SCE_GXM_BLEND_FUNC_ADD;
+}
+// The blend word vitaGL builds for the same GL calls the GL path issues
+// (glBlendEquationSeparate(eq,ADD) + glBlendFuncSeparate, or glDisable(BLEND)
+// -> change_blend_mask), so the patcher returns the same fragment program.
+SceGxmBlendInfo GxmBlendFor(const GlBlendState& blend,bool halfMode) noexcept
+{
+    SceGxmBlendInfo info{};
+    info.colorMask=SCE_GXM_COLOR_MASK_ALL;
+    if(!blend.enable) {
+        info.colorFunc=SCE_GXM_BLEND_FUNC_NONE;info.alphaFunc=SCE_GXM_BLEND_FUNC_NONE;
+        info.colorSrc=SCE_GXM_BLEND_FACTOR_SRC_ALPHA;info.colorDst=SCE_GXM_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        info.alphaSrc=SCE_GXM_BLEND_FACTOR_ONE;info.alphaDst=SCE_GXM_BLEND_FACTOR_ZERO;
+        return info;
+    }
+    info.colorFunc=GxmEquation(blend.equation);info.alphaFunc=SCE_GXM_BLEND_FUNC_ADD;
+    info.colorSrc=GxmFactor(blend.source);info.colorDst=GxmFactor(blend.destination);
+    if(halfMode) {
+        info.alphaSrc=blend.destination==GL_ONE ? SCE_GXM_BLEND_FACTOR_ZERO:SCE_GXM_BLEND_FACTOR_ONE;
+        info.alphaDst=blend.destination==GL_ONE ? SCE_GXM_BLEND_FACTOR_ONE:SCE_GXM_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    } else {
+        info.alphaSrc=blend.fixedAlpha ? SCE_GXM_BLEND_FACTOR_ZERO:SCE_GXM_BLEND_FACTOR_ONE;
+        info.alphaDst=blend.fixedAlpha ? SCE_GXM_BLEND_FACTOR_ONE:SCE_GXM_BLEND_FACTOR_ZERO;
+    }
+    return info;
+}
+}
+
 std::atomic<int> glRenderStage{0};
 bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
 {
@@ -1284,7 +1474,7 @@ void EcstasyVulkanDevice::Storage::GlThread()
 // starvation (waiting for the submit) can be separated without draining.
 int ecstasyGpuTimeline=0;
 struct GpuTimelineRecord {
-    std::uint64_t submitBegin{},submitEnd{},swapEnd{};
+    std::uint64_t submitBegin{},submitEnd{},swapEnd{},uploadEnd{},passBegin{},passEnd{};
     std::uint32_t fence{},draws{};
     std::atomic<std::uint64_t> done{0};
 };
@@ -1379,6 +1569,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         std::memcpy(indexStream.mapped,elementIndices.data(),elementIndices.size()*sizeof(std::uint32_t));
     }
     const auto uploadDone=Clock::now();
+    const auto timelineUploadEnd=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
 
     // Passes: each colour target owns its batches; a target sampled in this
     // frame renders first (Vulkan's dependency order). Offscreen targets keep
@@ -1462,8 +1653,27 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         for(GLuint attribute=4;attribute<9;++attribute) {glEnableVertexAttribArray(attribute);glVertexAttribDivisor(attribute,1);}
     }
     GLuint activeVertexBuffer=0,activeIndexBuffer=0,activeTexture=~0u;
-    // Shading indices address this frame's table only.
-    for(auto& entry:programs)entry.second.shading=UINT32_MAX;
+    // Shading indices address this frame's table only; direct uniform
+    // blocks live in vitaGL's circular pool and are reused within a frame only.
+    for(auto& entry:programs) {
+        entry.second.shading=UINT32_MAX;entry.second.dShading=UINT32_MAX;
+        entry.second.vertexBlock=nullptr;entry.second.fragmentBlock=nullptr;
+    }
+    if(ecstasyGxmDirect && !linearIndices.name) {
+        constexpr std::uint32_t linearCount=60000u;
+        linearIndices.Ensure(GL_ELEMENT_ARRAY_BUFFER,linearCount*sizeof(std::uint32_t));
+        auto* linear=reinterpret_cast<std::uint32_t*>(linearIndices.mapped);
+        for(std::uint32_t at=0;at<linearCount;++at)linear[at]=at;
+    }
+    {
+        static unsigned directFrames=0;
+        if(ecstasyGxmDirect && ++directFrames==300) {
+            char detail[128];std::snprintf(detail,sizeof(detail),"per_frame direct=%.1f gl=%.1f syncs=%.1f setup_failures=%llu",
+                directDraws/300.0,directFallbacks/300.0,directScissorSyncs/300.0,static_cast<unsigned long long>(directSetupFailures));
+            platform::RecordSessionEvent("renderer.gxm.direct",detail);
+            directFrames=0;directDraws=directFallbacks=directScissorSyncs=0;
+        }
+    }
     const auto halfEligible=[&](const VkDrawBatch& batch) {
         if(!batch.particle || batch.target!=0 || batch.sampledTarget>0 || batch.showcaseEnvironmentBlend)return false;
         const auto blend=glBlendFor(batch);
@@ -1503,6 +1713,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         };
         const std::uint32_t bindStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
         GLint height=static_cast<GLint>(packet.height);
+        EnterGl();
         glDisable(GL_SCISSOR_TEST);
         if(offscreen) {
             const auto& target=glTargets[static_cast<std::size_t>(id)];
@@ -1521,21 +1732,23 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         // rectangle covering the whole target clips nothing, so it is drawn
         // with the test off (exact); real rectangles keep the test.
         int scissorOn=-1;std::array<GLint,4> scissorRect{{-1,-1,-1,-1}};
+        bool scissorPending=true; // vitaGL applies GL scissor changes lazily (scene_reset)
         const GLint passWidth=offscreen ? static_cast<GLint>(glTargets[static_cast<std::size_t>(id)].width):static_cast<GLint>(packet.width);
         const auto applyScissor=[&](GLint x,GLint y,GLint w,GLint h,GLint fullWidth,GLint fullHeight) {
             if(!ecstasyScissorElide) {
-                if(scissorOn!=1) {glEnable(GL_SCISSOR_TEST);scissorOn=1;}
+                if(scissorOn!=1) {glEnable(GL_SCISSOR_TEST);scissorOn=1;scissorPending=true;}
                 const std::array<GLint,4> rect{{x,y,w,h}};
-                if(rect!=scissorRect) {glScissor(x,y,w,h);scissorRect=rect;if(gpuProbeFrame)++gpuCounts.scissorUpdates;}
+                if(rect!=scissorRect) {glScissor(x,y,w,h);scissorRect=rect;scissorPending=true;if(gpuProbeFrame)++gpuCounts.scissorUpdates;}
                 return;
             }
             const bool full=x<=0 && y<=0 && x+w>=fullWidth && y+h>=fullHeight;
             if(full) {
-                if(scissorOn!=0) {glDisable(GL_SCISSOR_TEST);scissorOn=0;if(gpuProbeFrame)++gpuCounts.scissorUpdates;}
+                if(scissorOn!=0) {glDisable(GL_SCISSOR_TEST);scissorOn=0;scissorPending=true;if(gpuProbeFrame)++gpuCounts.scissorUpdates;}
                 return;
             }
             const std::array<GLint,4> rect{{x,y,w,h}};
             const bool changed=rect!=scissorRect || scissorOn!=1;
+            if(changed)scissorPending=true;
             if(rect!=scissorRect) {glScissor(x,y,w,h);scissorRect=rect;}
             if(scissorOn!=1) {glEnable(GL_SCISSOR_TEST);scissorOn=1;}
             if(changed && gpuProbeFrame)++gpuCounts.scissorUpdates;
@@ -1547,6 +1760,11 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         GlBlendState activeBlend;bool blendKnown=false;
         int activeDepth=-1,activeDepthWrite=-1;
         activeTexture=~0u;
+        // Direct GXM bindings issued since the last vitaGL activity.
+        const GlProgram* dProgram{};const SceGxmFragmentProgram* dFragment{};
+        const SceGxmTexture* dTexture{};const SceGxmTexture* dDepthTexture{};
+        const void* dStream0{};const void* dStream1{};
+        const auto directReset=[&] {dProgram=nullptr;dFragment=nullptr;dTexture=dDepthTexture=nullptr;dStream0=dStream1=nullptr;};
         const auto drawOneBody=[&](std::uint32_t batchIndex) {
             const auto& batch=batches[batchIndex];
             const bool sampled=batch.sampledTarget>0;
@@ -1579,7 +1797,32 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             auto& program=Program(key);
             if(!program.program) {++skipped;return;}
             const float drawFlip=halfMode ? 1.0f:yflip;
-            if(&program!=activeProgram) {
+            // Direct GXM draw: same programs, state and buffers as the GL
+            // calls below would hand vitaGL, issued without vitaGL's per-draw
+            // work. Eager GL state (viewport, depth, blend/scissor values)
+            // is still set through GL so both paths see one state.
+            SceGxmFragmentProgram* directFragment{};
+            if(ecstasyGxmDirect && !batch.wireframe && !ecstasyGpuDiag && GxmSetup(program,key,instanced) &&
+                (texturing || program.textureUnit<0) && (halfMode || program.depthUnit<0))
+                directFragment=GxmFragment(program,GxmBlendFor(blend,halfMode));
+            const bool direct=directFragment!=nullptr;
+            if(direct) {
+                if(program.uYflip>=0 && (!program.dFlipValid || program.dFlip!=drawFlip)) {
+                    program.vertexUniforms[static_cast<std::size_t>(program.uYflip)]=drawFlip;
+                    program.dFlip=drawFlip;program.dFlipValid=true;program.vertexDirty=true;
+                }
+                if(halfMode && program.uDepthmap>=0 && (!program.dDepthmapValid || program.dDepthmapDivisor!=halfDivisor)) {
+                    program.dDepthmapDivisor=halfDivisor;
+                    const float w=static_cast<float>(packet.width/halfDivisor),h=static_cast<float>(packet.height/halfDivisor);
+                    float* map=program.fragmentUniforms.data()+program.uDepthmap;
+                    if(ecstasyHalfResDepthFlip) {map[0]=1.0f/w;map[1]=-1.0f/h;map[2]=0.0f;map[3]=1.0f;}
+                    else {map[0]=1.0f/w;map[1]=1.0f/h;map[2]=0.0f;map[3]=0.0f;}
+                    program.dDepthmapValid=true;program.fragmentDirty=true;
+                }
+            } else {
+                EnterGl();++directFallbacks;
+            }
+            if(!direct && &program!=activeProgram) {
                 glUseProgram(program.program);activeProgram=&program;
                 if(program.yflip>=0 && (!program.flipValid || program.flip!=drawFlip)) {
                     glUniform1f(program.yflip,drawFlip);program.flip=drawFlip;program.flipValid=true;
@@ -1595,7 +1838,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             if(halfMode) {++halfBatches;if(batch.depthWrite)++halfDepthWrites;}
             const auto vertexBuffer=batch.residentGeometry ? residentVertices.name:vertexStream.name;
             if(!vertexBuffer) {++skipped;return;}
-            if(vertexBuffer!=activeVertexBuffer) {
+            if(!direct && vertexBuffer!=activeVertexBuffer) {
                 glBindBuffer(GL_ARRAY_BUFFER,vertexBuffer);
                 constexpr GLsizei stride=sizeof(VkVertex);
                 glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,stride,reinterpret_cast<const void*>(offsetof(VkVertex,position)));
@@ -1652,6 +1895,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             }
             if(depthWrite!=activeDepthWrite) {glDepthMask(depthWrite ? GL_TRUE:GL_FALSE);activeDepthWrite=depthWrite;}
             std::uint32_t texWidth{},texHeight{};
+            GLuint directTextureName{};
             if(texturing) {
                 GLuint name{};
                 if(sampled) {
@@ -1676,21 +1920,40 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 if(gpuProbeFrame && std::find(gpuCounts.seen.begin(),gpuCounts.seen.end(),name)==gpuCounts.seen.end()) {
                     gpuCounts.seen.push_back(name);gpuCounts.textureBytes+=4.0*texWidth*texHeight;
                 }
-                if(name!=activeTexture) {glBindTexture(GL_TEXTURE_2D,name);activeTexture=name;}
+                if(direct)directTextureName=name;
+                else if(name!=activeTexture) {glBindTexture(GL_TEXTURE_2D,name);activeTexture=name;}
             }
             if(gpuProbeFrame) {++gpuCounts.draws;if(blend.enable)++gpuCounts.blended;}
             if(ecstasyGpuDiag==3) {glEnable(GL_SCISSOR_TEST);glScissor(0,0,8,8);scissorOn=-1;scissorRect={{-1,-1,-1,-1}};}
-            if(program.fparam>=0) {
+            if(direct ? program.uFparam>=0:program.fparam>=0) {
                 const float texelX=texWidth ? 1.0f/static_cast<float>(texWidth):0.0f;
                 const float texelY=texHeight ? 1.0f/static_cast<float>(texHeight):0.0f;
                 const std::array<float,4> parameters{{batch.blendConstant,texelX,texelY,0.0f}};
-                if(!program.parametersValid || parameters!=program.parameters) {
+                if(direct) {
+                    if(!program.dParametersValid || parameters!=program.dParameters) {
+                        std::memcpy(program.fragmentUniforms.data()+program.uFparam,parameters.data(),sizeof(parameters));
+                        program.dParameters=parameters;program.dParametersValid=true;program.fragmentDirty=true;
+                    }
+                } else if(!program.parametersValid || parameters!=program.parameters) {
                     glUniform4fv(program.fparam,1,parameters.data());
                     program.parameters=parameters;program.parametersValid=true;
                 }
             }
             GLsizei instances=1;
-            if(instanced) {
+            if(direct) {
+                if(instanced)instances=static_cast<GLsizei>(instanceRun[batchIndex]);
+                else if(batch.nativeGpuPosition) {
+                    std::array<float,20> transform;
+                    std::copy_n(batch.nativeLocalToClip.begin(),16,transform.begin());
+                    std::copy_n(batch.nativeClipMapping.begin(),4,transform.begin()+16);
+                    if(!program.dTransformValid || std::memcmp(transform.data(),program.dTransform.data(),sizeof(transform))) {
+                        float* u=program.vertexUniforms.data();
+                        const int offsets[5]={program.uM0,program.uM1,program.uM2,program.uM3,program.uClipmap};
+                        for(int row=0;row<5;++row)if(offsets[row]>=0)std::memcpy(u+offsets[row],transform.data()+row*4,4*sizeof(float));
+                        program.dTransform=transform;program.dTransformValid=true;program.vertexDirty=true;
+                    }
+                }
+            } else if(instanced) {
                 instances=static_cast<GLsizei>(instanceRun[batchIndex]);
                 glBindBuffer(GL_ARRAY_BUFFER,instanceStream.name);activeVertexBuffer=0;
                 const auto base=static_cast<std::uintptr_t>(instanceRow[batchIndex])*20u*sizeof(float);
@@ -1708,7 +1971,30 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                     program.transform=transform;program.transformValid=true;
                 }
             }
-            if(shade && batch.nativeShadingIndex!=program.shading) {
+            if(direct && shade && batch.nativeShadingIndex!=program.dShading) {
+                const auto first=batch.nativeShadingIndex;
+                Require(first+19u<=gatheredGlyphBounds.size(),"vitaGL shading record exceeds the frame table");
+                const auto& record=gatheredGlyphBounds;
+                std::uint32_t flags{},mode{},material{};
+                std::memcpy(&flags,&record[first][0],4);std::memcpy(&mode,&record[first][1],4);
+                std::memcpy(&material,&record[first][2],4);
+                float* u=program.vertexUniforms.data();
+                if(program.uShade>=0)std::memcpy(u+program.uShade,record[first].data(),19*4*sizeof(float));
+                if(program.uMat>=0) {
+                    if(material && material+4u<=gatheredGlyphBounds.size())
+                        for(int row=0;row<4;++row)std::memcpy(u+program.uMat+row*4,record[material+row].data(),4*sizeof(float));
+                    else std::fill_n(u+program.uMat,16,0.0f);
+                }
+                if(program.uFlags>=0) {
+                    u[program.uFlags]=(flags&128u) ? 1.0f:0.0f;u[program.uFlags+1]=(flags&64u) ? 1.0f:0.0f;
+                    u[program.uFlags+2]=(flags&4u) ? 1.0f:0.0f;u[program.uFlags+3]=(mode&1u) ? 1.0f:0.0f;
+                }
+                if(program.uFlags2>=0) {
+                    u[program.uFlags2]=(mode&2u) ? 1.0f:0.0f;u[program.uFlags2+1]=0.0f;u[program.uFlags2+2]=0.0f;u[program.uFlags2+3]=0.0f;
+                }
+                program.dShading=first;program.vertexDirty=true;
+            }
+            if(!direct && shade && batch.nativeShadingIndex!=program.shading) {
                 const auto first=batch.nativeShadingIndex;
                 Require(first+19u<=gatheredGlyphBounds.size(),"vitaGL shading record exceeds the frame table");
                 const auto& record=gatheredGlyphBounds;
@@ -1729,6 +2015,80 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             }
             const GLenum topology=batch.wireframe ? GL_LINES:GL_TRIANGLES;
             if(ecstasyGpuDiag==6) {++skipped;previous=&batch;return;}
+            if(direct) {
+                void* indexBase{};
+                if(batch.indexed) {
+                    const auto indexBuffer=batch.residentIndices ? residentIndices.name:indexStream.name;
+                    if(!indexBuffer) {++skipped;previous=&batch;return;}
+                    indexBase=vglHp2UseBuffer(indexBuffer);
+                } else indexBase=vglHp2UseBuffer(linearIndices.name);
+                auto* vertexBase=static_cast<std::uint8_t*>(vglHp2UseBuffer(vertexBuffer));
+                if(!indexBase || !vertexBase) {++skipped;previous=&batch;return;}
+                // vitaGL activity since the last direct draw: let it begin the
+                // scene and draw its scissor mask first, then rebind everything.
+                if(glTouchedSinceDirect || scissorPending) {
+                    if(gxmDirectTouched) {vglHp2Invalidate();gxmDirectTouched=false;}
+                    vglHp2Sync();
+                    directReset();glTouchedSinceDirect=false;scissorPending=false;++directScissorSyncs;
+                }
+                gxmDirectTouched=true;
+                const bool programChanged=&program!=dProgram;
+                if(programChanged) {sceGxmSetVertexProgram(gxm_context,program.vertexProgram);dProgram=&program;}
+                if(directFragment!=dFragment) {sceGxmSetFragmentProgram(gxm_context,directFragment);dFragment=directFragment;}
+                if(!program.vertexUniforms.empty() && (program.vertexDirty || !program.vertexBlock || programChanged)) {
+                    if(program.vertexDirty || !program.vertexBlock) {
+                        program.vertexBlock=vglHp2ReserveUniforms(static_cast<std::uint32_t>(program.vertexUniforms.size()*sizeof(float)));
+                        std::memcpy(program.vertexBlock,program.vertexUniforms.data(),program.vertexUniforms.size()*sizeof(float));
+                        program.vertexDirty=false;
+                    }
+                    sceGxmSetVertexDefaultUniformBuffer(gxm_context,program.vertexBlock);
+                }
+                if(!program.fragmentUniforms.empty() && (program.fragmentDirty || !program.fragmentBlock || programChanged)) {
+                    if(program.fragmentDirty || !program.fragmentBlock) {
+                        program.fragmentBlock=vglHp2ReserveUniforms(static_cast<std::uint32_t>(program.fragmentUniforms.size()*sizeof(float)));
+                        std::memcpy(program.fragmentBlock,program.fragmentUniforms.data(),program.fragmentUniforms.size()*sizeof(float));
+                        program.fragmentDirty=false;
+                    }
+                    sceGxmSetFragmentDefaultUniformBuffer(gxm_context,program.fragmentBlock);
+                }
+                if(program.textureUnit>=0) {
+                    const auto* texture=vglHp2UseTexture(directTextureName);
+                    if(texture && (texture!=dTexture || programChanged)) {
+                        sceGxmSetFragmentTexture(gxm_context,static_cast<unsigned>(program.textureUnit),texture);dTexture=texture;
+                    }
+                }
+                if(program.depthUnit>=0) {
+                    const auto* texture=vglHp2UseTexture(halfDepthTexture);
+                    if(texture && (texture!=dDepthTexture || programChanged)) {
+                        sceGxmSetFragmentTexture(gxm_context,static_cast<unsigned>(program.depthUnit),texture);dDepthTexture=texture;
+                    }
+                }
+                const void* instanceBase{};
+                if(instanced) {
+                    auto* rows=static_cast<std::uint8_t*>(vglHp2UseBuffer(instanceStream.name));
+                    if(!rows) {++skipped;previous=&batch;return;}
+                    instanceBase=rows+static_cast<std::size_t>(instanceRow[batchIndex])*80u;
+                    if(instanceBase!=dStream1) {sceGxmSetVertexStream(gxm_context,1,instanceBase);dStream1=instanceBase;}
+                }
+                if(batch.indexed) {
+                    if(vertexBase!=dStream0) {sceGxmSetVertexStream(gxm_context,0,vertexBase);dStream0=vertexBase;}
+                    const auto* indices=static_cast<const std::uint8_t*>(indexBase)+static_cast<std::size_t>(batch.first)*sizeof(std::uint32_t);
+                    if(instanced)sceGxmDrawInstanced(gxm_context,SCE_GXM_PRIMITIVE_TRIANGLES,SCE_GXM_INDEX_FORMAT_U32,indices,
+                        batch.count*static_cast<std::uint32_t>(instances),batch.count);
+                    else sceGxmDraw(gxm_context,SCE_GXM_PRIMITIVE_TRIANGLES,SCE_GXM_INDEX_FORMAT_U32,indices,batch.count);
+                } else {
+                    constexpr std::uint32_t chunk=60000u;
+                    for(std::uint32_t done=0;done<batch.count;done+=chunk) {
+                        const auto n=std::min(chunk,batch.count-done);
+                        const void* stream=vertexBase+static_cast<std::size_t>(batch.first+done)*sizeof(VkVertex);
+                        if(stream!=dStream0) {sceGxmSetVertexStream(gxm_context,0,stream);dStream0=stream;}
+                        if(instanced)sceGxmDrawInstanced(gxm_context,SCE_GXM_PRIMITIVE_TRIANGLES,SCE_GXM_INDEX_FORMAT_U32,indexBase,n,n);
+                        else sceGxmDraw(gxm_context,SCE_GXM_PRIMITIVE_TRIANGLES,SCE_GXM_INDEX_FORMAT_U32,indexBase,n);
+                    }
+                }
+                ++directDraws;++drawn;previous=&batch;
+                return;
+            }
             if(batch.indexed) {
                 const auto indexBuffer=batch.residentIndices ? residentIndices.name:indexStream.name;
                 if(!indexBuffer) {++skipped;previous=&batch;return;}
@@ -1789,12 +2149,14 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 while(end<list.size() && halfEligible(batches[list[end]]))++end;
                 if(!lastFrameHalf) {lastFrameHalf=true;++halfFramesTotal;}
                 std::uint32_t halfStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+                EnterGl();
                 BeginHalfParticles(packet.width,packet.height);
                 slowGl("half_begin",halfStarted);
                 halfMode=true;resetState();
                 for(;at<end;++at)drawOne(list[at]);
                 halfMode=false;
                 halfStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+                EnterGl();
                 EndHalfParticles(packet.width,packet.height);
                 slowGl("half_end",halfStarted);
                 resetState();
@@ -1814,6 +2176,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             halfPrewarmed=true;
             const std::uint32_t prewarmStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
             const auto savedDivisor=halfDivisor;
+            EnterGl();
             for(const std::uint32_t divisor:{2u,4u}) {
                 halfDivisor=divisor;
                 BeginHalfParticles(packet.width,packet.height);
@@ -1825,6 +2188,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 platform::RecordSessionEvent("renderer.vitagl.halfres_prewarm",detail);
             }
         }
+        EnterGl();
         glDisable(GL_SCISSOR_TEST);
     };
     std::array<std::uint8_t,kTargets> visited{};
@@ -1850,7 +2214,18 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         }
         state=2;
     };
+    const auto timelinePassBegin=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
+    if(ecstasyGxmParity && ecstasyGxmDirect && nextScreenshot<ecstasyScreenshotFrames.size() &&
+        journalFrames+1>=ecstasyScreenshotFrames[nextScreenshot]) {
+        // Parity check: the same packet through vitaGL first, then direct.
+        ecstasyGxmDirect=0;
+        visit(visit,0);
+        SaveScreenshot(packet.width,packet.height,journalFrames+1+100000000ull);
+        visited={};
+        ecstasyGxmDirect=1;
+    }
     visit(visit,0);
+    const auto timelinePassEnd=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
     PublishSunQueries();
     if(!packet.depthTransfers.empty())IssueSunQueries(packet);
     // Offscreen targets nobody samples this frame (env-map faces) are not drawn.
@@ -1886,7 +2261,8 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         const auto head=gpuTimelineHead.load(std::memory_order_relaxed);
         auto& record=gpuTimeline[head%128u];
         record.submitBegin=timelineBegin;record.submitEnd=timelineSubmitEnd;record.swapEnd=sceKernelGetSystemTimeWide();
-        record.fence=query_fence.value;record.draws=static_cast<std::uint32_t>(drawnBatches-timelineDrawnBefore);
+        record.fence=query_fence.value;record.draws=static_cast<std::uint32_t>(drawn);(void)timelineDrawnBefore;
+        record.uploadEnd=timelineUploadEnd;record.passBegin=timelinePassBegin;record.passEnd=timelinePassEnd;
         record.done.store(0,std::memory_order_relaxed);
         gpuTimelineHead.store(head+1,std::memory_order_release);
         // Report the frame 16 back (long done): one line per frame, times
@@ -1896,10 +2272,12 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             const auto& previous=gpuTimeline[(head-17)%128u];
             const auto done=frame.done.load(std::memory_order_acquire),before=previous.done.load(std::memory_order_acquire);
             if(done && before) {
-                char detail[200];
-                std::snprintf(detail,sizeof(detail),"n=%u sb=%lld se=%lld sw=%lld done=%lld draws=%u",head-16,
+                char detail[240];
+                std::snprintf(detail,sizeof(detail),"n=%u sb=%lld se=%lld sw=%lld done=%lld draws=%u up=%lld pre=%lld pass=%lld post=%lld",head-16,
                     static_cast<long long>(frame.submitBegin-before),static_cast<long long>(frame.submitEnd-before),
-                    static_cast<long long>(frame.swapEnd-before),static_cast<long long>(done-before),frame.draws);
+                    static_cast<long long>(frame.swapEnd-before),static_cast<long long>(done-before),frame.draws,
+                    static_cast<long long>(frame.uploadEnd-frame.submitBegin),static_cast<long long>(frame.passBegin-frame.uploadEnd),
+                    static_cast<long long>(frame.passEnd-frame.passBegin),static_cast<long long>(frame.submitEnd-frame.passEnd));
                 platform::RecordSessionEvent("renderer.gpu_tl",detail);
             }
         }
