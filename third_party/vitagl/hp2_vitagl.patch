@@ -1,5 +1,5 @@
 diff --git a/source/custom_shaders.c b/source/custom_shaders.c
-index 3b91d11..25a34bf 100644
+index 3b91d11..c90e5c2 100644
 --- a/source/custom_shaders.c
 +++ b/source/custom_shaders.c
 @@ -124,7 +124,7 @@ char vgl_file_cache_path[256];
@@ -101,7 +101,7 @@ index 3b91d11..25a34bf 100644
  		cur_vao->vertex_layout_version = ++vertex_layout_cur_ver;
  	}
  #endif
-@@ -3972,3 +4001,15 @@ void vglShaderGxpBinary(GLsizei count, const GLuint *handles, const void *binary
+@@ -3972,3 +4001,31 @@ void vglShaderGxpBinary(GLsizei count, const GLuint *handles, const void *binary
  	sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, s->prog, &s->id);
  	s->unif_buf_size = sceGxmProgramGetDefaultUniformBufferSize(s->prog);
  }
@@ -116,6 +116,22 @@ index 3b91d11..25a34bf 100644
 +	uniform *u = (uniform *)get_uniform_from_ptr(location, &offs);
 +	offs = offset;
 +	vgl_fill_uniform_data(value, SCE_GXM_PARAMETER_TYPE_F32, 4, count)
++}
++
++/* HP2 direct GXM path: the compiled GXP pair and patcher ids of a linked
++ * program, so the port can patch and bind it itself (same binaries). */
++int vglHp2ProgramInfo(GLuint prog, const SceGxmProgram **vertex, const SceGxmProgram **fragment,
++	SceGxmShaderPatcherId *vertex_id, SceGxmShaderPatcherId *fragment_id) {
++	if (!prog || prog > MAX_CUSTOM_PROGRAMS)
++		return 0;
++	program *p = &progs[prog - 1];
++	if (p->status != PROG_LINKED || !p->vshader || !p->fshader || !p->vshader->prog || !p->fshader->prog)
++		return 0;
++	*vertex = p->vshader->prog;
++	*fragment = p->fshader->prog;
++	*vertex_id = p->vshader->id;
++	*fragment_id = p->fshader->id;
++	return 1;
 +}
 diff --git a/source/framebuffers.c b/source/framebuffers.c
 index c376bf3..1b69143 100644
@@ -172,7 +188,7 @@ index c376bf3..1b69143 100644
  	THREAD_SAFE()
  
 diff --git a/source/gxm.c b/source/gxm.c
-index ffa0279..d3ff19d 100644
+index ffa0279..017bb01 100644
 --- a/source/gxm.c
 +++ b/source/gxm.c
 @@ -643,6 +643,8 @@ void scene_reset(void) {
@@ -184,6 +200,16 @@ index ffa0279..d3ff19d 100644
  			}
  
  			// If a rendertarget is not bound to the in use framebuffer, we get one for it
+@@ -1038,3 +1040,9 @@ void vglSetupRenderTargetScenesNum(uint8_t size_main, uint8_t size_fbos) {
+ 	gxm_display_rt_size = size_main;
+ 	gxm_fbo_rt_size = size_fbos;
+ }
++
++/* HP2 direct GXM path: begin the scene of the bound framebuffer and apply a
++ * pending scissor (vitaGL does both lazily at its next draw). */
++void vglHp2Sync(void) {
++	scene_reset();
++}
 diff --git a/source/shared.h b/source/shared.h
 index 07d8f47..af323af 100644
 --- a/source/shared.h
@@ -234,8 +260,29 @@ index 07d8f47..af323af 100644
 +	_glFramebufferTexture2D_face(fb, attachment, tex, tex_id, -1);
 +}
  #endif
+diff --git a/source/tests.c b/source/tests.c
+index 373473c..88ab61a 100644
+--- a/source/tests.c
++++ b/source/tests.c
+@@ -626,3 +626,16 @@ void glClearStencil(GLint s) {
+ 
+ 	stencil_value = s;
+ }
++
++/* HP2 direct GXM path: after the port issued GXM state/draws itself,
++ * re-apply the state vitaGL sets eagerly (viewport, depth, stencil) and mark
++ * its lazily uploaded uniforms dirty, so the next vitaGL draw is correct. */
++void vglHp2Invalidate(void) {
++	vglSetViewport(gxm_context, x_port, x_scale, y_port, y_scale, z_port, z_scale);
++	change_depth_func();
++	refresh_stencil_settings();
++	dirty_shader_vert_unifs = GL_TRUE;
++	dirty_shader_frag_unifs = GL_TRUE;
++	vglRestoreVertexUniformBuffer();
++	vglRestoreFragmentUniformBuffer();
++}
 diff --git a/source/textures.c b/source/textures.c
-index 7b5d704..b3c3845 100644
+index 7b5d704..d0973e1 100644
 --- a/source/textures.c
 +++ b/source/textures.c
 @@ -516,6 +516,17 @@ static inline __attribute__((always_inline)) void _glTexImage2D_CubeIMPL(texture
@@ -266,6 +313,36 @@ index 7b5d704..b3c3845 100644
  	// Allocating texture/mipmaps depending on user call
  	tex->format = src_format;
  	if (level == 0) // FIXME: Add proper mipmaps support
+@@ -2775,3 +2789,29 @@ SceGxmTexture *vglGetGxmTexture(GLenum target) {
+ 		SET_GL_ERROR_WITH_RET(GL_INVALID_ENUM, NULL)
+ 	}
+ }
++
++/* HP2 direct GXM path: the GXM texture of a GL texture name, marked used this
++ * frame (vitaGL frees a deleted texture at once unless recently used). */
++SceGxmTexture *vglHp2UseTexture(GLuint name) {
++	if (name >= TEXTURES_NUM)
++		return NULL;
++	texture *tex = &texture_slots[name];
++#ifndef TEXTURES_SPEEDHACK
++	tex->last_frame = vgl_framecount;
++#endif
++	return &tex->gxm_tex;
++}
++
++/* Same for a buffer object (GL buffer names are vbo pointers). */
++void *vglHp2UseBuffer(GLuint name) {
++	vbo *gpu_buf = (vbo *)name;
++	if (!gpu_buf)
++		return NULL;
++	gpu_buf->last_frame = vgl_framecount;
++	return gpu_buf->ptr;
++}
++
++/* The uniform circular pool vitaGL reserves its default uniform buffers from. */
++void *vglHp2ReserveUniforms(uint32_t size) {
++	return vglReserveUniformCircularPoolBuffer(size);
++}
 diff --git a/source/utils/gpu_utils.c b/source/utils/gpu_utils.c
 index 4464db5..16c72ed 100644
 --- a/source/utils/gpu_utils.c
@@ -421,7 +498,7 @@ index bf5e4d4..5d8bebc 100644
 +	(void)path; /* Driv3r: installed vitaShaRK predates this (Razor only) */
  }
 diff --git a/source/vitaGL.h b/source/vitaGL.h
-index dac9fa0..8327174 100644
+index dac9fa0..e0e53e4 100644
 --- a/source/vitaGL.h
 +++ b/source/vitaGL.h
 @@ -1004,6 +1004,7 @@ void glUniform3i(GLint location, GLint v0, GLint v1, GLint v2);
@@ -432,7 +509,21 @@ index dac9fa0..8327174 100644
  void glUniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3);
  void glUniform4iv(GLint location, GLsizei count, const GLint *value);
  void glUniformBlockBinding(GLuint prog, GLuint uniformBlockIndex, GLuint uniformBlockBinding);
-@@ -1300,6 +1301,7 @@ GLboolean vglSwapResolution(int width, int height);
+@@ -1276,6 +1277,13 @@ void vglSetVertexBufferSize(uint32_t size);
+ 
+ // Change the priority and affinity to use for the garbage collector thread. Must be called before vglInit*.
+ void vglSetupGarbageCollector(int priority, int affinity);
++// HP2 direct GXM path (see hp2/third_party/vitagl/README.md)
++int vglHp2ProgramInfo(GLuint prog, const SceGxmProgram **vertex, const SceGxmProgram **fragment, SceGxmShaderPatcherId *vertex_id, SceGxmShaderPatcherId *fragment_id);
++void vglHp2Invalidate(void);
++void vglHp2Sync(void);
++SceGxmTexture *vglHp2UseTexture(GLuint name);
++void *vglHp2UseBuffer(GLuint name);
++void *vglHp2ReserveUniforms(uint32_t size);
+ 
+ // Change the scenes per frame value to use for the display and fbos rendertargets. Default value: 1, 1.
+ void vglSetupRenderTargetScenesNum(uint8_t display_size, uint8_t fbo_size);
+@@ -1300,6 +1308,7 @@ GLboolean vglSwapResolution(int width, int height);
  
  // Loads the depth buffer of the currently bound renderbuffer into the currently bound GL texture.
  void vglTexImageDepthBuffer(GLenum target);
