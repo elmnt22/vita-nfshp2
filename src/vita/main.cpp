@@ -680,6 +680,12 @@ int main(int, char**)
             hp2::ecstasyHalfResCompositeFlip = 1;
             log.Line("vita.diag", "half-res composite flip");
         }
+        if (FILE* gate = std::fopen((std::string(kDataDirectory) + "/quarterres_min.txt").c_str(), "r")) {
+            double value = 0.0;
+            if (std::fscanf(gate, "%lf", &value) == 1) hp2::ecstasyQuarterResMinScreens = value;
+            std::fclose(gate);
+            log.Line("vita.diag", ("quarter-res min screens " + std::to_string(hp2::ecstasyQuarterResMinScreens)).c_str());
+        }
         if (FILE* gate = std::fopen((std::string(kDataDirectory) + "/halfres_min.txt").c_str(), "r")) {
             double value = 0.0;
             if (std::fscanf(gate, "%lf", &value) == 1) hp2::ecstasyHalfResMinScreens = value;
