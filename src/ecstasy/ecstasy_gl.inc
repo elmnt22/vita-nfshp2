@@ -77,7 +77,9 @@ struct GlFramePacket {
     std::uint32_t width{},height{};
     double gatherMilliseconds{};
     double particleScreens{}; // main-target particle coverage this frame
+    std::vector<EcstasyDepthTransfer> depthTransfers;
     void Clear() {
+        depthTransfers.clear();
         uploads.clear();deletes.clear();textures.clear();targetUsed={};
         residentVertexBytes.clear();residentIndexBytes.clear();
         residentVertexRanges.clear();residentIndexRanges.clear();
@@ -399,6 +401,17 @@ struct EcstasyVulkanDevice::Storage {
     std::uint32_t displayShotPhase{};
     std::vector<std::pair<std::uint64_t,std::vector<std::uint32_t>>> displayShots;
     std::array<std::uint32_t,2> displayShotSize{};
+    // Sun depth tiles (eTransferZBufferRect): vitaGL cannot read depth, so
+    // each requested sample is drawn as one pixel just in front of the clear
+    // depth inside a GL_SAMPLES_PASSED query; the passing count is the clear
+    // (sky) sample count StuffSun consumes, published when the GPU is done.
+    struct SunQuery {GLuint query{};EcstasyDepthTransfer request;bool pending{};};
+    std::array<SunQuery,8> sunQueries{};
+    std::size_t nextSunQuery{};
+    GLuint sunQueryProgram{},sunQueryBuffer{};GLint sunQueryDepth{-1};bool sunQueryFailed{};
+    std::vector<float> sunQueryVertices;
+    void IssueSunQueries(const GlFramePacket& packet);
+    void PublishSunQueries();
     void BeginHalfParticles(std::uint32_t width,std::uint32_t height);
     void EndHalfParticles(std::uint32_t width,std::uint32_t height);
     void SaveScreenshot(std::uint32_t width,std::uint32_t height,std::uint64_t frame);
@@ -1122,6 +1135,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     for(std::size_t index=0;index<textures.size();++index)
         packet.textures[index]={glTextureOf(textures[index]),textures[index].width,textures[index].height};
     packet.width=options.width;packet.height=options.height;
+    packet.depthTransfers=frame->DepthTransfers();
     std::swap(packet.vertices,data);std::swap(packet.indices,elementIndices);
     std::swap(packet.batches,batches);std::swap(packet.glyphBounds,gatheredGlyphBounds);
     packet.gatherMilliseconds=statistics.gatherMilliseconds;
@@ -1690,6 +1704,8 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         state=2;
     };
     visit(visit,0);
+    PublishSunQueries();
+    if(!packet.depthTransfers.empty())IssueSunQueries(packet);
     // Offscreen targets nobody samples this frame (env-map faces) are not drawn.
     for(std::size_t id=1;id<kTargets;++id)if(!visited[id])skipped+=targetBatches[id].size();
     glDisable(GL_SCISSOR_TEST);
@@ -1843,6 +1859,131 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             static_cast<unsigned>(vglMemTotal(VGL_MEM_VRAM)/1024),static_cast<unsigned>(vglMemTotal(VGL_MEM_RAM)/1024),
             static_cast<unsigned>(vglMemTotal(VGL_MEM_PHYCONT)/1024));
         platform::RecordSessionEvent("renderer.vitagl.memory",detail);
+    }
+}
+
+int ecstasySunQuery=1;
+void EcstasyVulkanDevice::Storage::IssueSunQueries(const GlFramePacket& packet)
+{
+    if(!ecstasySunQuery || sunQueryFailed)return;
+    if(!sunQueryProgram) {
+        static const char* vertexSource=
+            "attribute vec2 a_pos;\nuniform float u_z;\n"
+            "void main(){gl_Position=vec4(a_pos,u_z,1.0);}\n";
+        static const char* fragmentSource="void main(){gl_FragColor=vec4(0.0);}\n";
+        const auto compile=[&](GLenum kind,const char* source)->GLuint {
+            const GLuint shader=glCreateShader(kind);
+            glShaderSource(shader,1,&source,nullptr);glCompileShader(shader);
+            GLint ok=0;glGetShaderiv(shader,GL_COMPILE_STATUS,&ok);
+            if(!ok) {glDeleteShader(shader);return 0;}
+            return shader;
+        };
+        const GLuint vertex=compile(GL_VERTEX_SHADER,vertexSource),fragment=compile(GL_FRAGMENT_SHADER,fragmentSource);
+        GLint linked=0;
+        if(vertex && fragment) {
+            sunQueryProgram=glCreateProgram();
+            glAttachShader(sunQueryProgram,vertex);glAttachShader(sunQueryProgram,fragment);
+            glBindAttribLocation(sunQueryProgram,0,"a_pos");
+            glLinkProgram(sunQueryProgram);
+            glGetProgramiv(sunQueryProgram,GL_LINK_STATUS,&linked);
+        }
+        if(!linked) {
+            sunQueryFailed=true;
+            platform::RecordSessionEvent("renderer.vitagl.sun_query","program failed; sun stays unoccluded");
+            return;
+        }
+        sunQueryDepth=glGetUniformLocation(sunQueryProgram,"u_z");
+        glGenBuffers(1,&sunQueryBuffer);
+        for(auto& slot:sunQueries)glGenQueries(1,&slot.query);
+    }
+    const auto width=static_cast<std::int32_t>(packet.width),height=static_cast<std::int32_t>(packet.height);
+    glBindFramebuffer(GL_FRAMEBUFFER,0);
+    glViewport(0,0,width,height);glDepthRangef(0.0f,1.0f);
+    glDisable(GL_SCISSOR_TEST);glDisable(GL_BLEND);
+    glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_FALSE);
+    glEnable(GL_DEPTH_TEST);glDepthMask(GL_FALSE);glDepthFunc(GL_LESS);
+    glUseProgram(sunQueryProgram);
+    glBindBuffer(GL_ARRAY_BUFFER,sunQueryBuffer);
+    for(GLuint attribute=1;attribute<4;++attribute)glDisableVertexAttribArray(attribute);
+    // vitaGL applies scissor/state changes lazily at the next draw, the
+    // scissor as a full-screen stencil quad. Flush them with one clipped
+    // triangle outside the view so nothing but the samples is counted.
+    {
+        const float offscreen[6]={2.0f,2.0f,3.0f,2.0f,2.0f,3.0f};
+        glUniform1f(sunQueryDepth,0.0f);
+        glBufferData(GL_ARRAY_BUFFER,sizeof(offscreen),offscreen,GL_STREAM_DRAW);
+        glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,0,nullptr);
+        glDrawArrays(GL_TRIANGLES,0,3);
+    }
+    const float sx=static_cast<float>(options.width)/static_cast<float>(options.logicalWidth);
+    const float sy=static_cast<float>(options.height)/static_cast<float>(options.logicalHeight);
+    const auto ndcX=[&](std::int32_t x) {return 2.0f*static_cast<float>(x)/static_cast<float>(width)-1.0f;};
+    const auto ndcY=[&](std::int32_t y) {return 2.0f*static_cast<float>(height-y)/static_cast<float>(height)-1.0f;};
+    for(const auto& request:packet.depthTransfers) {
+        auto& slot=sunQueries[nextSunQuery];
+        if(slot.pending)break; // GPU still owes this slot's count; skip a frame
+        nextSunQuery=(nextSunQuery+1)%sunQueries.size();
+        // Same sample positions as the Vulkan readback; a sample outside the
+        // attachment never counts as clear.
+        const auto& bounds=request.sampleBounds;
+        sunQueryVertices.clear();
+        for(std::int32_t y=std::max(bounds[2],0);y<std::min(bounds[3],request.height);++y) {
+            const float sourceY=static_cast<float>(static_cast<std::int64_t>(request.y)+y)+0.5f;
+            const auto py=static_cast<std::int32_t>(std::floor((static_cast<float>(request.targetTop)+sourceY*request.nativeSampleScale)*sy));
+            if(py<0 || py>=height)continue;
+            for(std::int32_t x=std::max(bounds[0],0);x<std::min(bounds[1],request.width);++x) {
+                const float sourceX=static_cast<float>(static_cast<std::int64_t>(request.x)+x)+0.5f;
+                const auto px=static_cast<std::int32_t>(std::floor((static_cast<float>(request.targetLeft)+sourceX*request.nativeSampleScale)*sx));
+                if(px<0 || px>=width)continue;
+                const float x0=ndcX(px),x1=ndcX(px+1),y0=ndcY(py),y1=ndcY(py+1);
+                sunQueryVertices.insert(sunQueryVertices.end(),{x0,y0,x1,y0,x0,y1,x1,y0,x1,y1,x0,y1});
+            }
+        }
+        // Clear (sky) when the stored depth is within 1.5 units of the clear
+        // value: the Vulkan readback's llround((1-d)*max)<2 test.
+        const double limit=1.0-1.5/static_cast<double>(request.maximumDepth);
+        glUniform1f(sunQueryDepth,static_cast<float>(2.0*limit-1.0));
+        slot.request=request;slot.pending=true;
+        glBeginQuery(GL_SAMPLES_PASSED,slot.query);
+        if(!sunQueryVertices.empty()) {
+            glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(sunQueryVertices.size()*sizeof(float)),
+                sunQueryVertices.data(),GL_STREAM_DRAW);
+            glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,0,nullptr);
+            glDrawArrays(GL_TRIANGLES,0,static_cast<GLsizei>(sunQueryVertices.size()/2));
+        }
+        glEndQuery(GL_SAMPLES_PASSED);
+    }
+    for(GLuint attribute=1;attribute<4;++attribute)glEnableVertexAttribArray(attribute);
+    glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+    glDepthFunc(GL_LEQUAL);
+}
+
+void EcstasyVulkanDevice::Storage::PublishSunQueries()
+{
+    for(auto& slot:sunQueries) {
+        if(!slot.pending)continue;
+        GLint available=0;glGetQueryObjectiv(slot.query,GL_QUERY_RESULT_AVAILABLE,&available);
+        if(!available)continue;
+        GLuint passed=0;glGetQueryObjectuiv(slot.query,GL_QUERY_RESULT_NO_WAIT,&passed);
+        slot.pending=false;
+        // StuffSun only counts clear samples inside its bounds: mark that
+        // many of them clear, every other sample at the maximum depth.
+        const auto& request=slot.request;const auto& bounds=request.sampleBounds;
+        auto& values=request.destination->values;
+        std::uint32_t clear=passed;
+        for(std::int32_t y=0;y<request.height;++y)for(std::int32_t x=0;x<request.width;++x) {
+            const bool inside=x>=bounds[0] && x<bounds[1] && y>=bounds[2] && y<bounds[3];
+            auto& value=values[static_cast<std::size_t>(y)*static_cast<std::size_t>(request.width)+static_cast<std::size_t>(x)];
+            if(inside && clear) {value=0;--clear;} else value=request.maximumDepth;
+        }
+        if(platform::nativeDiagnosticsEnabled) {
+            static unsigned logged=0;
+            if((logged++%60)==0) {
+                char text[96];std::snprintf(text,sizeof(text),"passed=%u bounds=%d,%d,%d,%d",passed,
+                    bounds[0],bounds[1],bounds[2],bounds[3]);
+                platform::RecordSessionEvent("renderer.vitagl.sun_query",text);
+            }
+        }
     }
 }
 
