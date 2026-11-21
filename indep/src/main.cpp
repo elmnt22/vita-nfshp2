@@ -1349,7 +1349,7 @@ bool ApplicationRuntime::Tick()
                     timingObserved-s.lastAcceptedPresent).count();
                 s.longestPresentIntervalMs=std::max(s.longestPresentIntervalMs,interval);
                 s.presentsOver33ms+=interval>1000.0/30.0;
-                s.presentsOver50ms+=interval>50.0;
+                s.presentsOver50ms+=interval>41.7; // beyond two 60 Hz vsyncs (a missed 30 fps frame)
             }
             s.lastAcceptedPresent=timingObserved;
         }
@@ -1381,7 +1381,7 @@ bool ApplicationRuntime::Tick()
                 "world_loop=%d scenario=%d world_steps=%llu world_ms=%.3f world_step_peak_ms=%.3f "
                 "think_ms=%.3f drive_ms=%.3f collision_ms=%.3f world_effects_ms=%.3f world_finish_ms=%.3f "
                 "audio_ms=%.3f audio_step_peak_ms=%.3f input_ms=%.3f resource_ms=%.3f resource_peak_ms=%.3f "
-                "scenery_ms=%.3f scenery_view_peak_ms=%.3f present_interval_peak_ms=%.3f intervals_over_33ms=%llu intervals_over_50ms=%llu",
+                "scenery_ms=%.3f scenery_view_peak_ms=%.3f present_interval_peak_ms=%.3f intervals_over_33ms=%llu intervals_over_42ms=%llu",
                 s.clock.worldLoopCounter,s.parameters.selectedScenario,
                 static_cast<unsigned long long>(s.worldTiming.calls),
                 milliseconds(s.worldTiming.totalNanoseconds)/count,milliseconds(s.worldTiming.maximumNanoseconds),
