@@ -246,6 +246,11 @@ void main()
     // floor(clamp(a*128,0,255))<=48 <=> a*128<49 <=> a<49/128 (power-of-two
     // scale is exact in any float precision).
     if(r.a<0.3828125)discard;
+#elif ATEST==3
+    // alpha_check.txt diagnostic: an elided threshold test draws only the
+    // fragments it would have discarded, in pure magenta (expected: none).
+    if(r.a>=0.3828125)discard;
+    r=vec4(1.0,0.0,1.0,1.0);
 #endif
 #if SHOWCASE
     vec3 source=floor(clamp(r.rgb*255.0,vec3(0.0),vec3(255.0)))/255.0;
@@ -614,7 +619,9 @@ struct EcstasyVulkanDevice::Storage {
     // Base-level decodes recorded by UploadTexture during Gather and run
     // after its command loop (in parallel when several): the same decode of
     // the same sealed-frame bytes into the same pending upload.
-    struct PendingDecode {const TextureInfo* texture{};std::size_t upload{},baseBytes{};bool repeatedPadding{};};
+    struct PendingDecode {const TextureInfo* texture{};std::size_t upload{},baseBytes{};bool repeatedPadding{};std::size_t index{};};
+    void MarkRedundantAlphaTests(const std::vector<VkVertex>& vertices,const std::vector<std::uint32_t>& indices,
+        std::vector<VkDrawBatch>& batches);
     std::vector<PendingDecode> pendingDecodes;
     void RunPendingDecodes();
     void LogReupload(const VkDrawTexture& old,const TextureInfo& texture);
@@ -714,13 +721,14 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
         if(logged<800) {
             ++logged;
             char detail[200];
-            std::snprintf(detail,sizeof(detail),"frame=%llu key=%08x pack=%s size=%ux%u psm=%02x levels=%u reupload=%d",
-                static_cast<unsigned long long>(completedFrameSerial),texture.descriptor->key,
+            std::snprintf(detail,sizeof(detail),"frame=%llu key=%08x ptr=%p pack=%s size=%ux%u psm=%02x levels=%u reupload=%d",
+                static_cast<unsigned long long>(completedFrameSerial),texture.descriptor->key,static_cast<const void*>(&texture),
                 texture.pack ? texture.pack->Name().c_str():"none",width,height,wire[0x4a],levels,textures[index].generation ? 1:0);
             platform::RecordSessionEvent("renderer.vitagl.texture_upload",detail);
         }
     }
-    pendingDecodes.push_back({&texture,building->uploads.size(),baseBytes,repeatedPadding});
+    pendingDecodes.push_back({&texture,building->uploads.size(),baseBytes,repeatedPadding,index});
+    textures[index].minAlpha=-1;
     building->uploads.push_back({handle,{},width,height,linear ? GL_LINEAR:GL_NEAREST,
         (wire[0x4c]&1u) ? GL_REPEAT:GL_CLAMP_TO_EDGE,(wire[0x4c]&2u) ? GL_REPEAT:GL_CLAMP_TO_EDGE});
     target.source=&texture;target.repeatedPadding=repeatedPadding;target.uploadCompleted=false;
@@ -738,6 +746,112 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
     target.generation=++nextTextureGeneration;
 }
 
+// Alpha-test elision (Vita alpha_elide_off.txt off). The fragment alpha
+// before the test is a product/sum of the texel alpha (byte/128) and the
+// interpolated vertex alpha (FUNC 0..3, see kGlFragmentShader). Filtering
+// and interpolation stay within the operands' minimum, so when that lower
+// bound clears the threshold by 1/64 no fragment can be discarded and the
+// discard is dropped: identical pixels, and the GPU keeps its hidden-
+// surface removal. Lit (SHADE) and render-target samples keep the test.
+int ecstasyAlphaElide=1;
+int ecstasyAlphaCheck=0;
+void EcstasyVulkanDevice::Storage::MarkRedundantAlphaTests(const std::vector<VkVertex>& vertices,
+    const std::vector<std::uint32_t>& indices,std::vector<VkDrawBatch>& batches)
+{
+    if(!ecstasyAlphaElide)return;
+    // Diagnostic reason counts: tested, shade, sampled, no texture alpha,
+    // texture alpha low, vertex alpha low, elided, threshold-2 count.
+    static std::array<std::uint64_t,8> why{};static unsigned calls=0;
+    const auto report=[&] {
+        if(++calls%300u || !platform::nativeDiagnosticsEnabled)return;
+        char text[200];
+        std::snprintf(text,sizeof(text),"tested=%llu shade=%llu sampled=%llu tex_unknown=%llu tex_low=%llu vertex_low=%llu elided=%llu atest2=%llu",
+            (unsigned long long)why[0],(unsigned long long)why[1],(unsigned long long)why[2],(unsigned long long)why[3],
+            (unsigned long long)why[4],(unsigned long long)why[5],(unsigned long long)why[6],(unsigned long long)why[7]);
+        platform::RecordSessionEvent("renderer.vitagl.alpha_elide",text);why={};
+    };
+    struct Reporter {decltype(report)& r;~Reporter() {r();}} reporter{report};
+    for(auto& batch:batches) {
+        batch.alphaTestRedundant=false;
+        if(batch.alphaTest<1 || batch.alphaTest>2)continue;
+        ++why[0];if(batch.alphaTest==2)++why[7];
+        if(batch.sampledTarget>0) {++why[2];continue;}
+        // SHADE (kGlVertexShader): the vertex alpha is uniform-derived. Its
+        // lower bound follows from the record when no term can lower it
+        // (diffuse and pow() terms are >= 0, so non-negative coefficients
+        // only raise it; floor/clamp are monotonic). Reflection-mapped
+        // records wrap alpha modulo 256 and keep the test.
+        const bool shaded=batch.nativeGpuPosition && batch.nativeShadingIndex!=0;
+        float shadedAlpha=0.0f;
+        if(shaded) {
+            const auto first=batch.nativeShadingIndex;
+            if(first+19u>gatheredGlyphBounds.size()) {++why[1];continue;}
+            const auto& record=gatheredGlyphBounds;
+            std::uint32_t flags{},mode{},material{};
+            std::memcpy(&flags,&record[first][0],4);std::memcpy(&mode,&record[first][1],4);
+            std::memcpy(&material,&record[first][2],4);
+            static const std::array<float,4> zero{};
+            const auto mat=[&](std::uint32_t row)->const std::array<float,4>& {
+                return material && material+4u<=record.size() ? record[material+row]:zero;
+            };
+            const auto steps=[](float value) {return std::floor(std::clamp(value,0.0f,255.0f))/128.0f;};
+            const bool lit=(flags&128u)!=0,alphaLit=(flags&64u)!=0;
+            if(mode&1u) {++why[1];continue;}
+            const float parameter=record[first+1][0];
+            if(!(parameter>=0.0f)) {++why[1];continue;}
+            float lower=1.0f;bool bounded=true;
+            if(lit) {
+                for(std::uint32_t row=13;row<=18;++row)bounded=bounded && record[first+row][3]>=0.0f;
+                bounded=bounded && mat(0)[1]>=0.0f && mat(3)[1]>=0.0f;
+                lower=steps(record[first+12][3]);
+            }
+            if(alphaLit) {
+                bounded=bounded && mat(3)[1]>=0.0f && mat(3)[3]>=0.0f;
+                lower=steps(mat(3)[2]);
+            }
+            if(!bounded || !std::isfinite(lower)) {++why[1];continue;}
+            shadedAlpha=(lit || alphaLit) ? lower*parameter:parameter;
+        }
+        float texel=1.0f;
+        if(!batch.untextured) {
+            if(batch.texture>=textures.size() || textures[batch.texture].minAlpha<0) {++why[3];continue;}
+            texel=static_cast<float>(textures[batch.texture].minAlpha)/128.0f;
+        }
+        float vertex=std::numeric_limits<float>::infinity();
+        if(shaded)vertex=shadedAlpha;
+        else if(batch.residentGeometry) {
+            if(static_cast<std::size_t>(batch.nativeSpanFirst)+batch.nativeSpanCount>gatheredResidentIndexSpans.size())continue;
+            for(std::uint32_t at=0;at<batch.nativeSpanCount;++at)
+                vertex=std::min(vertex,gatheredResidentIndexSpans[batch.nativeSpanFirst+at]->minAlpha);
+        } else if(batch.indexed) {
+            if(batch.residentIndices || static_cast<std::size_t>(batch.first)+batch.count>indices.size())continue;
+            bool valid=true;
+            for(std::uint32_t at=0;at<batch.count;++at) {
+                const auto index=indices[batch.first+at];
+                if(index>=vertices.size()) {valid=false;break;}
+                vertex=std::min(vertex,vertices[index].color[3]);
+            }
+            if(!valid)continue;
+        } else {
+            if(static_cast<std::size_t>(batch.first)+batch.count>vertices.size())continue;
+            for(std::uint32_t at=0;at<batch.count;++at)vertex=std::min(vertex,vertices[batch.first+at].color[3]);
+        }
+        if(!(vertex>=0.0f) || !std::isfinite(vertex))continue;
+        float least;
+        if(batch.untextured)least=vertex;
+        else switch(batch.textureFunction&3) {
+            case 0:least=texel*vertex;break;
+            case 2:least=texel+vertex;break;
+            default:least=texel;break;
+        }
+        const float threshold=batch.alphaTest==2 ? 0.3828125f:0.0f;
+        batch.alphaTestRedundant=least>=threshold+1.0f/64.0f;
+        if(batch.alphaTestRedundant)++why[6];
+        else if(!batch.untextured && texel<threshold+1.0f/64.0f)++why[4];
+        else ++why[5];
+    }
+}
+
 void EcstasyVulkanDevice::Storage::RunPendingDecodes()
 {
     if(pendingDecodes.empty())return;
@@ -748,6 +862,9 @@ void EcstasyVulkanDevice::Storage::RunPendingDecodes()
         std::uint32_t width{},height{};
         upload.rgba=DecodeTextureMipRgba(*pending.texture,0,0,pending.baseBytes,width,height,pending.repeatedPadding);
         Require(width==upload.width && height==upload.height,"vitaGL deferred texture decode changed its extent");
+        int least=255;
+        for(std::size_t at=3;at<upload.rgba.size();at+=4)least=std::min<int>(least,upload.rgba[at]);
+        textures[pending.index].minAlpha=least;
     };
     // Gather-thread pool (cores 1/2): largest decodes are seconds-scale
     // rare first sights, so even two decodes are worth splitting.
@@ -818,6 +935,8 @@ int ecstasyForceNoVsync=0;
 // texture a 1x1 white, 2 = lit vertex shading replaced by the plain path,
 // 3 = every draw scissored to 8x8 pixels, 4 = particle (half-eligible) draws skipped.
 int ecstasyGpuDiag=0;
+// Vita scissor_elide_off.txt: keep the scissor test on for whole-target rectangles.
+int ecstasyScissorElide=1;
 int ecstasyFragmentMediump=0; // Vita frag_mediump.txt (A/B: GPU fragment cost)
 GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
 {
@@ -959,6 +1078,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     glRenderStage=2;
     Gather(*frame,data,elementIndices,batches);
     RunPendingDecodes();
+    MarkRedundantAlphaTests(data,elementIndices,batches);
     glRenderStage=3;
     statistics.gatherMilliseconds=milliseconds(Clock::now()-gatherBegin);
 
@@ -1119,9 +1239,9 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     const bool gpuProbeFrame=platform::nativeDiagnosticsEnabled && (gpuProbePhase++%16u)==0;
     if(gpuProbeFrame)sceGxmFinish(gxm_context);
     const auto renderBegin=Clock::now();
-    struct GpuFrameCounts {unsigned draws,blended,passes;double textureBytes;std::vector<GLuint> seen;};
+    struct GpuFrameCounts {unsigned draws,blended,passes,scissorUpdates,alphaTested;double textureBytes;std::vector<GLuint> seen;};
     static GpuFrameCounts gpuCounts{};
-    if(gpuProbeFrame) {gpuCounts.draws=gpuCounts.blended=gpuCounts.passes=0;gpuCounts.textureBytes=0;gpuCounts.seen.clear();}
+    if(gpuProbeFrame) {gpuCounts.draws=gpuCounts.blended=gpuCounts.passes=gpuCounts.scissorUpdates=gpuCounts.alphaTested=0;gpuCounts.textureBytes=0;gpuCounts.seen.clear();}
     glRenderStage=5;
     for(auto& upload:packet.uploads) {
         auto* texture=upload.texture;
@@ -1253,7 +1373,30 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         glClearColor(0.0f,0.0f,0.0f,1.0f);glClearDepthf(1.0f);
         glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);glDepthMask(GL_TRUE);
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
-        glEnable(GL_SCISSOR_TEST);
+        // vitaGL implements the scissor with stencil-mask quads drawn over
+        // the whole target on every scissor rectangle/enable change. A
+        // rectangle covering the whole target clips nothing, so it is drawn
+        // with the test off (exact); real rectangles keep the test.
+        int scissorOn=-1;std::array<GLint,4> scissorRect{{-1,-1,-1,-1}};
+        const GLint passWidth=offscreen ? static_cast<GLint>(glTargets[static_cast<std::size_t>(id)].width):static_cast<GLint>(packet.width);
+        const auto applyScissor=[&](GLint x,GLint y,GLint w,GLint h,GLint fullWidth,GLint fullHeight) {
+            if(!ecstasyScissorElide) {
+                if(scissorOn!=1) {glEnable(GL_SCISSOR_TEST);scissorOn=1;}
+                const std::array<GLint,4> rect{{x,y,w,h}};
+                if(rect!=scissorRect) {glScissor(x,y,w,h);scissorRect=rect;if(gpuProbeFrame)++gpuCounts.scissorUpdates;}
+                return;
+            }
+            const bool full=x<=0 && y<=0 && x+w>=fullWidth && y+h>=fullHeight;
+            if(full) {
+                if(scissorOn!=0) {glDisable(GL_SCISSOR_TEST);scissorOn=0;if(gpuProbeFrame)++gpuCounts.scissorUpdates;}
+                return;
+            }
+            const std::array<GLint,4> rect{{x,y,w,h}};
+            const bool changed=rect!=scissorRect || scissorOn!=1;
+            if(rect!=scissorRect) {glScissor(x,y,w,h);scissorRect=rect;}
+            if(scissorOn!=1) {glEnable(GL_SCISSOR_TEST);scissorOn=1;}
+            if(changed && gpuProbeFrame)++gpuCounts.scissorUpdates;
+        };
         slowGl("bind_clear",bindStarted);
         const float yflip=offscreen ? 1.0f:-1.0f;
         const GlProgram* activeProgram{};
@@ -1277,7 +1420,10 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             // Fewer discards: cheaper fill for the heavy smoke pass.
             const bool redundantTest=halfMode && batch.alphaTest==1 && !batch.depthWrite && !blend.fixedAlpha &&
                 ecstasyHalfResSkipAlphaTest;
-            key|=(static_cast<std::uint32_t>(redundantTest ? 0:std::clamp(batch.alphaTest,0,2)))<<3;
+            const bool checkElided=ecstasyAlphaCheck && (batch.alphaTestRedundant || ecstasyAlphaCheck==2) && batch.alphaTest==2 && !redundantTest;
+            const bool noTest=redundantTest || (batch.alphaTestRedundant && !ecstasyAlphaCheck) || ecstasyGpuDiag==5;
+            key|=(static_cast<std::uint32_t>(checkElided ? 3:noTest ? 0:std::clamp(batch.alphaTest,0,2)))<<3;
+            if(gpuProbeFrame && batch.alphaTest && !noTest)++gpuCounts.alphaTested;
             key|=(batch.showcaseEnvironmentBlend ? 1u:0u)<<5;
             key|=(blend.fixedAlpha ? 1u:0u)<<6;
             key|=(batch.clampTopLeft && texturing ? 1u:0u)<<7;
@@ -1327,18 +1473,18 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                     static_cast<GLsizei>(viewport.width),static_cast<GLsizei>(viewport.height));
                 glDepthRangef(viewport.minDepth,viewport.maxDepth);
             }
-            if(halfMode && (!previous || std::memcmp(&previous->scissor,&batch.scissor,sizeof(batch.scissor)))) {
+            if(halfMode) {
                 const auto& scissor=batch.scissor;
                 const GLint d=static_cast<GLint>(halfDivisor);
                 const GLint x0=scissor.offset.x/d,y0=scissor.offset.y/d;
                 const GLint x1=(scissor.offset.x+static_cast<GLint>(scissor.extent.width)+d-1)/d;
                 const GLint y1=(scissor.offset.y+static_cast<GLint>(scissor.extent.height)+d-1)/d;
-                glScissor(x0,y0,x1-x0,y1-y0);
-            } else if(!previous || std::memcmp(&previous->scissor,&batch.scissor,sizeof(batch.scissor))) {
+                applyScissor(x0,y0,x1-x0,y1-y0,static_cast<GLint>(packet.width)/d,static_cast<GLint>(packet.height)/d);
+            } else {
                 const auto& scissor=batch.scissor;
-                glScissor(scissor.offset.x,offscreen ? scissor.offset.y:
+                applyScissor(scissor.offset.x,offscreen ? scissor.offset.y:
                     height-scissor.offset.y-static_cast<GLint>(scissor.extent.height),
-                    static_cast<GLsizei>(scissor.extent.width),static_cast<GLsizei>(scissor.extent.height));
+                    static_cast<GLint>(scissor.extent.width),static_cast<GLint>(scissor.extent.height),passWidth,height);
             }
             if(!blendKnown || !(blend==activeBlend)) {
                 if(blend.enable) {
@@ -1388,7 +1534,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 if(name!=activeTexture) {glBindTexture(GL_TEXTURE_2D,name);activeTexture=name;}
             }
             if(gpuProbeFrame) {++gpuCounts.draws;if(blend.enable)++gpuCounts.blended;}
-            if(ecstasyGpuDiag==3)glScissor(0,0,8,8);
+            if(ecstasyGpuDiag==3) {glEnable(GL_SCISSOR_TEST);glScissor(0,0,8,8);scissorOn=-1;scissorRect={{-1,-1,-1,-1}};}
             if(program.fparam>=0) {
                 const float texelX=texWidth ? 1.0f/static_cast<float>(texWidth):0.0f;
                 const float texelY=texHeight ? 1.0f/static_cast<float>(texHeight):0.0f;
@@ -1430,6 +1576,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 program.shading=first;
             }
             const GLenum topology=batch.wireframe ? GL_LINES:GL_TRIANGLES;
+            if(ecstasyGpuDiag==6) {++skipped;previous=&batch;return;}
             if(batch.indexed) {
                 const auto indexBuffer=batch.residentIndices ? residentIndices.name:indexStream.name;
                 if(!indexBuffer) {++skipped;previous=&batch;return;}
@@ -1473,6 +1620,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         const auto resetState=[&] {
             activeProgram=nullptr;previous=nullptr;blendKnown=false;activeDepth=activeDepthWrite=-1;
             activeTexture=~0u;activeVertexBuffer=0;
+            scissorOn=-1;scissorRect={{-1,-1,-1,-1}}; // half begin/end leave the test on
         };
         const auto& list=targetBatches[static_cast<std::size_t>(id)];
         for(std::size_t at=0;at<list.size();) {
@@ -1573,7 +1721,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     {
         // G0: swap time every frame; on probe frames (GPU drained at frame
         // start) the time to finish after the swap, and the whole frame.
-        static double swapSum=0,finishSum=0,frameSum=0,drawSum=0,blendSum=0,passSum=0,textureSum=0,vertexSum=0;
+        static double alphaSum=0,scissorSum=0,swapSum=0,finishSum=0,frameSum=0,drawSum=0,blendSum=0,passSum=0,textureSum=0,vertexSum=0;
         static unsigned swapCount=0,finishCount=0;
         const auto swapped=Clock::now();
         swapSum+=milliseconds(swapped-swapStarted);++swapCount;
@@ -1581,19 +1729,19 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             sceGxmFinish(gxm_context);
             const auto finished=Clock::now();
             finishSum+=milliseconds(finished-swapped);frameSum+=milliseconds(finished-renderBegin);++finishCount;
-            drawSum+=gpuCounts.draws;blendSum+=gpuCounts.blended;passSum+=gpuCounts.passes;
+            drawSum+=gpuCounts.draws;scissorSum+=gpuCounts.scissorUpdates;alphaSum+=gpuCounts.alphaTested;blendSum+=gpuCounts.blended;passSum+=gpuCounts.passes;
             textureSum+=gpuCounts.textureBytes;vertexSum+=static_cast<double>(packet.vertices.size());
         }
         if(swapCount>=300) {
             const double n=finishCount ? finishCount:1.0;
             char detail[320];
             std::snprintf(detail,sizeof(detail),"swap_ms=%.2f gpu_after_swap_ms=%.2f gpu_frame_ms=%.2f finish_samples=%u submit_ms=%.2f vsync=%d diag=%d "
-                "draws=%.0f blended=%.0f passes=%.1f texture_kb=%.0f stream_vertices=%.0f",
+                "draws=%.0f blended=%.0f passes=%.1f texture_kb=%.0f stream_vertices=%.0f scissor_updates=%.1f elide=%d alpha_tested=%.0f",
                 swapSum/swapCount,finishSum/n,frameSum/n,finishCount,
                 milliseconds(submitDone-renderBegin),options.vsync ? 1:0,ecstasyGpuDiag,
-                drawSum/n,blendSum/n,passSum/n,textureSum/n/1024.0,vertexSum/n);
+                drawSum/n,blendSum/n,passSum/n,textureSum/n/1024.0,vertexSum/n,scissorSum/n,ecstasyScissorElide,alphaSum/n);
             platform::RecordSessionEvent("renderer.vitagl.gpu_probe",detail);
-            swapSum=finishSum=frameSum=drawSum=blendSum=passSum=textureSum=vertexSum=0;swapCount=finishCount=0;
+            alphaSum=scissorSum=swapSum=finishSum=frameSum=drawSum=blendSum=passSum=textureSum=vertexSum=0;swapCount=finishCount=0;
         }
     }
     // dshots.txt "N": after N frames that used the half pass, copy the next

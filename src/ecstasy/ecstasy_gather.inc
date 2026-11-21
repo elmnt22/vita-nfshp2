@@ -115,7 +115,16 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         return found->second;
     };
     // Texture prewarm: the ordinary resolve/upload path, ahead of first draw.
-    if(PrewarmAllowed())for(const auto& [texture,forcedClamp]:frame.PrewarmTextures())(void)resolveTexture(*texture,forcedClamp);
+    if(PrewarmAllowed())for(const auto& [texture,forcedClamp]:frame.PrewarmTextures()) {
+        const auto before=textures.size();
+        (void)resolveTexture(*texture,forcedClamp);
+        if(platform::nativeDiagnosticsEnabled) {
+            char text[128];std::snprintf(text,sizeof(text),"key=%08x ptr=%p clamp=%d new=%d",
+                texture->descriptor->key,static_cast<const void*>(texture),forcedClamp ? 1:0,textures.size()!=before ? 1:0);
+            platform::RecordSessionEvent("render.texture_prewarm_resolve",text);
+        }
+    }
+    if(PrewarmAllowed())EcstasyConfirmTexturePrewarm(frame.PrewarmTextures());
     // Logical targets can share one physical attachment. Use the original
     // source identity and keep the raster cache local to this Gather.
     struct TargetRaster {
