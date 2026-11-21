@@ -2277,6 +2277,7 @@ void EcstasyVulkanDevice::SetDeferredRetire(bool defer) noexcept {storage_->defe
 int EcstasyVulkanDevice::RenderStage() noexcept {return glRenderStage.load();}
 void EcstasyVulkanDevice::Render(EcstasyFrame& frame)
 {
+    frame.FinalizeOrder();
     try {(void)storage_->Render(&frame);}
     catch(const std::exception& error) {
         platform::RecordSessionEvent("renderer.frame.failed",error.what());throw;

@@ -1135,6 +1135,11 @@ public:
     // Transfer one already-retained manager submission; no second retain.
     void RetireStripAfterCompletion(frontend::FlailerStrip& strip);
     void Seal();
+    // The renderer's first step: copies the sealed commands into their final
+    // order when Seal deferred it (ecstasyDeferOrder; the copy then runs on
+    // the render thread instead of the game thread). Commands() is the final
+    // order only after this.
+    void FinalizeOrder();
     void MarkSubmitted();
     // The graphics owner calls this after synchronous CPU capture. Source
     // borrowers retire here; GPU allocations retain their own fence lifetime.
@@ -1196,6 +1201,7 @@ private:
     // bandwidth made per-flush 168-byte moves the dominant cost).
     std::vector<std::uint32_t> order_;
     std::size_t orderTail_{};
+    bool orderDeferred_{};
     std::vector<std::uint32_t> pendingAlphaIndices_;
     std::vector<std::uint32_t> orderScratch_;
     std::vector<EcstasyDrawCommand> attachSwap_; // materialization buffer (Seal swap)
