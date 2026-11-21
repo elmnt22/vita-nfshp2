@@ -3695,6 +3695,13 @@ int ecstasySceneryRunFastPath=[] {
 #endif
     return 1;
 }();
+// Scenery reuse census (counts only; see Gather). Vita: scenery_reuse.txt.
+int ecstasySceneryReuseCensus=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_SCENERY_REUSE"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 0;
+}();
 bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,bool lit)
 {
     const auto* solid=model.solid;

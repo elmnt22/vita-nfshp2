@@ -638,6 +638,30 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         }
         verify.run=nullptr;
     };
+    // Scenery reuse census (HP2_SCENERY_REUSE=1 / scenery_reuse.txt): counts
+    // only, no output change. Per view (0 main, 1 other targets): cached
+    // singletons, run commands and run strips; strips whose geometry sequence
+    // already appeared this Gather; strips whose sequence (any instance) or
+    // sequence+instance appeared in the previous Gather.
+    struct SceneryReuseCensus {
+        std::unordered_set<std::uint64_t> frameSeq,frameSeqInst,lastSeq,lastSeqInst;
+        std::array<std::array<double,7>,2> sum{};unsigned frames=0;
+    };
+    static SceneryReuseCensus reuseCensus;
+    const auto censusSequence=[&](const EcstasyDrawCommand& draw,const EditorMarkerSolidGeometry::Strip* const* strips,std::uint32_t count) {
+        std::uint64_t hash=1469598103934665603ull^static_cast<std::uint64_t>(draw.target ? draw.target->id:-1);
+        for(std::uint32_t at=0;at<count;++at) {
+            hash^=static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(strips[at]));hash*=1099511628211ull;
+        }
+        const std::uint64_t withInstance=(hash^static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(draw.instance)))*0x9e3779b97f4a7c15ull;
+        auto& row=reuseCensus.sum[draw.target && draw.target->id<7 ? 0:1];
+        if(count>1 || draw.sceneryRunCount) {row[1]+=1;row[2]+=count;} else row[0]+=1;
+        if(!reuseCensus.frameSeq.insert(hash).second)row[3]+=count;
+        if(reuseCensus.lastSeq.count(hash))row[4]+=count;
+        if(reuseCensus.lastSeqInst.count(withInstance))row[5]+=count;
+        reuseCensus.frameSeqInst.insert(withInstance);
+        row[6]+=count;
+    };
     std::uint32_t runResume=0; // next unexpanded strip of sourceCommands[commandAt]
     const EcstasyDrawCommand* modelRunSingle=nullptr; // first-strip command of the current model run
 #if defined(__GNUC__)
@@ -708,6 +732,8 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             const auto& run=*current;
             const EcstasyDrawCommand* fallback=nullptr;
             categoryTimer.Enter(run);
+            if(ecstasySceneryReuseCensus && runResume==0)
+                censusSequence(run,&runStrips[run.sceneryRunFirst],run.sceneryRunCount);
             while(runResume<run.sceneryRunCount) {
                 const auto* strip=runStrips[run.sceneryRunFirst+runResume++];
                 if(runResume<run.sceneryRunCount)residentGeometry.Prefetch(runStrips[run.sceneryRunFirst+runResume]);
@@ -745,6 +771,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             continue;
         }
         if(draw.cachedOpaqueScenery) {
+            if(ecstasySceneryReuseCensus && !draw.sceneryRunCount && draw.strip)censusSequence(draw,&draw.strip,1);
             if(prepareSceneryPacket(draw,draw.strip))continue;
             ++statistics.sceneryPacketFallbacks;
         }
@@ -1291,6 +1318,21 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         }
     }
     categoryTimer.Finish();
+    if(ecstasySceneryReuseCensus) {
+        auto& census=reuseCensus;
+        std::swap(census.lastSeq,census.frameSeq);std::swap(census.lastSeqInst,census.frameSeqInst);
+        census.frameSeq.clear();census.frameSeqInst.clear();
+        if(++census.frames==300) {
+            char text[320];int used=0;
+            for(std::size_t view=0;view<2;++view) {
+                const auto& r=census.sum[view];const double f=census.frames;
+                used+=std::snprintf(text+used,sizeof(text)-used,"%s singles=%.0f runs=%.0f run_strips=%.0f strips=%.0f same_frame_rep=%.0f prev_seq=%.0f prev_seq_inst=%.0f ",
+                    view ? "other":"main",r[0]/f,r[1]/f,r[2]/f,r[6]/f,r[3]/f,r[4]/f,r[5]/f);
+            }
+            platform::RecordSessionEvent("render.scenery_reuse",text);
+            census.sum={};census.frames=0;
+        }
+    }
     const auto finishStarted=Clock::now();
     profile.coldVertexJobs+=nativeStripJobs.size();profile.coldVertices+=nativePendingWork;
     if(!directSourcePreparation) {
