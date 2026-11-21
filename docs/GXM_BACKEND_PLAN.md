@@ -1,6 +1,6 @@
 # Native GXM backend plan (replace vitaGL)
 
-Status: Phase 0 done 2026-11-21 (results below). Waiting for the user's go on Phase 1.
+Status 2026-11-21: Phase 0 done; Phases 1-3 done as a direct GXM draw path inside vitaGL's context (Stage A, below). Replacing the rest of vitaGL is not worth it: the model shows no further gain in misses from a faster submit.
 
 ## Why
 
@@ -111,3 +111,49 @@ Per-frame GPU completion stamps (fence watcher thread), race frames only. Vsync 
 ## Not affected
 
 - The game thread at race start (about 30 ms) needs its own CPU work either way.
+
+## Stage A result: direct GXM draw path (2026-11-21, hp2 b7e97b63 + 7292cd4b)
+
+What changed:
+- Every race draw goes straight to `sceGxmDraw`/`sceGxmDrawInstanced` from the gathered batches, inside vitaGL's own context and scenes.
+  - It uses the same GXP programs (`vglHp2ProgramInfo`), its own patched vertex program (stream 0 = `VkVertex` 68 B, stream 1 = instance rows 80 B) and fragment programs per blend word.
+  - Uniform blocks go to vitaGL's ring; state is set only on change.
+- vitaGL keeps: init, display, scenes, clears, FBOs, the half-res pass, sun queries and screenshots.
+  - `vglHp2Sync` runs before the first direct draw after vitaGL work.
+  - `vglHp2Invalidate` runs before vitaGL draws again.
+  - The fork API is in `third_party/vitagl/hp2_vitagl.patch`.
+- Switches:
+  - `gxm_off.txt` selects vitaGL draws.
+  - `gxm_parity.txt` with `shots.txt` takes an in-frame A/B screenshot.
+  - `gxm_prof.txt` logs the pass and pre-pass profile.
+  - `gxm_flush.txt N` adds a mid-scene flush (no gain).
+- Submit trims: batch prefetch, instance rows written straight into the mapped stream, program/fragment lookup caches, no per-draw clock probe.
+
+Parity: in-frame direct vs vitaGL screenshots are pixel-identical (41/41 frames, then 38/38 after the trims).
+
+Results (bench 24 1, track 64):
+
+| | base42 (vitaGL) | direct + trims |
+|---|---|---|
+| GL thread per frame (timing windows) | 8.6 ms | 4.6 ms |
+| heavy-frame submit (GPU >= 33.4 ms) | 12 ms | 7.3 ms |
+| avg fps | 40.3 | 41.3 |
+| present intervals > 42 ms per bench | 129 | 87-109 (run-to-run noise ~20) |
+
+### What the remaining misses are (gpu_timeline with gather stamps, draw mix, auto shots)
+
+GPU intervals >= 41.7 ms are about 80 per bench. They come in two kinds:
+
+1. **Gather-bound, about 40%.** Gather (render thread, core 1) takes 33-39 ms for stretches of 2 s or more.
+   - This happens in wide-FOV demo views: 89° FOV, ~900 visible instances, 950-1600 draws.
+   - Gather scales with draws (412 draws → 15 ms, 950 → 33-37 ms).
+   - It is not resident-geometry churn (new/captured entries are 0 in these frames).
+   - The PC profile of gather is flat; resident cache lookups (`FindSource`/`Acquire`/`Touch`) are the largest group.
+2. **GPU-bound, about 60%.** These are crash and stuck scenes: a car against roadside trees or signs, heavy tyre smoke or dust, cops close by.
+   - The GPU takes 42-47 ms per frame. Regression on GPU-busy frames (R² 0.7): ~9 ms fixed, ~5-6 ms for the half-res split, ~0.14 ms per 1000 indices, ~0.08 ms per screen of smoke.
+   - Diagnostic modes on the heavy bucket (normal 30.8 ms): no smoke draws (split kept) 28.9; alpha test off 26.5; trivial SHADE vertex shader 30.5; 1x1 textures 28.7; resident geometry in CDRAM 30.5 (`resident_vram.txt`, kept off: -30 MB VRAM).
+   - No single GPU cost dominates; each lever is 2-4 ms.
+
+### What would still cut misses
+- Gather: cut per-draw CPU cost in the resident cache path, or spread gather over core 2. With direct GXM, the GL thread is idle ~25 ms per frame.
+- GPU: no exact lever left is bigger than ~3 ms. Visual levers (need approval): smoke and dust at quarter resolution in crash scenes, LOD bias for wide FOV, cheaper half-res split (particles in the main scene at full resolution when coverage is low).

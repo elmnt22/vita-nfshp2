@@ -27,7 +27,9 @@ struct GlMappedBuffer {
         if(name)glDeleteBuffers(1,&name);
         name=0;size=0;mapped=nullptr;
     }
-    void Ensure(GLenum bufferTarget,std::size_t required) {
+    // usage GL_STATIC_DRAW: vitaGL places it in CDRAM first (GPU-fast; CPU
+    // writes only, never read back), GL_DYNAMIC_DRAW: main RAM first.
+    void Ensure(GLenum bufferTarget,std::size_t required,GLenum usage=GL_DYNAMIC_DRAW) {
         if(name && size>=required)return;
         // Grow by half again: each regrowth leaves the old block allocated
         // until vitaGL's deferred free, so small steps churn GPU memory.
@@ -39,7 +41,7 @@ struct GlMappedBuffer {
         size=std::max<std::size_t>((std::max(required,grown)+65535u)&~std::size_t(65535u),65536u);
         glGenBuffers(1,&name);
         glBindBuffer(target,name);
-        glBufferData(target,static_cast<GLsizeiptr>(size),nullptr,GL_DYNAMIC_DRAW);
+        glBufferData(target,static_cast<GLsizeiptr>(size),nullptr,usage);
         mapped=static_cast<std::uint8_t*>(glMapBuffer(target,GL_WRITE_ONLY));
         Require(mapped!=nullptr,"vitaGL did not map a native geometry buffer");
     }
@@ -76,6 +78,9 @@ struct GlFramePacket {
     std::size_t residentVertexCapacity{},residentIndexCapacity{};
     std::uint32_t width{},height{};
     double gatherMilliseconds{};
+    // gpu_timeline: gather-thread stamps (Render entry, packet claimed, ready).
+    std::uint64_t timelineEntry{},timelineClaimed{},timelineReady{};
+    std::array<std::uint32_t,4> timelineResident{};
     double particleScreens{}; // main-target particle coverage this frame
     std::vector<EcstasyDepthTransfer> depthTransfers;
     void Clear() {
@@ -1270,6 +1275,7 @@ inline void PrefetchBatch(const VkDrawBatch& batch) noexcept
 }
 
 std::atomic<int> glRenderStage{0};
+extern int ecstasyGpuTimeline;
 bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
 {
     glRenderStage=1;
@@ -1279,6 +1285,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     const auto milliseconds=[](Clock::duration duration) {return std::chrono::duration<double,std::milli>(duration).count();};
     // Claim a free packet: at most one frame is gathered while one is drawn.
     const auto claimBegin=Clock::now();
+    const std::uint64_t timelineEntry=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
     if(glThreadStarted_)sceKernelWaitSema(freeSema_,1,nullptr);
     const auto claimMs=milliseconds(Clock::now()-claimBegin);
     struct ReleaseOnThrow {
@@ -1291,6 +1298,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     }
     building=&packets[nextPacket];nextPacket=(nextPacket+1)%packets.size();
     building->Clear();
+    building->timelineEntry=timelineEntry;
+    building->timelineClaimed=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
     const auto renderBegin=Clock::now();
     statistics={};
     statistics.presentationTarget=true;
@@ -1452,6 +1461,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     }
     glRenderStage=0;
     release.armed=false;
+    packet.timelineReady=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
+    packet.timelineResident=nativeGatherResidentEvents;
     if(!glThreadStarted_) {Submit(packet);return true;}
     sceKernelSignalSema(readySema_,1);
     // Unpipelined callers expect the frame on screen when Render returns.
@@ -1484,9 +1495,19 @@ void EcstasyVulkanDevice::Storage::GlThread()
 // when the GPU finished each frame, so steady-state GPU throughput and GPU
 // starvation (waiting for the submit) can be separated without draining.
 int ecstasyGpuTimeline=0;
+// resident_vram.txt: resident geometry in CDRAM (tested 2026-11-21: no GPU gain, -30 MB VRAM).
+int ecstasyResidentVram=0;
+// gpu_timeline.txt "1 N": screenshot (id 200000000+n) the frame after a GPU
+// tail over 38 ms, at most N shots and one per 2 s (what is on screen).
+int ecstasyGpuHeavyShots=0;
+static bool gpuHeavyShotPending=false;
+// Per-frame draw mix for the timeline (alpha-tested, half-res, offscreen).
+static std::uint32_t gpuFrameAlphaTested=0,gpuFrameHalfDraws=0,gpuFrameOffscreen=0,gpuFrameIndices=0,gpuFrameOffIndices=0,gpuFrameAtIndices=0;
+static std::uint32_t gpuHeavyShotFrame=0;
 struct GpuTimelineRecord {
-    std::uint64_t submitBegin{},submitEnd{},swapEnd{},uploadEnd{},passBegin{},passEnd{};
-    std::uint32_t fence{},draws{};
+    std::uint64_t submitBegin{},submitEnd{},swapEnd{},uploadEnd{},passBegin{},passEnd{},entry{},claimed{},ready{};
+    std::uint32_t fence{},draws{},alphaTested{},halfDraws{},offscreen{},particleMilli{},half{},indices{},offIndices{},atIndices{};
+    std::array<std::uint32_t,4> resident{};
     std::atomic<std::uint64_t> done{0};
 };
 static GpuTimelineRecord gpuTimeline[128];
@@ -1567,14 +1588,14 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     for(std::size_t id=1;id<packet.targets.size();++id)
         if(packet.targetUsed[id])EnsureGlTarget(id,packet.targets[id][0],packet.targets[id][1]);
     if(packet.residentVertexCapacity) {
-        residentVertices.Ensure(GL_ARRAY_BUFFER,packet.residentVertexCapacity);
+        residentVertices.Ensure(GL_ARRAY_BUFFER,packet.residentVertexCapacity,ecstasyResidentVram ? GL_STATIC_DRAW:GL_DYNAMIC_DRAW);
         std::size_t at=0;
         for(const auto& range:packet.residentVertexRanges) {
             std::memcpy(residentVertices.mapped+range[0],packet.residentVertexBytes.data()+at,range[1]);at+=range[1];
         }
     }
     if(packet.residentIndexCapacity) {
-        residentIndices.Ensure(GL_ELEMENT_ARRAY_BUFFER,packet.residentIndexCapacity);
+        residentIndices.Ensure(GL_ELEMENT_ARRAY_BUFFER,packet.residentIndexCapacity,ecstasyResidentVram ? GL_STATIC_DRAW:GL_DYNAMIC_DRAW);
         std::size_t at=0;
         for(const auto& range:packet.residentIndexRanges) {
             std::memcpy(residentIndices.mapped+range[0],packet.residentIndexBytes.data()+at,range[1]);at+=range[1];
@@ -1847,6 +1868,15 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             const bool noTest=redundantTest || (batch.alphaTestRedundant && !ecstasyAlphaCheck) || ecstasyGpuDiag==5 || ecstasyGpuDiag==7;
             key|=(static_cast<std::uint32_t>(checkElided ? 3:noTest ? 0:std::clamp(batch.alphaTest,0,2)))<<3;
             if(gpuProbeFrame && batch.alphaTest && !noTest)++gpuCounts.alphaTested;
+            if(ecstasyGpuTimeline) {
+                const std::uint32_t members=std::max<std::uint32_t>(instanceRun[batchIndex],1u);
+                if(batch.alphaTest && !noTest)gpuFrameAlphaTested+=members;
+                if(halfMode)gpuFrameHalfDraws+=members;
+                if(batch.target!=0)gpuFrameOffscreen+=members;
+                gpuFrameIndices+=batch.count*members;
+                if(batch.target!=0)gpuFrameOffIndices+=batch.count*members;
+                if(batch.alphaTest && !noTest)gpuFrameAtIndices+=batch.count*members;
+            }
             key|=(batch.showcaseEnvironmentBlend ? 1u:0u)<<5;
             key|=(blend.fixedAlpha ? 1u:0u)<<6;
             key|=(batch.clampTopLeft && texturing ? 1u:0u)<<7;
@@ -2243,6 +2273,8 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 if(prof)profHalf+=static_cast<std::uint32_t>(sceKernelGetSystemTimeWide())-halfProf;
                 slowGl("half_begin",halfStarted);
                 halfMode=true;resetState();
+                // gpu_diag 8: keep the split, draw nothing in it (split cost).
+                if(ecstasyGpuDiag==8)at=end;
                 for(;at<end;++at)drawOne(list[at]);
                 halfMode=false;
                 halfStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
@@ -2357,6 +2389,11 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     if(nextScreenshot<ecstasyScreenshotFrames.size() && journalFrames+1>=ecstasyScreenshotFrames[nextScreenshot]) {
         SaveScreenshot(packet.width,packet.height,journalFrames+1);++nextScreenshot;
     }
+    if(gpuHeavyShotPending) {
+        gpuHeavyShotPending=false;
+        EnterGl();
+        SaveScreenshot(packet.width,packet.height,200000000u+gpuHeavyShotFrame);
+    }
     const auto submitDone=Clock::now();
     const auto vsync=vsyncRequest.exchange(-1);
     if(vsync>=0)vglWaitVblankStart(vsync ? GL_TRUE:GL_FALSE);
@@ -2370,6 +2407,12 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         record.submitBegin=timelineBegin;record.submitEnd=timelineSubmitEnd;record.swapEnd=sceKernelGetSystemTimeWide();
         record.fence=query_fence.value;record.draws=static_cast<std::uint32_t>(drawn);(void)timelineDrawnBefore;
         record.uploadEnd=timelineUploadEnd;record.passBegin=timelinePassBegin;record.passEnd=timelinePassEnd;
+        record.entry=packet.timelineEntry;record.claimed=packet.timelineClaimed;record.ready=packet.timelineReady;
+        record.alphaTested=gpuFrameAlphaTested;record.halfDraws=gpuFrameHalfDraws;record.offscreen=gpuFrameOffscreen;
+        record.particleMilli=static_cast<std::uint32_t>(packet.particleScreens*1000.0);record.half=lastFrameHalf ? 1u:0u;
+        record.resident=packet.timelineResident;
+        record.indices=gpuFrameIndices;record.offIndices=gpuFrameOffIndices;record.atIndices=gpuFrameAtIndices;
+        gpuFrameAlphaTested=gpuFrameHalfDraws=gpuFrameOffscreen=gpuFrameIndices=gpuFrameOffIndices=gpuFrameAtIndices=0;
         record.done.store(0,std::memory_order_relaxed);
         gpuTimelineHead.store(head+1,std::memory_order_release);
         // Report the frame 16 back (long done): one line per frame, times
@@ -2379,13 +2422,22 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             const auto& previous=gpuTimeline[(head-17)%128u];
             const auto done=frame.done.load(std::memory_order_acquire),before=previous.done.load(std::memory_order_acquire);
             if(done && before) {
-                char detail[240];
-                std::snprintf(detail,sizeof(detail),"n=%u sb=%lld se=%lld sw=%lld done=%lld draws=%u up=%lld pre=%lld pass=%lld post=%lld",head-16,
+                char detail[480];
+                std::snprintf(detail,sizeof(detail),"n=%u sb=%lld se=%lld sw=%lld done=%lld draws=%u up=%lld pre=%lld pass=%lld post=%lld ent=%lld clm=%lld rdy=%lld at=%u hd=%u off=%u ps=%u half=%u idx=%u oidx=%u aidx=%u rn=%u re=%u rc=%u rv=%u",head-16,
                     static_cast<long long>(frame.submitBegin-before),static_cast<long long>(frame.submitEnd-before),
                     static_cast<long long>(frame.swapEnd-before),static_cast<long long>(done-before),frame.draws,
                     static_cast<long long>(frame.uploadEnd-frame.submitBegin),static_cast<long long>(frame.passBegin-frame.uploadEnd),
-                    static_cast<long long>(frame.passEnd-frame.passBegin),static_cast<long long>(frame.submitEnd-frame.passEnd));
+                    static_cast<long long>(frame.passEnd-frame.passBegin),static_cast<long long>(frame.submitEnd-frame.passEnd),
+                    static_cast<long long>(frame.entry-before),static_cast<long long>(frame.claimed-before),static_cast<long long>(frame.ready-before),
+                    frame.alphaTested,frame.halfDraws,frame.offscreen,frame.particleMilli,frame.half,frame.indices,frame.offIndices,frame.atIndices,
+                    frame.resident[0],frame.resident[1],frame.resident[2],frame.resident[3]);
                 platform::RecordSessionEvent("renderer.gpu_tl",detail);
+                static std::uint64_t lastHeavyShot=0;
+                const auto tail=static_cast<long long>(done-std::max(frame.submitEnd,before));
+                if(ecstasyGpuHeavyShots>0 && tail>38000 && frame.swapEnd-lastHeavyShot>2000000u) {
+                    --ecstasyGpuHeavyShots;lastHeavyShot=frame.swapEnd;
+                    gpuHeavyShotPending=true;gpuHeavyShotFrame=head;
+                }
             }
         }
     }
