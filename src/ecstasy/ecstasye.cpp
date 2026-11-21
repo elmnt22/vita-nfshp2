@@ -5109,6 +5109,7 @@ void EcstasyFrame::MarkSceneHistoryBoundary(const EcstasyRenderTarget& display,b
 // contents only: the same image bytes, no game state is read or changed
 // beyond the texture lookup.
 int ecstasyTexturePrewarm=1;
+int ecstasyModelRunCache=1;
 namespace {
 struct TexturePrewarmState {
     std::mutex mutex;
@@ -5120,6 +5121,10 @@ struct TexturePrewarmState {
     std::unordered_map<const TexturePack*,Pack> packs;
     std::vector<TexturePack*> lastPacks;
     std::uint32_t sealsSinceFlush{};
+    // Found images are handed to every sealed frame until a Gather confirms
+    // them (a sealed frame can be dropped without being gathered).
+    struct Handed {const TexturePack* pack{};const TextureInfo* texture{};bool forcedClamp{};};
+    std::vector<Handed> handed;
 };
 TexturePrewarmState& TexturePrewarm() {static TexturePrewarmState state;return state;}
 const char* TexturePrewarmPath() noexcept
@@ -5155,6 +5160,16 @@ void LoadTexturePrewarm(TexturePrewarmState& state)
     std::fclose(file);
 }
 }
+// Renderer (gather thread): these handed images went through a Gather.
+void EcstasyConfirmTexturePrewarm(const std::vector<std::pair<const TextureInfo*,bool>>& done)
+{
+    if(done.empty())return;
+    auto& state=TexturePrewarm();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.handed.erase(std::remove_if(state.handed.begin(),state.handed.end(),[&](const TexturePrewarmState::Handed& entry) {
+        return std::find(done.begin(),done.end(),std::pair<const TextureInfo*,bool>{entry.texture,entry.forcedClamp})!=done.end();
+    }),state.handed.end());
+}
 // Renderer (gather thread): an image's first upload in this session.
 void EcstasyRecordTextureFirstUse(const TextureInfo& texture,bool repeatedPadding)
 {
@@ -5179,10 +5194,24 @@ void EcstasyFrame::CollectTexturePrewarm()
         // Forget packs that left the registry (an address may be reused).
         for(auto at=state.packs.begin();at!=state.packs.end();)
             if(std::find(packs.begin(),packs.end(),at->first)==packs.end())at=state.packs.erase(at); else ++at;
+        state.handed.erase(std::remove_if(state.handed.begin(),state.handed.end(),[&](const TexturePrewarmState::Handed& entry) {
+            return std::find(packs.begin(),packs.end(),entry.pack)==packs.end();
+        }),state.handed.end());
         state.lastPacks=packs;
     }
     std::size_t lookups=0;
+    const bool logNow=platform::nativeDiagnosticsEnabled && (state.sealsSinceFlush%120u)==0;
     for(const auto* pack:packs) {
+        if(logNow && pack) {
+            const auto known=state.packs.find(pack);
+            char text[200];
+            std::snprintf(text,sizeof(text),"pack=%s pending_reads=%d listed=%u waiting=%u textures=%u",
+                pack->Name().c_str(),pack->HasPendingReads() ? 1:0,
+                static_cast<unsigned>(state.byPack.count(pack->Name()) ? state.byPack[pack->Name()].size():0),
+                static_cast<unsigned>(known!=state.packs.end() ? known->second.pending.size():0),
+                static_cast<unsigned>(pack->TextureCount()));
+            platform::RecordSessionEvent("render.texture_prewarm",text);
+        }
         if(!pack || pack->HasPendingReads())continue;
         auto found=state.packs.find(pack);
         if(found==state.packs.end() || found->second.name!=pack->Name()) {
@@ -5199,10 +5228,16 @@ void EcstasyFrame::CollectTexturePrewarm()
             catch(...) {texture=nullptr;}
             if(texture && texture->descriptor && texture->descriptor->authoredRecord &&
                 texture->descriptor->authoredRecordSize>=164) {
-                prewarmTextures_.push_back({texture,!wanted.second});
+                state.handed.push_back({pack,texture,!wanted.second});
                 entry.pending[entry.cursor]=entry.pending.back();entry.pending.pop_back();
             } else ++entry.cursor;
         }
+    }
+    for(const auto& entry:state.handed)prewarmTextures_.push_back({entry.texture,entry.forcedClamp});
+    if(!prewarmTextures_.empty() && platform::nativeDiagnosticsEnabled) {
+        char text[96];std::snprintf(text,sizeof(text),"count=%u render_frame=%u",
+            static_cast<unsigned>(prewarmTextures_.size()),renderFrameCounter_);
+        platform::RecordSessionEvent("render.texture_prewarm_batch",text);
     }
     if(++state.sealsSinceFlush>=300 && !state.appended.empty()) {
         state.sealsSinceFlush=0;
@@ -7470,7 +7505,6 @@ std::array<std::uint64_t,6> nativeShadingCounters{};
 // Model-run cache (Vita model_run_cache_off.txt, PC HP2_RUN_CACHE=0 off,
 // 2 verify): a car part run's continuation strips, recorded with the exact
 // resident entries Acquire gave them, replayed as one span range + batch.
-int ecstasyModelRunCache=1;
 // hits, misses, replayed strips, verify checks, verify mismatches
 std::array<std::uint64_t,5> nativeModelRunCounters{};
 struct VkModelRunRecord {
@@ -7760,6 +7794,7 @@ struct VkResidentGeometryEntry {
     std::uint16_t indexCount{};
     std::uint8_t count{};
     bool prepared{},uploaded{};
+    float minAlpha{};
     // Raw vertex storage: vertex preparation writes the first count
     // vertices and only those are copied out, so the remaining slot bytes
     // are never read (no first-sight zero fill of 3.3 KB on Vita).
@@ -7961,7 +7996,17 @@ public:
 #endif
     }
     void CompletePreparation() {
-        for(const auto slot:active_)entries_[slot]->prepared=true;
+        for(const auto slot:active_) {
+            auto& entry=*entries_[slot];
+            if(!entry.prepared) {
+                // Smallest prepared vertex alpha (alpha-test elision input).
+                float least=std::numeric_limits<float>::infinity();
+                const auto* vertices=entry.shadow.data();
+                for(std::size_t at=0;at<entry.count;++at)least=std::min(least,vertices[at].color[3]);
+                entry.minAlpha=least;
+            }
+            entry.prepared=true;
+        }
     }
     void PublishUploads(const std::vector<std::uint32_t>& slots) {
         for(const auto slot:slots)entries_[slot]->uploaded=true;
@@ -8284,6 +8329,9 @@ bool NativeTextureReferenced(const std::vector<VkNativeTextureKey>& referenced,V
 // Diagnostic: bytes compared by texture validation (vitaGL journal).
 inline std::uint64_t nativeTextureCompareBytes{},nativeTextureCompares{};
 struct VkDrawTexture {
+    // vitaGL: smallest alpha byte of the uploaded level-0 RGBA image
+    // (padding included), -1 until decoded. Alpha-test elision input only.
+    int minAlpha=-1;
     struct OpaqueSceneryState {
         std::uint32_t blend{};
         float blendConstant{},lodScale{};
@@ -8467,6 +8515,8 @@ struct VkDrawBatch {
     VkRect2D scissor{};
     VkViewport viewport{};
     std::int32_t textureFunction{},alphaTest{};
+    // vitaGL: every fragment provably passes alphaTest (set after Gather).
+    bool alphaTestRedundant{};
     float lodScale{1.0f};
     std::int32_t minification{};
     std::uint32_t focusFirst{};
