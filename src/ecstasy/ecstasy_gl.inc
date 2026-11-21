@@ -443,6 +443,9 @@ struct EcstasyVulkanDevice::Storage {
     GLint halfCompositeFlip{-1};
     bool halfCompositeFailed{};
     std::uint64_t halfRuns{},halfBatches{},halfDepthWrites{};
+    // Composite bounds: [x0,y0,x1,y1] window pixels for the next EndHalfParticles.
+    std::array<float,4> halfBounds{{0.0f,0.0f,-1.0f,-1.0f}};GLuint halfBoundsQuad{};
+    std::uint64_t halfCompositeBounded{},halfCompositeSkipped{};double halfCompositeArea{};
     std::size_t nextScreenshot{};
     int displayTargetScenes{};
     std::size_t nextDisplayShot{};
@@ -1780,7 +1783,13 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         if(!offscreen) {
             // The display scene must store its depth (sampled by the half pass)
             // and reload it after the composite for the draws that follow.
-            const auto mode=halfFrame ? SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED:SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED;
+            // ecstasyHalfDepthPolicy >=1: the first display scene starts with
+            // a full depth clear, so it needs no load (as in every frame
+            // without the split); the resumed scene loads it (set before
+            // EndHalfParticles rebinds the display). >=2: that resumed scene
+            // stores nothing either, again as every unsplit frame ends.
+            const auto mode=halfFrame && ecstasyHalfDepthPolicy<1 ?
+                SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED:SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED;
             sceGxmDepthStencilSurfaceSetForceLoadMode(&gxm_depth_stencil_surface,mode);
             sceGxmDepthStencilSurfaceSetForceStoreMode(&gxm_depth_stencil_surface,halfFrame ?
                 SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED:SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
@@ -2287,10 +2296,49 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 halfMode=true;resetState();
                 // gpu_diag 8: keep the split, draw nothing in it (split cost).
                 if(ecstasyGpuDiag==8)at=end;
+                // Composite bounds (half_bounds_off.txt): the half target is
+                // cleared to transparent black and composited with ONE /
+                // ONE_MINUS_SRC_ALPHA, so a display pixel whose bilinear
+                // footprint holds only cleared texels is left exactly as it
+                // was. The window rectangle of this run's particle vertices,
+                // widened by 3 half texels and mirrored vertically (either
+                // window orientation), bounds every other pixel.
+                halfBounds={{0.0f,0.0f,-1.0f,-1.0f}};
+                if(ecstasyHalfCompositeBounds) {
+                    const float W=static_cast<float>(packet.width),H=static_cast<float>(packet.height);
+                    float x0=W,x1=0.0f,y0=H,y1=0.0f;bool valid=true,any=false;
+                    for(auto scan=at;valid && scan<end;++scan) {
+                        const auto& batch=batches[list[scan]];
+                        const auto& vp=batch.viewport;
+                        if(batch.residentGeometry || !batch.indexed || vp.x!=0.0f || vp.y!=0.0f || vp.width!=W || vp.height!=H ||
+                            static_cast<std::size_t>(batch.first)+batch.count>packet.indices.size()) {valid=false;break;}
+                        for(std::uint32_t index=0;index<batch.count;++index) {
+                            const auto vertex=packet.indices[batch.first+index];
+                            if(vertex>=packet.vertices.size()) {valid=false;break;}
+                            const auto& p=packet.vertices[vertex].position;
+                            if(!(p[3]>0.0f) || !std::isfinite(p[0]) || !std::isfinite(p[1])) {valid=false;break;}
+                            const float x=(p[0]/p[3]+1.0f)*0.5f*W,y=(p[1]/p[3]+1.0f)*0.5f*H;
+                            x0=std::min(x0,x);x1=std::max(x1,x);
+                            y0=std::min({y0,y,H-y});y1=std::max({y1,y,H-y});any=true;
+                        }
+                    }
+                    if(valid) {
+                        const float margin=3.0f*static_cast<float>(halfDivisor);
+                        if(!any)halfBounds={{0.0f,0.0f,0.0f,0.0f}}; // nothing drawn: no composite
+                        else halfBounds={{std::max(0.0f,std::floor(x0-margin)),std::max(0.0f,std::floor(y0-margin)),
+                            std::min(W,std::ceil(x1+margin)),std::min(H,std::ceil(y1+margin))}};
+                    }
+                }
                 for(;at<end;++at)drawOne(list[at]);
                 halfMode=false;
                 halfStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
                 EnterGl();
+                if(ecstasyHalfDepthPolicy>=1) {
+                    // The resumed display scene (begun by EndHalfParticles).
+                    sceGxmDepthStencilSurfaceSetForceLoadMode(&gxm_depth_stencil_surface,SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
+                    if(ecstasyHalfDepthPolicy>=2)
+                        sceGxmDepthStencilSurfaceSetForceStoreMode(&gxm_depth_stencil_surface,SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
+                }
                 halfProf=profNow();
                 EndHalfParticles(packet.width,packet.height);
                 if(prof)profHalf+=static_cast<std::uint32_t>(sceKernelGetSystemTimeWide())-halfProf;
@@ -2555,7 +2603,9 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             halfRuns/300.0,halfBatches/300.0,halfDepthWrites/300.0,ecstasyHalfResParticles && !halfCompositeFailed ? 1:0);
         {
             const auto length=std::strlen(detail);
-            std::snprintf(detail+length,sizeof(detail)-length," quarter=%.2f",quarterFrames/300.0);
+            std::snprintf(detail+length,sizeof(detail)-length," quarter=%.2f bounded=%.2f skipped=%.2f bounded_area=%.3f",quarterFrames/300.0,
+                halfCompositeBounded/300.0,halfCompositeSkipped/300.0,halfCompositeBounded ? halfCompositeArea/halfCompositeBounded:0.0);
+            halfCompositeBounded=halfCompositeSkipped=0;halfCompositeArea=0.0;
             quarterFrames=0;
         }
         platform::RecordSessionEvent("renderer.vitagl.halfres",detail);
@@ -2867,7 +2917,22 @@ void EcstasyVulkanDevice::Storage::EndHalfParticles(std::uint32_t width,std::uin
         else glUniform4f(halfCompositeFlip,w,h,0.0f,0.0f);
     }
     glBindTexture(GL_TEXTURE_2D,halfTargets[halfTargetCurrent].texture);
-    glBindBuffer(GL_ARRAY_BUFFER,halfQuad);
+    // halfBounds (window pixels, set by drawPass): x1<0 full screen, an
+    // empty rectangle draws nothing (nothing was drawn into the half target).
+    const auto bounds=halfBounds;halfBounds={{0.0f,0.0f,-1.0f,-1.0f}};
+    const bool full=bounds[2]<0.0f;
+    if(!full && (bounds[2]<=bounds[0] || bounds[3]<=bounds[1])) {++halfCompositeSkipped;glEnable(GL_SCISSOR_TEST);return;}
+    if(full)glBindBuffer(GL_ARRAY_BUFFER,halfQuad);
+    else {
+        const float W=static_cast<float>(width),H=static_cast<float>(height);
+        const float l=bounds[0]/W*2.0f-1.0f,r=bounds[2]/W*2.0f-1.0f,b=bounds[1]/H*2.0f-1.0f,t=bounds[3]/H*2.0f-1.0f;
+        const float quad[8]={l,b,r,b,l,t,r,t};
+        if(!halfBoundsQuad)glGenBuffers(1,&halfBoundsQuad);
+        glBindBuffer(GL_ARRAY_BUFFER,halfBoundsQuad);
+        glBufferData(GL_ARRAY_BUFFER,sizeof(quad),quad,GL_DYNAMIC_DRAW);
+        halfCompositeArea+=static_cast<double>((bounds[2]-bounds[0])*(bounds[3]-bounds[1]))/(W*H);
+        ++halfCompositeBounded;
+    }
     for(GLuint attribute=1;attribute<4;++attribute)glDisableVertexAttribArray(attribute);
     glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,2*sizeof(float),nullptr);
     glDrawArrays(GL_TRIANGLE_STRIP,0,4);
