@@ -20,7 +20,17 @@ if(HP2_VITA_GL)
     # Storage is MSVC/Switch-only); some Vulkan-only helpers are unused here.
     set_source_files_properties(src/ecstasy/ecstasye.cpp PROPERTIES COMPILE_OPTIONS
         "-Wno-subobject-linkage;-Wno-unused-function;-Wno-overflow")
-    set(HP2_VITA_GL_LIBS vitaGL vitashark SceShaccCgExt SceShaccCg_stub taihen_stub
+    # Own vitaGL build (native/deps/vitaGL_hp2: NO_DEBUG=1 HAVE_VERTEX_LAYOUT_CACHE=1
+    # + HP2 fast paths); OFF links the stock VitaSDK library.
+    option(HP2_OWN_VITAGL "Link native/deps/vitaGL_hp2/libvitaGL.a" ON)
+    set(HP2_VITAGL_LIB vitaGL)
+    set(HP2_OWN_VITAGL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../deps/vitaGL_hp2")
+    if(HP2_OWN_VITAGL AND EXISTS "${HP2_OWN_VITAGL_DIR}/libvitaGL.a")
+        set(HP2_VITAGL_LIB "${HP2_OWN_VITAGL_DIR}/libvitaGL.a")
+        target_include_directories(NFSHP2Core BEFORE PUBLIC "${HP2_OWN_VITAGL_DIR}/source")
+        message(STATUS "HP2: own vitaGL ${HP2_VITAGL_LIB}")
+    endif()
+    set(HP2_VITA_GL_LIBS ${HP2_VITAGL_LIB} vitashark SceShaccCgExt SceShaccCg_stub taihen_stub
         SceKernelDmacMgr_stub SceGxm_stub SceDisplay_stub SceCommonDialog_stub SceAppMgr_stub
         SceIofilemgr_stub mathneon)
 endif()

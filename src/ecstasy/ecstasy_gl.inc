@@ -92,11 +92,25 @@ attribute vec4 a_pos;
 attribute vec3 a_uvq;
 attribute vec4 a_col;
 attribute vec3 a_nrm;
+#if INST
+// Per-instance model transform (one per-frame table row per draw instance).
+attribute vec4 a_i0;
+attribute vec4 a_i1;
+attribute vec4 a_i2;
+attribute vec4 a_i3;
+attribute vec4 a_i4;
+#define u_m0 a_i0
+#define u_m1 a_i1
+#define u_m2 a_i2
+#define u_m3 a_i3
+#define u_clipmap a_i4
+#else
 uniform vec4 u_m0;
 uniform vec4 u_m1;
 uniform vec4 u_m2;
 uniform vec4 u_m3;
 uniform vec4 u_clipmap;
+#endif
 uniform float u_yflip;
 #if SHADE
 uniform vec4 u_shade[19];
@@ -370,7 +384,15 @@ struct EcstasyVulkanDevice::Storage {
     // GL objects.
     GlMappedBuffer residentVertices,residentIndices;
     static constexpr std::size_t StreamRing=3;
-    std::array<GlMappedBuffer,StreamRing> streamVertices,streamIndices;
+    std::array<GlMappedBuffer,StreamRing> streamVertices,streamIndices,streamInstances;
+    // Instanced GPU-position draws (Vita instance_off.txt off): every
+    // native-transform draw reads its matrix from a per-frame table row, and
+    // consecutive draws of the same resident geometry in the same state
+    // (only the matrix differs) become one instanced draw. Same shader
+    // arithmetic for every such draw, the same triangles in the same order.
+    std::vector<float> instanceTable;
+    std::vector<std::uint32_t> instanceRow,instanceRun;
+    double instanceDraws{},instanceMembers{};
     std::size_t streamSlot{};
     std::unordered_map<std::uint32_t,GlProgram> programs;
     // GL thread: colour texture + framebuffer for each offscreen target.
@@ -502,6 +524,7 @@ struct EcstasyVulkanDevice::Storage {
         residentVertices.Destroy();residentIndices.Destroy();
         for(auto& buffer:streamVertices)buffer.Destroy();
         for(auto& buffer:streamIndices)buffer.Destroy();
+        for(auto& buffer:streamInstances)buffer.Destroy();
         for(auto& entry:programs)if(entry.second.program)glDeleteProgram(entry.second.program);
         programs.clear();
     }
@@ -942,6 +965,7 @@ void GlWriteProgramCache(std::uint32_t key,GLuint program)
 }
 }
 
+int ecstasyInstancing=1; // Vita instance_off.txt: per-draw uniform matrices
 int ecstasyAffineUV=1; // Vita affine_off.txt restores the projective divide everywhere
 int ecstasyForceNoVsync=0;
 // Vita gpu_diag.txt N (diagnostic only, wrong images on purpose): 1 = every
@@ -957,12 +981,13 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     if(program.program || program.failed)return program;
     const unsigned function=key&3u,texturing=(key>>2)&1u,alphaTest=(key>>3)&3u,showcase=(key>>5)&1u,
         fixedAlpha=(key>>6)&1u,clamp=(key>>7)&1u,gpuPosition=(key>>8)&1u,shade=(key>>9)&1u,affine=(key>>10)&1u,
-        depthTexture=(key>>11)&1u;
-    char defines[320];
+        depthTexture=(key>>11)&1u,instanced=(key>>12)&1u;
+    char defines[340];
     std::snprintf(defines,sizeof(defines),
         "#define FUNC %u\n#define TEXTURING %u\n#define ATEST %u\n#define SHOWCASE %u\n#define AFIX %u\n"
-        "#define CLAMPTL %u\n#define GPUPOS %u\n#define SHADE %u\n#define AFFINE %u\n#define DEPTHTEX %u\n#define TRIVIALVS %u\n",
-        function,texturing,alphaTest,showcase,fixedAlpha,clamp,gpuPosition,shade,affine,depthTexture,ecstasyGpuDiag==2 ? 1u:0u);
+        "#define CLAMPTL %u\n#define GPUPOS %u\n#define SHADE %u\n#define AFFINE %u\n#define DEPTHTEX %u\n#define TRIVIALVS %u\n"
+        "#define INST %u\n",
+        function,texturing,alphaTest,showcase,fixedAlpha,clamp,gpuPosition,shade,affine,depthTexture,ecstasyGpuDiag==2 ? 1u:0u,instanced);
     const auto compile=[&](GLenum kind,const char* body)->GLuint {
         const char* prelude=kind==GL_VERTEX_SHADER ? "":
             ecstasyFragmentMediump ? "precision mediump float;\n":"precision highp float;\n";
@@ -1003,6 +1028,11 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     glBindAttribLocation(program.program,1,"a_uvq");
     glBindAttribLocation(program.program,2,"a_col");
     glBindAttribLocation(program.program,3,"a_nrm");
+    if(instanced) {
+        glBindAttribLocation(program.program,4,"a_i0");glBindAttribLocation(program.program,5,"a_i1");
+        glBindAttribLocation(program.program,6,"a_i2");glBindAttribLocation(program.program,7,"a_i3");
+        glBindAttribLocation(program.program,8,"a_i4");
+    }
     glLinkProgram(program.program);
     GLint linked=0;glGetProgramiv(program.program,GL_LINK_STATUS,&linked);
     if(!linked) {
@@ -1029,7 +1059,10 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
     static bool warmed=false;
     if(!warmed) {
         warmed=true;
-        for(const std::uint32_t known:{0x004u,0x314u,0x304u,0x00cu,0x014u})if(known!=key)Program(known);
+        for(std::uint32_t known:{0x004u,0x314u,0x304u,0x00cu,0x014u}) {
+            if(ecstasyInstancing && (known&0x100u))known|=0x1000u;
+            if(known!=key)Program(known);
+        }
         if(program.program)glUseProgram(program.program);
     }
     return program;
@@ -1332,6 +1365,59 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         }
     }
     for(GLuint attribute=0;attribute<4;++attribute)glEnableVertexAttribArray(attribute);
+    // Instance table: rows for every GPU-position draw, runs of identical
+    // resident geometry grouped per pass in draw order (particles excluded,
+    // so a run never crosses a half-resolution range).
+    instanceRow.assign(batches.size(),UINT32_MAX);instanceRun.assign(batches.size(),1u);
+    instanceTable.clear();
+    if(ecstasyInstancing) {
+        const auto sameGeometry=[&](const VkDrawBatch& a,const VkDrawBatch& b) {
+            if(!a.residentGeometry || !b.residentGeometry || !a.indexed || !b.indexed || a.particle || b.particle)return false;
+            if(a.nativeIndirectTransform || b.nativeIndirectTransform || !b.nativeGpuPosition)return false;
+            if(a.count!=b.count || a.nativeSpanCount!=b.nativeSpanCount || a.residentIndices!=b.residentIndices)return false;
+            if(a.nativeShadingIndex!=b.nativeShadingIndex || a.alphaTestRedundant!=b.alphaTestRedundant || a.texture!=b.texture)return false;
+            if(!b.SameDrawState(a))return false;
+            if(static_cast<std::size_t>(a.nativeSpanFirst)+a.nativeSpanCount>gatheredResidentIndexSpans.size() ||
+                static_cast<std::size_t>(b.nativeSpanFirst)+b.nativeSpanCount>gatheredResidentIndexSpans.size())return false;
+            for(std::uint32_t at=0;at<a.nativeSpanCount;++at)
+                if(gatheredResidentIndexSpans[a.nativeSpanFirst+at]!=gatheredResidentIndexSpans[b.nativeSpanFirst+at])return false;
+            return true;
+        };
+        const auto addRow=[&](const VkDrawBatch& batch) {
+            const auto row=static_cast<std::uint32_t>(instanceTable.size()/20);
+            instanceTable.insert(instanceTable.end(),batch.nativeLocalToClip.begin(),batch.nativeLocalToClip.end());
+            instanceTable.insert(instanceTable.end(),batch.nativeClipMapping.begin(),batch.nativeClipMapping.end());
+            return row;
+        };
+        for(const auto& list:targetBatches) {
+            for(std::size_t at=0;at<list.size();) {
+                const auto head=list[at];
+                const auto& batch=batches[head];
+                if(!batch.nativeGpuPosition || batch.nativeIndirectTransform) {++at;continue;}
+                instanceRow[head]=addRow(batch);
+                std::size_t end=at+1;
+                while(end<list.size() && end-at<4096 && sameGeometry(batch,batches[list[end]])) {
+                    addRow(batches[list[end]]);instanceRun[list[end]]=0;++end;
+                }
+                instanceRun[head]=static_cast<std::uint32_t>(end-at);
+                if(end-at>1) {instanceDraws+=1.0;instanceMembers+=static_cast<double>(end-at);}
+                at=end;
+            }
+        }
+        static unsigned instanceFrames=0;
+        if(++instanceFrames==300) {
+            char detail[96];std::snprintf(detail,sizeof(detail),"per_frame runs=%.0f draws_merged=%.0f rows=%u",
+                instanceDraws/300,(instanceMembers-instanceDraws)/300,static_cast<unsigned>(instanceTable.size()/20));
+            platform::RecordSessionEvent("renderer.vitagl.instancing",detail);
+            instanceFrames=0;instanceDraws=instanceMembers=0;
+        }
+    }
+    auto& instanceStream=streamInstances[streamSlot];
+    if(!instanceTable.empty()) {
+        instanceStream.Ensure(GL_ARRAY_BUFFER,instanceTable.size()*sizeof(float));
+        std::memcpy(instanceStream.mapped,instanceTable.data(),instanceTable.size()*sizeof(float));
+        for(GLuint attribute=4;attribute<9;++attribute) {glEnableVertexAttribArray(attribute);glVertexAttribDivisor(attribute,1);}
+    }
     GLuint activeVertexBuffer=0,activeIndexBuffer=0,activeTexture=~0u;
     // Shading indices address this frame's table only.
     for(auto& entry:programs)entry.second.shading=UINT32_MAX;
@@ -1445,6 +1531,8 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             key|=(shade ? 1u:0u)<<9;
             key|=(batch.affineUV && texturing && ecstasyAffineUV ? 1u:0u)<<10;
             key|=(halfMode && !halfHardwareDepth ? 1u:0u)<<11;
+            const bool instanced=batch.nativeGpuPosition && instanceRow[batchIndex]!=UINT32_MAX;
+            key|=(instanced ? 1u:0u)<<12;
             auto& program=Program(key);
             if(!program.program) {++skipped;return;}
             const float drawFlip=halfMode ? 1.0f:yflip;
@@ -1558,7 +1646,14 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                     program.parameters=parameters;program.parametersValid=true;
                 }
             }
-            if(batch.nativeGpuPosition) {
+            GLsizei instances=1;
+            if(instanced) {
+                instances=static_cast<GLsizei>(instanceRun[batchIndex]);
+                glBindBuffer(GL_ARRAY_BUFFER,instanceStream.name);activeVertexBuffer=0;
+                const auto base=static_cast<std::uintptr_t>(instanceRow[batchIndex])*20u*sizeof(float);
+                for(GLuint row=0;row<5;++row)
+                    glVertexAttribPointer(4+row,4,GL_FLOAT,GL_FALSE,20*sizeof(float),reinterpret_cast<const void*>(base+row*4u*sizeof(float)));
+            } else if(batch.nativeGpuPosition) {
                 std::array<float,20> transform;
                 std::copy_n(batch.nativeLocalToClip.begin(),16,transform.begin());
                 std::copy_n(batch.nativeClipMapping.begin(),4,transform.begin()+16);
@@ -1595,8 +1690,15 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 const auto indexBuffer=batch.residentIndices ? residentIndices.name:indexStream.name;
                 if(!indexBuffer) {++skipped;previous=&batch;return;}
                 if(indexBuffer!=activeIndexBuffer) {glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,indexBuffer);activeIndexBuffer=indexBuffer;}
-                glDrawElements(topology,static_cast<GLsizei>(batch.count),GL_UNSIGNED_INT,
+                if(instanced)glDrawElementsInstanced(topology,static_cast<GLsizei>(batch.count),GL_UNSIGNED_INT,
+                    reinterpret_cast<const void*>(static_cast<std::uintptr_t>(batch.first)*sizeof(std::uint32_t)),instances);
+                else glDrawElements(topology,static_cast<GLsizei>(batch.count),GL_UNSIGNED_INT,
                     reinterpret_cast<const void*>(static_cast<std::uintptr_t>(batch.first)*sizeof(std::uint32_t)));
+            } else if(instanced) {
+                constexpr std::uint32_t chunk=60000u;
+                for(std::uint32_t done=0;done<batch.count;done+=chunk)
+                    glDrawArraysInstanced(topology,static_cast<GLint>(batch.first+done),
+                        static_cast<GLsizei>(std::min(chunk,batch.count-done)),1);
             } else {
                 // vitaGL's linear index table is 16-bit: split very long arrays.
                 constexpr std::uint32_t chunk=60000u;
@@ -1656,7 +1758,9 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 continue;
             }
             if(ecstasyGpuDiag==4 && halfEligible(batches[list[at]])) {++at;continue;}
-            drawOne(list[at++]);
+            const auto head=list[at];
+            drawOne(head);
+            at+=std::max<std::uint32_t>(instanceRun[head],1u);
         }
         if(!offscreen && !halfPrewarmed && ecstasyHalfResParticles && !halfCompositeFailed) {
             // One-time setup of the half and quarter passes (programs, quad,

@@ -1,0 +1,442 @@
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index 3b91d11..25a34bf 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -124,7 +124,7 @@ char vgl_file_cache_path[256];
+ 
+ #define handle_packed_vbo_attrib() \
+ 	if (cur_vao->vertex_attrib_state & (1 << attr_idx)) { \
+-		attributes[i].offset = cur_vao->vertex_attrib_offsets[attr_idx]; \
++		attributes[i].offset = cur_vao->vertex_attrib_offsets[attr_idx] - vbo_base; \
+ 	} else { \
+ 		disable_draw_attrib(i) \
+ 	}	
+@@ -374,6 +374,21 @@ typedef struct {
+ #endif
+ } program;
+ 
++/* Driv3r: a packed VBO stream starts at its lowest attribute, so attribute
++ * offsets stay within the stride. Upstream started it at the buffer and gave
++ * each attribute its absolute offset, which SceGxmVertexAttribute keeps in 16
++ * bits: past 64 KB into a buffer, vertices came from the wrong place. */
++static inline __attribute__((always_inline)) uint32_t packed_vbo_base(program *p) {
++	uint32_t base = 0xFFFFFFFF;
++	for (int i = 0; i < p->attr_num; i++) {
++		uint8_t attr_idx = p->attr_map[i];
++		if ((cur_vao->vertex_attrib_state & (1 << attr_idx)) && cur_vao->vertex_attrib_offsets[attr_idx] < base)
++			base = cur_vao->vertex_attrib_offsets[attr_idx];
++	}
++	return base == 0xFFFFFFFF ? 0 : base;
++}
++
++
+ #if defined(HAVE_VERTEX_LAYOUT_CACHE) && !defined(STRICT_DRAW_COMPLIANCE) && !defined(DRAW_SPEEDHACK)
+ enum {
+ 	VERTEX_LAYOUT_MULTI_DRAW,
+@@ -395,7 +410,7 @@ typedef struct {
+ 	SceGxmVertexProgram *vprog;
+ } vertex_layout_cache_entry;
+ 
+-#define VERTEX_LAYOUT_CACHE_ENTRIES 4
++#define VERTEX_LAYOUT_CACHE_ENTRIES 16 /* HP2: ~8 programs per frame */
+ static uint32_t vertex_program_layout_current_ver = 0;
+ static vertex_layout_cache_entry vertex_layout_cache[VERTEX_LAYOUT_CACHE_ENTRIES] = {};
+ static uint8_t vertex_layout_cache_id = 0;
+@@ -445,7 +460,9 @@ static inline __attribute__((always_inline)) void vertex_layout_setup_ptrs(progr
+ 	if (is_packed) {
+ 		uint32_t stride = cur_vao->vertex_stream_config[first_attr_idx].stride;
+ 		if (target_vbo) {
+-			ptrs[0] = (uint8_t *)target_vbo->ptr + first * stride;
++			/* the stream starts where the miss path started it (packed_vbo_base):
++			 * from the buffer's start, cached draws read the wrong vertices */
++			ptrs[0] = (uint8_t *)target_vbo->ptr + packed_vbo_base(p) + first * stride;
+ 			target_vbo->last_frame = vgl_framecount;
+ 		} else {
+ 			uint32_t size = packed_count * stride;
+@@ -985,7 +1002,8 @@ void _glMultiDrawArrays_CustomShadersIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
+ 	// Gathering real attribute data pointers
+ 	if (is_packed) {
+ 		if (target_vbo) {
+-			ptrs[0] = (void *)target_vbo->ptr + lowest * streams[0].stride;
++			uint32_t vbo_base = packed_vbo_base(p);
++			ptrs[0] = (void *)target_vbo->ptr + vbo_base + lowest * streams[0].stride;
+ 			target_vbo->last_frame = vgl_framecount;
+ 			for (int i = 0; i < p->attr_num; i++) {
+ 				uint8_t attr_idx = p->attr_map[i];
+@@ -1249,7 +1267,8 @@ GLboolean _glDrawArrays_CustomShadersIMPL(GLint first, GLsizei count, GLboolean
+ 	// Gathering real attribute data pointers
+ 	if (is_packed) {
+ 		if (target_vbo) {
+-			ptrs[0] = (void *)target_vbo->ptr + first * streams[0].stride;
++			uint32_t vbo_base = packed_vbo_base(p);
++			ptrs[0] = (void *)target_vbo->ptr + vbo_base + first * streams[0].stride;
+ 			target_vbo->last_frame = vgl_framecount;
+ 			for (int i = 0; i < p->attr_num; i++) {
+ 				uint8_t attr_idx = p->attr_map[i];
+@@ -1581,7 +1600,8 @@ GLboolean _glDrawElements_CustomShadersIMPL(uint16_t *idx_buf, GLsizei count, ui
+ 	// Gathering real attribute data pointers
+ 	if (is_packed) {
+ 		if (target_vbo) {
+-			ptrs[0] = (void *)target_vbo->ptr;
++			uint32_t vbo_base = packed_vbo_base(p);
++			ptrs[0] = (void *)target_vbo->ptr + vbo_base;
+ 			target_vbo->last_frame = vgl_framecount;
+ 			for (int i = 0; i < p->attr_num; i++) {
+ 				uint8_t attr_idx = p->attr_map[i];
+@@ -3295,7 +3315,16 @@ void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean norm
+ 	attributes->componentCount = size;
+ 	streams->stride = stride ? stride : bpe * size;
+ #if defined(HAVE_VERTEX_LAYOUT_CACHE) && !defined(STRICT_DRAW_COMPLIANCE) && !defined(DRAW_SPEEDHACK)
+-	if (old_offset != cur_vao->vertex_attrib_offsets[index] || old_vbo != cur_vao->vertex_attrib_vbo[index] || old_format != attributes->format || old_component_count != attributes->componentCount || old_stride != streams->stride) {
++	/* HP2: an instance-rate attribute in its own buffer (not attribute 0's)
++	 * is always an unpacked stream whose pointer is rebuilt from the live
++	 * offset at every draw, cached layout or not, so moving only its offset
++	 * keeps the cached vertex program valid (per-draw instance table rows). */
++	GLboolean offset_only_instance = old_offset != cur_vao->vertex_attrib_offsets[index] &&
++		(cur_vao->vertex_attrib_divisor & (1 << index)) && cur_vao->vertex_attrib_vbo[index] &&
++		cur_vao->vertex_attrib_vbo[index] != cur_vao->vertex_attrib_vbo[0] &&
++		old_vbo == cur_vao->vertex_attrib_vbo[index] && old_format == attributes->format &&
++		old_component_count == attributes->componentCount && old_stride == streams->stride;
++	if (!offset_only_instance && (old_offset != cur_vao->vertex_attrib_offsets[index] || old_vbo != cur_vao->vertex_attrib_vbo[index] || old_format != attributes->format || old_component_count != attributes->componentCount || old_stride != streams->stride)) {
+ 		cur_vao->vertex_layout_version = ++vertex_layout_cur_ver;
+ 	}
+ #endif
+@@ -3972,3 +4001,15 @@ void vglShaderGxpBinary(GLsizei count, const GLuint *handles, const void *binary
+ 	sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, s->prog, &s->id);
+ 	s->unif_buf_size = sceGxmProgramGetDefaultUniformBufferSize(s->prog);
+ }
++
++/* Driv3r: glUniform4fv into an array uniform from element `offset` (the
++ * locations here are uniform pointers, so "name[i]" can't address one) */
++void vglUniform4fvOffset(GLint location, GLint offset, GLsizei count, const GLfloat *value) {
++	THREAD_SAFE()
++	if (location == -1 || location == 0)
++		return;
++	int offs = offset;
++	uniform *u = (uniform *)get_uniform_from_ptr(location, &offs);
++	offs = offset;
++	vgl_fill_uniform_data(value, SCE_GXM_PARAMETER_TYPE_F32, 4, count)
++}
+diff --git a/source/framebuffers.c b/source/framebuffers.c
+index c376bf3..1b69143 100644
+--- a/source/framebuffers.c
++++ b/source/framebuffers.c
+@@ -215,6 +215,7 @@ inline __attribute__((always_inline)) void glGenFramebuffers(GLsizei n, GLuint *
+ 			framebuffers[i].active = GL_TRUE;
+ 			framebuffers[i].depthbuffer_state = DEPTHBUFFER_MISSING;
+ 			framebuffers[i].depthbuffer_ptr = NULL;
++			framebuffers[i].keep_depth = GL_FALSE;
+ 			framebuffers[i].target = NULL;
+ 			framebuffers[i].tex = NULL;
+ 		}
+@@ -482,14 +483,14 @@ inline void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum text
+ #ifndef SKIP_ERROR_HANDLING
+ 	if (!fb) {
+ 		SET_GL_ERROR(GL_INVALID_OPERATION)
+-	} else if (textarget != GL_TEXTURE_2D) {
++	} else if (textarget != GL_TEXTURE_2D && (textarget < GL_TEXTURE_CUBE_MAP_POSITIVE_X || textarget > GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)) {
+ 		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, textarget)
+ 	} else if (tex_id >= TEXTURES_NUM) {
+ 		SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, tex_id)
+ 	}
+ #endif
+ 	
+-	_glFramebufferTexture2D(fb, attachment, &texture_slots[tex_id], tex_id);
++	_glFramebufferTexture2D_face(fb, attachment, &texture_slots[tex_id], tex_id, textarget == GL_TEXTURE_2D ? -1 : (int)(textarget - GL_TEXTURE_CUBE_MAP_POSITIVE_X));
+ }
+ 
+ inline void glNamedFramebufferTexture2D(GLuint target, GLenum attachment, GLenum textarget, GLuint tex_id, GLint level) {
+@@ -931,6 +932,24 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint
+ 
+ /* vgl* */
+ 
++/* driv3r: the bound framebuffer's depth and stencil survive a switch to
++ * another framebuffer and back (loaded and stored with each scene), and can
++ * be read with vglTexImageDepthBuffer */
++void vglFramebufferKeepDepthApply(void *p) {
++	framebuffer *fb = (framebuffer *)p;
++	if (fb && fb->keep_depth && fb->depthbuffer_ptr) {
++		sceGxmDepthStencilSurfaceSetForceLoadMode(fb->depthbuffer_ptr, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
++		sceGxmDepthStencilSurfaceSetForceStoreMode(fb->depthbuffer_ptr, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
++	}
++}
++void vglFramebufferKeepDepth(void) {
++	THREAD_SAFE()
++	if (!active_write_fb)
++		return;
++	active_write_fb->keep_depth = GL_TRUE;
++	vglFramebufferKeepDepthApply(active_write_fb);
++}
++
+ void vglTexImageDepthBuffer(GLenum target) {
+ 	THREAD_SAFE()
+ 
+diff --git a/source/gxm.c b/source/gxm.c
+index ffa0279..d3ff19d 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -643,6 +643,8 @@ void scene_reset(void) {
+ 				init_depth_stencil_buffer(active_write_fb->width, active_write_fb->height, &active_write_fb->depthbuffer, active_write_fb->depthbuffer_state == DEPTHBUFFER_WANTS_STENCIL);
+ 				active_write_fb->depthbuffer_ptr = &active_write_fb->depthbuffer;
+ 				active_write_fb->depthbuffer_state |= DEPTHBUFFER_READY;
++				extern void vglFramebufferKeepDepthApply(void *fb);
++				vglFramebufferKeepDepthApply(active_write_fb);
+ 			}
+ 
+ 			// If a rendertarget is not bound to the in use framebuffer, we get one for it
+diff --git a/source/shared.h b/source/shared.h
+index 07d8f47..af323af 100644
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -600,6 +600,7 @@ typedef struct {
+ 	SceGxmColorSurface colorbuffer;
+ 	SceGxmDepthStencilSurface depthbuffer;
+ 	SceGxmDepthStencilSurface *depthbuffer_ptr;
++	GLboolean keep_depth; // driv3r: depth/stencil loaded and stored with each scene (vglFramebufferKeepDepth)
+ 	SceGxmTextureFormat format;
+ 	int width;
+ 	int height;
+@@ -1343,7 +1344,7 @@ static inline __attribute__((always_inline)) uint32_t get_color_from_texture(Sce
+ 	}
+ }
+ 
+-static inline __attribute__((always_inline)) void _glFramebufferTexture2D(framebuffer *fb, GLenum attachment, texture *tex, GLuint tex_id) {
++static inline __attribute__((always_inline)) void _glFramebufferTexture2D_face(framebuffer *fb, GLenum attachment, texture *tex, GLuint tex_id, int face) {
+ 	// Extracting texture data
+ 	int old_w = fb->width, old_h = fb->height;
+ 	SceGxmTextureFormat fmt = vglGetTexFormat(&tex->gxm_tex);
+@@ -1354,6 +1355,10 @@ static inline __attribute__((always_inline)) void _glFramebufferTexture2D(frameb
+ 		vglGetTexSizes(&tex->gxm_tex, &fb->width, &fb->height);
+ 		fb->stride = VGL_ALIGN(fb->width, 8) * tex_format_to_bytespp(fmt);
+ 		fb->data = vglGetTexData(&tex->gxm_tex);
++		/* Driv3r: a cube map face, rendered to in place: faces are stored
++		 * one after another, swizzled (gpu_alloc_cube_texture) */
++		if (face >= 0)
++			fb->data = (uint8_t *)fb->data + fb->stride * fb->height * face;
+ 		fb->format = tex->format;
+ 
+ 		// Clearing previously attached texture
+@@ -1394,7 +1399,7 @@ static inline __attribute__((always_inline)) void _glFramebufferTexture2D(frameb
+ 		fb->is_float = tex->format == SCE_GXM_TEXTURE_FORMAT_F16F16F16F16_RGBA;
+ 
+ 		// Allocating colorbuffer
+-		sceGxmColorSurfaceInit(&fb->colorbuffer, get_color_from_texture(fmt), SCE_GXM_COLOR_SURFACE_LINEAR,
++		sceGxmColorSurfaceInit(&fb->colorbuffer, get_color_from_texture(fmt), face >= 0 ? SCE_GXM_COLOR_SURFACE_SWIZZLED : SCE_GXM_COLOR_SURFACE_LINEAR,
+ 			msaa_mode == SCE_GXM_MULTISAMPLE_NONE ? SCE_GXM_COLOR_SURFACE_SCALE_NONE : SCE_GXM_COLOR_SURFACE_SCALE_MSAA_DOWNSCALE,
+ 			fb->is_float ? SCE_GXM_OUTPUT_REGISTER_SIZE_64BIT : SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
+ 			fb->width, fb->height, VGL_ALIGN(fb->width, 8), fb->data);
+@@ -1408,4 +1413,8 @@ static inline __attribute__((always_inline)) void _glFramebufferTexture2D(frameb
+ 		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, attachment)
+ 	}
+ }
++
++static inline __attribute__((always_inline)) void _glFramebufferTexture2D(framebuffer *fb, GLenum attachment, texture *tex, GLuint tex_id) {
++	_glFramebufferTexture2D_face(fb, attachment, tex, tex_id, -1);
++}
+ #endif
+diff --git a/source/textures.c b/source/textures.c
+index 7b5d704..b3c3845 100644
+--- a/source/textures.c
++++ b/source/textures.c
+@@ -516,6 +516,17 @@ static inline __attribute__((always_inline)) void _glTexImage2D_CubeIMPL(texture
+ 			SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, type)
+ 		}
+ 		break;
++	case GL_BGRA: // Driv3r: D3D's A8R8G8B8 faces. Refused before, the cube was never made, and
++	              // sampling it read a deleted texture's memory (a second ride's speckled cars)
++		switch (type) {
++		case GL_UNSIGNED_BYTE:
++			data_bpp = 4;
++			src_format = SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR; // a plain copy: the texture reads it as ARGB (below)
++			break;
++		default:
++			SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, type)
++		}
++		break;
+ 	case GL_RGBA:
+ 		switch (type) {
+ 		case GL_UNSIGNED_BYTE:
+@@ -570,6 +581,9 @@ static inline __attribute__((always_inline)) void _glTexImage2D_CubeIMPL(texture
+ 		break;
+ 	}
+ 
++	if (format == GL_BGRA)
++		tex_format = SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB;
++
+ 	// Allocating texture/mipmaps depending on user call
+ 	tex->format = src_format;
+ 	if (level == 0) // FIXME: Add proper mipmaps support
+diff --git a/source/utils/gpu_utils.c b/source/utils/gpu_utils.c
+index 4464db5..16c72ed 100644
+--- a/source/utils/gpu_utils.c
++++ b/source/utils/gpu_utils.c
+@@ -233,10 +233,13 @@ void *gpu_alloc_mapped_aligned_for_cpu(size_t alignment, size_t size) {
+ 	return res;
+ }
+ 
++int vgl_drv_tex_fails, vgl_drv_unsafe, vgl_drv_alloc_fails;   // Driv3r: counts for its memory report
++
+ void *gpu_alloc_mapped_aligned_for_gpu(size_t alignment, size_t size) {
+ 	void *res = gpu_alloc_mapped_aligned_for_gpu_inner(alignment, size);
+ 	if (res)
+ 		return res;
++	vgl_drv_unsafe++;
+ 	
+ #ifdef HAVE_TEX_CACHE
+ 	if (vgl_cache_old_textures(size) >= size) {
+@@ -250,6 +253,8 @@ void *gpu_alloc_mapped_aligned_for_gpu(size_t alignment, size_t size) {
+ #endif
+ 	unsafe_allocator_counter = 0;
+ 	res = gpu_alloc_mapped_aligned_unsafe_for_gpu(alignment, size);
++	if (!res)
++		vgl_drv_alloc_fails++;
+ 
+ #ifdef LOG_ERRORS
+ 	if (!res) {
+@@ -335,10 +340,19 @@ void *gpu_alloc_palette(const void *data, uint32_t w, uint32_t bpe) {
+ }
+ 
+ void gpu_alloc_cube_texture(uint32_t w, uint32_t h, SceGxmTextureFormat format, SceGxmTransferFormat src_format, const void *data, texture *tex, uint8_t src_bpp, int index) {
+-	// If there's already a texture in passed texture object we first dealloc it
++	// Driv3r: a face given again to a whole cube of the same size and format
++	// goes into place. Freed and allocated anew, as before, the other five
++	// faces were left as whatever the new memory held (car reflections black
++	// or garbage, differing run to run).
+ 	if (tex->status == TEX_VALID && tex->faces_counter >= 6) {
+-		gpu_free_texture_data(tex);
+-		tex->faces_counter = 1;
++		uint32_t ow, oh;
++		vglGetTexSizes(&tex->gxm_tex, &ow, &oh);
++		if (tex->data && vglGetTexFormat(&tex->gxm_tex) == format && ow == w && oh == h)
++			tex->faces_counter = 7;
++		else {
++			gpu_free_texture_data(tex);
++			tex->faces_counter = 1;
++		}
+ 	} else
+ 		tex->faces_counter++;
+ 
+@@ -365,6 +379,9 @@ void gpu_alloc_cube_texture(uint32_t w, uint32_t h, SceGxmTextureFormat format,
+ 				dst_fmt, SCE_GXM_TRANSFER_SWIZZLED,
+ 				texture_data, 0, 0, VGL_ALIGN(w, 8) * bpp,
+ 				NULL, 0, NULL);
++			// Driv3r: waited for. Queued, a face read its temporary copy after the
++			// pool had moved on in a level load's forced swaps (reflections pink)
++			sceGxmTransferFinish();
+ 		} else
+ 			vgl_memset(texture_data, 0, face_size);
+ 
+@@ -547,10 +564,19 @@ static inline __attribute__((always_inline)) int gpu_get_compressed_mip_offset(i
+ }
+ 
+ void gpu_alloc_compressed_cube_texture(uint32_t w, uint32_t h, SceGxmTextureFormat format, uint32_t image_size, const void *data, texture *tex, uint8_t src_bpp, GLboolean uncompressed, int index) {
+-	// If there's already a texture in passed texture object we first dealloc it
++	// Driv3r: a face given again to a whole cube of the same size and format
++	// goes into place. Freed and allocated anew, as before, the other five
++	// faces were left as whatever the new memory held (car reflections black
++	// or garbage, differing run to run).
+ 	if (tex->status == TEX_VALID && tex->faces_counter >= 6) {
+-		gpu_free_texture_data(tex);
+-		tex->faces_counter = 1;
++		uint32_t ow, oh;
++		vglGetTexSizes(&tex->gxm_tex, &ow, &oh);
++		if (tex->data && vglGetTexFormat(&tex->gxm_tex) == format && ow == w && oh == h)
++			tex->faces_counter = 7;
++		else {
++			gpu_free_texture_data(tex);
++			tex->faces_counter = 1;
++		}
+ 	} else
+ 		tex->faces_counter++;
+ 
+@@ -660,9 +686,21 @@ void gpu_alloc_compressed_cube_texture(uint32_t w, uint32_t h, SceGxmTextureForm
+ 	}
+ }
+ 
++extern int vgl_drv_tex_fails;
+ void gpu_alloc_compressed_texture(int32_t mip_level, uint32_t w, uint32_t h, SceGxmTextureFormat format, uint32_t image_size, const void *data, texture *tex, uint8_t src_bpp, GLboolean uncompressed) {
++	// Driv3r: a level 0 given again at the same size and format keeps the
++	// storage (and the levels below it) it has. Freed and allocated anew, as
++	// before, every texture of a level load went through four or five
++	// allocations of its chain, the frees deferred: the pools ran dry and the
++	// unsafe collection below then freed textures still in use (black cars).
++	int reuse = 0;
++	if (tex->status == TEX_VALID && !mip_level && tex->data && vglGetTexFormat(&tex->gxm_tex) == format) {
++		uint32_t ow, oh;
++		vglGetTexSizes(&tex->gxm_tex, &ow, &oh);
++		reuse = ow == w && oh == h;
++	}
+ 	// If there's already a texture in passed texture object we first dealloc it
+-	if (tex->status == TEX_VALID && !mip_level)
++	if (tex->status == TEX_VALID && !mip_level && !reuse)
+ 		gpu_free_texture_data(tex);
+ 
+ 	// Calculating swizzled compressed texture size on memory
+@@ -711,11 +749,13 @@ void gpu_alloc_compressed_texture(int32_t mip_level, uint32_t w, uint32_t h, Sce
+ 			mip_count = mip_level;
+ 		}
+ 	} else {
+-		mip_count = mip_level;
++		mip_count = reuse ? tex->mip_count - 1 : mip_level;
+ 		tex_width = w;
+ 		tex_height = h;
+-		texture_data = gpu_alloc_mapped_for_gpu(tex_size);
++		texture_data = reuse ? tex->data : gpu_alloc_mapped_for_gpu(tex_size);
+ 	}
++	if (!texture_data)
++		vgl_drv_tex_fails++;
+ 
+ 	// Initializing texture data buffer
+ 	if (texture_data) {
+@@ -737,7 +777,9 @@ void gpu_alloc_compressed_texture(int32_t mip_level, uint32_t w, uint32_t h, Sce
+ 				case SCE_GXM_TEXTURE_FORMAT_UBC2_ABGR:
+ 				case SCE_GXM_TEXTURE_FORMAT_UBC3_ABGR:
+ 				case SCE_GXM_TEXTURE_FORMAT_UBC5_GR:
+-					if (aligned_width == w && aligned_height == h && h <= 2048 && w <= 2048) {
++					if (0) { // Driv3r: swizzled by the CPU. Through a RAW128 transfer, in some runs
++						// DXT3 textures stayed all zero in GL (black roads and cars); a level
++						// under a block across also went through as 0 blocks
+ #ifdef TEXTURE_UPLOADS_SPEEDHACK
+ 						void *mapped_src = data;
+ #else
+@@ -770,7 +812,8 @@ void gpu_alloc_compressed_texture(int32_t mip_level, uint32_t w, uint32_t h, Sce
+ 					}
+ 					break;
+ 				default:
+-					if (aligned_width == w && aligned_height == h && h <= 2048) {
++					if (0) { // Driv3r: DXT1 swizzled by the CPU too: a RAW64 transfer lost data as RAW128 did
++						// (garbage, pink and speckled, in textures of a second level load)
+ #ifdef TEXTURE_UPLOADS_SPEEDHACK
+ 						void *mapped_src = data;
+ #else
+diff --git a/source/vgl.c b/source/vgl.c
+index bf5e4d4..5d8bebc 100644
+--- a/source/vgl.c
++++ b/source/vgl.c
+@@ -808,5 +808,5 @@ void vglSetShaderCachePath(const char *path) {
+ }
+ 
+ void vglSetShaderAssociationPath(const char *path) {
+-	shark_set_shader_association_path(path);
++	(void)path; /* Driv3r: installed vitaShaRK predates this (Razor only) */
+ }
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+index dac9fa0..8327174 100644
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1004,6 +1004,7 @@ void glUniform3i(GLint location, GLint v0, GLint v1, GLint v2);
+ void glUniform3iv(GLint location, GLsizei count, const GLint *value);
+ void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
+ void glUniform4fv(GLint location, GLsizei count, const GLfloat *value);
++void vglUniform4fvOffset(GLint location, GLint offset, GLsizei count, const GLfloat *value); /* Driv3r */
+ void glUniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3);
+ void glUniform4iv(GLint location, GLsizei count, const GLint *value);
+ void glUniformBlockBinding(GLuint prog, GLuint uniformBlockIndex, GLuint uniformBlockBinding);
+@@ -1300,6 +1301,7 @@ GLboolean vglSwapResolution(int width, int height);
+ 
+ // Loads the depth buffer of the currently bound renderbuffer into the currently bound GL texture.
+ void vglTexImageDepthBuffer(GLenum target);
++void vglFramebufferKeepDepth(void);
+ 
+ // Makes vitaGL use cached memory instead of uncached memory for its internal memory pools. Must be called before vglInit*.
+ void vglUseCachedMem(GLboolean use);
