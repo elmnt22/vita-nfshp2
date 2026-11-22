@@ -117,7 +117,13 @@ int ecstasyHalfResSkipAlphaTest=1; // Vita halfres_atest.txt: 0 (keep the redund
 // Splitting the display scene stores+reloads colour and depth (~4 ms), so the
 // half pass is used only on frames with heavy particle fill (screens covered).
 double ecstasyHalfResMinScreens=6.0;
-double ecstasyQuarterResMinScreens=40.0; // 0 disables (Vita quarterres_off.txt)
+double ecstasyQuarterResMinScreens=10.0; // 0 disables (Vita quarterres_off.txt); was 40 before 2026-11-21
+// Visual cuts approved 2026-11-21 (renderer only; gameplay/RNG untouched):
+// particle quads covering more than Start of their viewport fade out, reaching
+// zero (skipped) at End; particles are not drawn into the rear-view mirror.
+float ecstasyParticleNearFadeStart=0.15f,ecstasyParticleNearFadeEnd=0.45f; // Vita particle_fade.txt "S E" (0 0 = off)
+int ecstasyParticleMirrorCull=1; // Vita particle_mirror_on.txt = 0
+int nativeMirrorTargetId=-1; // target sampled by the last rear-view composite (gather thread)
 // Display depth load/store around the half-res split (see drawPass); Vita half_depth_policy.txt N.
 int ecstasyHalfDepthPolicy=2;
 int ecstasyHalfCompositeBounds=1; // composite only the particle rectangle (Vita half_bounds_off.txt = 0)

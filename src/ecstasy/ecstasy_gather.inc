@@ -901,6 +901,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         }
         const bool targetSample=draw.sampledTarget!=nullptr;
         const bool rearSample=draw.kind==EcstasyDrawKind::RenderTargetPolygon;
+        if(rearSample && draw.sampledTarget)nativeMirrorTargetId=draw.sampledTarget->id;
         const bool remap=draw.kind==EcstasyDrawKind::RenderTargetStrip;
         const bool reflection=draw.kind==EcstasyDrawKind::SolidReflectionStrip;
         const bool specular=draw.kind==EcstasyDrawKind::SolidSpecularStrip;
@@ -1201,19 +1202,32 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             const double coverageScale=static_cast<double>(batch.viewport.width)*batch.viewport.height/
                 (4.0*static_cast<double>(options.width)*options.height);
             auto& coverage=nativeParticleCoverage[destination==0 ? 0:1];
-            for(const auto& quad:*draw.particleGroup) {
+            const bool mirrorCulled=ecstasyParticleMirrorCull && destination!=0 && destination==nativeMirrorTargetId;
+            const bool fade=ecstasyParticleNearFadeEnd>ecstasyParticleNearFadeStart && ecstasyParticleNearFadeStart>0.0f;
+            if(!mirrorCulled)for(const auto& quad:*draw.particleGroup) {
+                float fadeScale=1.0f;
                 {
                     float x0=quad.clipXY[0][0],x1=x0,y0=quad.clipXY[0][1],y1=y0;
                     for(std::size_t corner=1;corner<4;++corner) {
                         x0=std::min(x0,quad.clipXY[corner][0]);x1=std::max(x1,quad.clipXY[corner][0]);
                         y0=std::min(y0,quad.clipXY[corner][1]);y1=std::max(y1,quad.clipXY[corner][1]);
                     }
+                    if(fade) {
+                        // Unclipped quad area as a fraction of the viewport: a
+                        // puff this large sits at the lens and is mostly fill.
+                        const float fraction=(x1-x0)*(y1-y0)*0.25f;
+                        if(fraction>ecstasyParticleNearFadeStart)
+                            fadeScale=std::max(0.0f,(ecstasyParticleNearFadeEnd-fraction)/
+                                (ecstasyParticleNearFadeEnd-ecstasyParticleNearFadeStart));
+                    }
+                    if(fadeScale<=0.0f)continue;
                     x0=std::max(x0,-1.0f);y0=std::max(y0,-1.0f);x1=std::min(x1,1.0f);y1=std::min(y1,1.0f);
                     if(x1>x0 && y1>y0)coverage+=static_cast<double>(x1-x0)*(y1-y0)*coverageScale;
                     nativeParticleCoverage[2]+=1.0;
                 }
                 const auto firstVertex=output.size();
-                const auto particleColor=vulkanColor(quad.color,draw.alphaScale);
+                auto particleColor=vulkanColor(quad.color,draw.alphaScale);
+                particleColor[3]*=fadeScale;
                 for(std::size_t corner=0;corner<4;++corner) {
                     std::array<float,4> point{{quad.clipXY[corner][0],quad.clipXY[corner][1],quad.depth,1.0f}};
                     if(translation[0]!=0.0 || translation[1]!=0.0) {
