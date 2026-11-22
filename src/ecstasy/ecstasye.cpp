@@ -8114,11 +8114,14 @@ public:
         }
     }
     void PublishUploads(const std::vector<std::uint32_t>& slots) {
-        for(const auto slot:slots)entries_[slot]->uploaded=true;
+        for(const auto slot:slots) {entries_[slot]->uploaded=true;slotPrepared_[slot]|=2u;}
     }
     void InvalidateUploads() {
         for(auto& entry:entries_)if(entry)entry->uploaded=false;
+        for(auto& state:slotPrepared_)state&=1u;
     }
+    // bit0 prepared, bit1 uploaded (mirrors the entry flags).
+    std::uint8_t SlotState(std::uint32_t slot) const noexcept {return slotPrepared_[slot];}
 private:
     VkResidentGeometrySource*& FrameSource(const EditorMarkerSolidGeometry::Strip* token) noexcept {
         const auto identity=reinterpret_cast<std::uintptr_t>(token);
@@ -11062,9 +11065,11 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
 
         }
         for(const auto slot:residentGeometry.Active()) {
+            // Compact slot state: an uploaded slot reads no entry.
+            const auto slotState=residentGeometry.SlotState(slot);
+            Require(slotState&1u,"Resident geometry upload has unfinished vertex preparation");
+            if(slotState&2u)continue;
             const auto& entry=residentGeometry.Entry(slot);
-            Require(entry.prepared,"Resident geometry upload has unfinished vertex preparation");
-            if(entry.uploaded)continue;
             const auto offset=static_cast<VkDeviceSize>(slot)*VkResidentGeometryCache::SlotBytes;
             const auto bytes=static_cast<VkDeviceSize>(entry.count)*sizeof(VkVertex);
             auto* mapped=static_cast<std::byte*>(staged ? residentStaging.mapped:residentVertices.mapped);

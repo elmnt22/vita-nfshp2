@@ -1356,9 +1356,11 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         packet.residentVertexCapacity=residentGeometry.Capacity()*VkResidentGeometryCache::SlotBytes;
         if(!residentVerticesAllocated) {residentVerticesAllocated=true;residentGeometry.InvalidateUploads();}
         for(const auto slot:residentGeometry.Active()) {
+            // Compact slot state: an uploaded slot reads no entry.
+            const auto slotState=residentGeometry.SlotState(slot);
+            Require(slotState&1u,"Resident geometry upload has unfinished vertex preparation");
+            if(slotState&2u)continue;
             const auto& entry=residentGeometry.Entry(slot);
-            Require(entry.prepared,"Resident geometry upload has unfinished vertex preparation");
-            if(entry.uploaded)continue;
             const auto offset=static_cast<std::size_t>(slot)*VkResidentGeometryCache::SlotBytes;
             const auto bytes=static_cast<std::size_t>(entry.count)*sizeof(VkVertex);
             const auto* source=reinterpret_cast<const std::uint8_t*>(entry.shadow.data());

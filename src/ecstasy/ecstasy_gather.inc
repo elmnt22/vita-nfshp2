@@ -262,21 +262,42 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         const bool clamp=NativeDrawClampsTexture(draw);
         const auto textureIndex=resolveTexture(*draw.texture,clamp);
         auto& texture=textures[textureIndex];
-        const auto* wire=draw.texture->descriptor->authoredRecord;
-        // Scrolling materials retain the normal dynamic preparation path.
-        if(wire[0x79])return false;
         const auto destination=draw.target->id>=7 ? draw.target->id:0;
         const auto& raster=rasterFor(*draw.target,destination);
         if(!raster.scissor.extent.width || !raster.scissor.extent.height)return false;
         const auto& strip=*runStrip;
-        const auto count=strip.positions.size();
-        Require(strip.textureCoordinates.size()==count && strip.colors.size()==count,
-            "Original strip vertex/color/UV extents differ");
-        Require(count<=48,"Vulkan strip exceeds the original packet vertex extent");
+        const auto state=draw.nativeRenderEggState |
+            (static_cast<std::uint32_t>(draw.texture->drawFlag4Enabled)<<3) |
+            (static_cast<std::uint32_t>(draw.target->id==14)<<4);
+        // A first-strip record exists only for a revisioned strip whose
+        // scroll byte was zero and whose extents passed the checks below;
+        // the unchanged strip epoch (no revisioned strip restamped, reset,
+        // reassigned or destroyed) and texture identity/generation keep both.
+        VkSceneryFirstRecord* first=nullptr;bool firstHit=false;
+        VkResidentGeometryEntry* resident=nullptr;
+        if(ecstasySceneryFirstFast) {
+            if(sceneryFirstRecords.empty())sceneryFirstRecords.resize(8192);
+            const auto id=reinterpret_cast<std::uintptr_t>(runStrip);
+            first=&sceneryFirstRecords[((id>>4)^(id>>13))&(sceneryFirstRecords.size()-1)];
+            firstHit=first->strip==runStrip && first->epoch==residentGeometry.FrameEpoch() &&
+                first->texture==draw.texture && first->state==state && first->clamp==clamp &&
+                first->textureIndex==textureIndex && first->textureGeneration==texture.generation &&
+                (resident=residentGeometry.ReacquireFast(first->slot,first->serial))!=nullptr;
+        }
         Require(std::isfinite(draw.textureQScale),"Native solid texture Q scale is nonfinite");
-        if(draw.drawFlags&0xc0u)
-            Require(draw.LightContext() && draw.lightMaterial && strip.normals.size()==count,
-                "Lit strip lacks its source context, material or signed normal payload");
+        if(!firstHit) {
+            const auto* wire=draw.texture->descriptor->authoredRecord;
+            // Scrolling materials retain the normal dynamic preparation path.
+            if(wire[0x79])return false;
+            const auto count=strip.positions.size();
+            Require(strip.textureCoordinates.size()==count && strip.colors.size()==count,
+                "Original strip vertex/color/UV extents differ");
+            Require(count<=48,"Vulkan strip exceeds the original packet vertex extent");
+            if(draw.drawFlags&0xc0u)
+                Require(draw.LightContext() && draw.lightMaterial && strip.normals.size()==count,
+                    "Lit strip lacks its source context, material or signed normal payload");
+        } else if(draw.drawFlags&0xc0u)
+            Require(draw.LightContext() && draw.lightMaterial,"Lit strip lacks its source context or material");
         const auto identity=reinterpret_cast<std::uintptr_t>(draw.instance);
         auto& validated=validatedSceneryInstances[((identity>>4)^(identity>>12))&
             (validatedSceneryInstances.size()-1)];
@@ -286,32 +307,25 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             validated=draw.instance;
         }
         VkSolidStripJob job;job.draw=&draw;job.strip=runStrip;
-        job.lod={{draw.textureQScale,static_cast<std::uint8_t>(strip.autoK)*0.0625f}};
         job.lineTopology=(draw.nativeRenderEggState&EcstasyRenderEggWireframe)!=0;
         sceneryStep(16);
-        const auto state=draw.nativeRenderEggState |
-            (static_cast<std::uint32_t>(draw.texture->drawFlag4Enabled)<<3) |
-            (static_cast<std::uint32_t>(draw.target->id==14)<<4);
         bool prepare=false;
-        VkResidentGeometryEntry* resident=nullptr;
         VkDrawBatch batch;
-        VkSceneryFirstRecord* first=nullptr;
-        if(ecstasySceneryFirstFast) {
-            if(sceneryFirstRecords.empty())sceneryFirstRecords.resize(8192);
-            const auto id=reinterpret_cast<std::uintptr_t>(runStrip);
-            first=&sceneryFirstRecords[((id>>4)^(id>>13))&(sceneryFirstRecords.size()-1)];
-            if(first->strip==runStrip && first->epoch==residentGeometry.FrameEpoch() && strip.nativeVertexRevision &&
-                first->texture==draw.texture && first->state==state && first->clamp==clamp &&
-                first->textureIndex==textureIndex && first->textureGeneration==texture.generation &&
-                (resident=residentGeometry.ReacquireFast(first->slot,first->serial))) {
+        if(firstHit) {
+            {
                 batch=first->packet;job.count=static_cast<std::uint8_t>(first->count);
                 ++nativeSceneryFirstCounters[0];
                 if(ecstasySceneryFirstFast==2) {
-                    // Verify: the ordinary Acquire + packet lookup must agree.
+                    // Verify: the ordinary checks, Acquire and packet lookup must agree.
                     VkSolidStripJob check=job;bool checkPrepare=false;
+                    check.lod={{draw.textureQScale,static_cast<std::uint8_t>(strip.autoK)*0.0625f}};
+                    const auto count=strip.positions.size();
+                    const bool extents=!draw.texture->descriptor->authoredRecord[0x79] && strip.nativeVertexRevision &&
+                        strip.textureCoordinates.size()==count && strip.colors.size()==count && count<=48 &&
+                        (!(draw.drawFlags&0xc0u) || strip.normals.size()==count);
                     auto* expected=residentGeometry.Acquire(check,checkPrepare);
                     const auto* cached=expected ? sceneryPackets.Find(*expected,texture.generation,state):nullptr;
-                    const bool same=expected==resident && !checkPrepare && check.count==job.count && cached &&
+                    const bool same=extents && expected==resident && !checkPrepare && check.count==job.count && cached &&
                         cached->SameDrawState(batch) && cached->count==batch.count && cached->nativeSpanCount==batch.nativeSpanCount &&
                         cached->residentGeometry==batch.residentGeometry && cached->nativeGpuPosition==batch.nativeGpuPosition;
                     ++nativeSceneryFirstCounters[2];
@@ -326,6 +340,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             }
         }
         if(!resident) {
+        job.lod={{draw.textureQScale,static_cast<std::uint8_t>(strip.autoK)*0.0625f}};
         resident=residentGeometry.Acquire(job,prepare);
         sceneryStep(17);
         if(!resident)return false;
@@ -333,7 +348,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             batch=*cached;
             ++statistics.sceneryPacketHits;
         } else {
-            const auto& material=ResolveOpaqueSceneryMaterial(texture,wire,options.textureFilter);
+            const auto& material=ResolveOpaqueSceneryMaterial(texture,draw.texture->descriptor->authoredRecord,options.textureFilter);
             batch.indexed=true;batch.cachedOpaqueScenery=true;batch.residentGeometry=true;
             batch.depth=true;batch.depthWrite=material.depthWrite;batch.blend=material.blend;
             batch.blendConstant=material.blendConstant;batch.lodScale=material.lodScale;
