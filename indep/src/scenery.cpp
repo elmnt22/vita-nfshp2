@@ -18,6 +18,25 @@
 
 namespace { int32_t currentZoneNumber=-1; } // PAL3302B0.
 extern uint32_t (*collisionWitnessClockMicros)();
+// Diagnostic traversal counters (owner views): tested, clip pass, mask+facing pass, pixel pass, nodes.
+static std::array<std::uint64_t,5> sceneryWalkCounters{};
+// Two-phase section walk: collect the tree's leaves in visit order, then
+// evaluate them with software prefetch ahead (same order and results; the
+// Cortex-A9 otherwise stalls on each instance/model/footprint/frame line).
+// Vita scenery_prefetch_off.txt = 0; PC HP2_SCENERY_PREFETCH (default 1).
+namespace hp2 {
+int ecstasySceneryPrefetch=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_SCENERY_PREFETCH"))return std::atoi(value);
+#endif
+    return 1;
+}();
+}
+#if defined(__GNUC__)
+#define HP2_PREFETCH(address) __builtin_prefetch(address)
+#else
+#define HP2_PREFETCH(address) ((void)(address))
+#endif
 namespace hp2 { extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelSceneryPrepare; }
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
 
@@ -733,7 +752,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     }
     const auto splitRooted=std::chrono::steady_clock::now();
     const auto prepareSection=[&](const SectionStorage& storage,std::size_t ordinal,std::int32_t rootClip,
-        std::vector<RenderDraw>& output,std::vector<RenderNode>& stack,
+        std::vector<RenderDraw>& output,std::vector<RenderNode>& stack,std::vector<RenderNode>& nodeLeaves,
         std::vector<std::uint8_t>& nearState,std::size_t& visited,
         std::array<std::size_t,3>& lods) {
         const auto& section=storage.native;
@@ -742,7 +761,9 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             Require(index<section.instanceCount,"Scenery tree leaf leaves its retained instance array");
             const auto& instance=section.instances[index];
             const auto clip=inheritedClip==1 ? classify(instance.minimum,instance.maximum):inheritedClip;
+            if(!async)++sceneryWalkCounters[0];
             if (!clip || (instance.flags&viewMask&0xffu))return;
+            if(!async)++sceneryWalkCounters[1];
             Require(instance.modelIndex>=0 && static_cast<std::size_t>(instance.modelIndex)<section.modelCount,
                 "Scenery instance has no actual model");
             auto& model=section.models[instance.modelIndex];
@@ -751,6 +772,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             const float radius=model.radius+4.0f;
             const float facing=(delta[0]*camera.forward[0]+delta[1]*camera.forward[1])+delta[2]*camera.forward[2];
             if (facing < -radius)return;
+            if(!async)++sceneryWalkCounters[2];
             const float distance=std::sqrt((delta[0]*delta[0]+delta[1]*delta[1])+delta[2]*delta[2])-radius;
             // PAL150E04..150E14 copies eView+8 into CullInfo+C0; the thresholds
             // consume that source focal input, before native output enlargement.
@@ -758,6 +780,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             const auto pixels=convertFloatToInt32(scale);
             const auto visibilityPixels=distanceScale==1.0f ? pixels:convertFloatToInt32(scale*distanceScale);
             if (visibilityPixels<2)return;
+            if(!async)++sceneryWalkCounters[3];
             // Original pixels still choose existing near/medium model detail.
             // Extended visibility admits distant geometry at its coarsest actual
             // authored LOD; it does not multiply every nearby high-detail mesh.
@@ -807,6 +830,52 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         };
         stack.clear();stack.push_back({0,1});
         bool rootNode=true;
+        if(hp2::ecstasySceneryPrefetch) {
+            // Phase 1: the same node walk; leaves are recorded in the order
+            // the single-phase walk would evaluate them (drawInstance never
+            // touches the node stack, so deferring it keeps that order).
+            auto& leaves=nodeLeaves;leaves.clear();
+            while(!stack.empty()) {
+                const auto item=stack.back();stack.pop_back();
+                Require(item.index<section.record34104Count && ++visited<=section.record34104Count,
+                    "Scenery culling tree contains an invalid index or repeated cycle");
+                const auto& node=storage.cullNodes[item.index];
+                const auto clip=rootNode ? rootClip:item.clip==1 ? ecstasyClassifyBounds(node.minimum.data(),
+                    node.maximum.data(),worldToScreenClip.data()):item.clip;
+                rootNode=false;
+                if(!async)++sceneryWalkCounters[4];
+                if(!clip)continue;
+                Require(node.count>=0 && node.count<=5,"Scenery tree node exceeds its five authored children");
+                for(std::int32_t child=0;child<node.count;++child) {
+                    const auto value=node.children[child];
+                    if(value>=0) {
+                        leaves.push_back({static_cast<std::size_t>(value),clip});
+                        HP2_PREFETCH(section.instances+value);
+                    }
+                    else stack.push_back({static_cast<std::size_t>(-static_cast<std::int32_t>(value)),clip});
+                }
+            }
+            // Phase 2: dependent lines (model via modelIndex, footprint,
+            // frame) are fetched a few leaves ahead of their use.
+            constexpr std::size_t ahead=3;
+            const auto prefetchDependents=[&](std::size_t index) {
+                if(index>=section.instanceCount)return; // drawInstance reports it
+                const auto& instance=section.instances[index];
+                if(instance.modelIndex>=0 && static_cast<std::size_t>(instance.modelIndex)<section.modelCount) {
+                    const auto* model=section.models+instance.modelIndex;
+                    HP2_PREFETCH(model);HP2_PREFETCH(&model->radius);
+                }
+                HP2_PREFETCH(storage.staticFineFootprints.data()+index);
+                HP2_PREFETCH(storage.staticRenderFrames.data()+index);
+                HP2_PREFETCH(reinterpret_cast<const char*>(storage.staticRenderFrames.data()+index)+60);
+            };
+            for(std::size_t at=0;at<leaves.size() && at<ahead;++at)prefetchDependents(leaves[at].index);
+            for(std::size_t at=0;at<leaves.size();++at) {
+                if(at+ahead<leaves.size())prefetchDependents(leaves[at+ahead].index);
+                drawInstance(leaves[at].index,leaves[at].clip);
+            }
+            return;
+        }
         while(!stack.empty()) {
             const auto item=stack.back();stack.pop_back();
             Require(item.index<section.record34104Count && ++visited<=section.record34104Count,
@@ -815,6 +884,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             const auto clip=rootNode ? rootClip:item.clip==1 ? ecstasyClassifyBounds(node.minimum.data(),
                 node.maximum.data(),worldToScreenClip.data()):item.clip;
             rootNode=false;
+            if(!async)++sceneryWalkCounters[4];
             if(!clip)continue;
             Require(node.count>=0 && node.count<=5,"Scenery tree node exceeds its five authored children");
             for(std::int32_t child=0;child<node.count;++child) {
@@ -824,17 +894,61 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             }
         }
     };
-    if(async || !hp2::ecstasyParallelSceneryPrepare || preparationWork<512 || validSections<2 || NativeSceneEffectiveHardwareConcurrency()<2) {
+    if(async || !hp2::ecstasyParallelSceneryPrepare || hp2::ecstasySceneryPrefetch==2 || preparationWork<512 || validSections<2 || NativeSceneEffectiveHardwareConcurrency()<2) {
         // Preserve direct owner execution for a small workload or one CPU:
         // no chunk copies, thread wakeups or temporary hysteresis arrays.
+#if !defined(__vita__) && !defined(__SWITCH__)
+        // PC HP2_SCENERY_PREFETCH=2: run the single-phase walk first, restore
+        // the hysteresis it wrote, then compare the two-phase walk's draws.
+        std::vector<RenderDraw> referenceDraws;
+        std::vector<std::vector<std::uint8_t>> savedNear;
+        const bool verifyWalk=hp2::ecstasySceneryPrefetch==2;
+        if(verifyWalk) {
+            for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal)
+                savedNear.push_back(sectionStorageByNumber_[S.sectionScratch_[ordinal]] ?
+                    sectionStorageByNumber_[S.sectionScratch_[ordinal]]->nearDetailState:std::vector<std::uint8_t>{});
+            hp2::ecstasySceneryPrefetch=0;
+            const auto before=draws.size();
+            for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal) {
+                const auto number=S.sectionScratch_[ordinal];
+                const auto& section=*native_.sections[number];
+                if(!section.records34104 || !section.record34104Count)continue;
+                auto& storage=*sectionStorageByNumber_[number];std::size_t visited=0;
+                std::array<std::size_t,3> lods{};
+                prepareSection(storage,ordinal,rootClips[ordinal],draws,S.nodeScratch_,S.leafScratch_,storage.nearDetailState,visited,lods);
+            }
+            referenceDraws.assign(draws.begin()+before,draws.end());draws.resize(before);
+            for(std::size_t ordinal=S.sectionScratch_.size();ordinal-->0;)
+                if(auto* storage=sectionStorageByNumber_[S.sectionScratch_[ordinal]])storage->nearDetailState=savedNear[ordinal];
+            hp2::ecstasySceneryPrefetch=2;
+        }
+        const auto verifyBegin=draws.size();
+#endif
         for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal) {
             const auto number=S.sectionScratch_[ordinal];
             const auto& section=*native_.sections[number];
             if(!section.records34104 || !section.record34104Count)continue;
             auto& storage=*sectionStorageByNumber_[number];std::size_t visited=0;
-            prepareSection(storage,ordinal,rootClips[ordinal],draws,S.nodeScratch_,storage.nearDetailState,visited,journalLods);
+            prepareSection(storage,ordinal,rootClips[ordinal],draws,S.nodeScratch_,S.leafScratch_,storage.nearDetailState,visited,journalLods);
             if(journalSample)journalNodes+=visited;
         }
+#if !defined(__vita__) && !defined(__SWITCH__)
+        if(verifyWalk) {
+            static std::uint64_t checks=0,mismatches=0;
+            bool same=draws.size()-verifyBegin==referenceDraws.size();
+            for(std::size_t at=0;same && at<referenceDraws.size();++at) {
+                const auto& a=draws[verifyBegin+at];const auto& b=referenceDraws[at];
+                same=a.model==b.model && a.matrix==b.matrix && a.clip==b.clip && a.identity==b.identity &&
+                    a.nativeExtended==b.nativeExtended && a.nativeLod==b.nativeLod;
+            }
+            ++checks;if(!same)++mismatches;
+            if((checks&1023u)==0 || (!same && mismatches<=4)) {
+                char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
+                    (unsigned long long)checks,(unsigned long long)mismatches);
+                platform::RecordSessionEvent("render.scenery_walk_verify",text);
+            }
+        }
+#endif
     } else {
         if(chunks.size()<S.sectionScratch_.size())chunks.resize(S.sectionScratch_.size());
         clear.chunksUsed=S.sectionScratch_.size();
@@ -869,7 +983,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             auto& group=groups[groupIndex];
             for(const auto ordinal:group.ordinals) {
                 auto& chunk=chunks[ordinal];
-                prepareSection(*group.storage,ordinal,rootClips[ordinal],chunk.draws,chunk.nodes,
+                prepareSection(*group.storage,ordinal,rootClips[ordinal],chunk.draws,chunk.nodes,chunk.leaves,
                     group.nearState,chunk.visited,chunk.lods);
             }
         },2);
@@ -1174,8 +1288,27 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         frame.DiagTruncateCapture(twiceCommands,twiceInstances,twiceRuns);
         continue;
     }
+    // Read-only prefetch of later draws' dependent lines, staged so each
+    // pointer it follows was fetched by an earlier stage (no state changes:
+    // the batch cache slot is only read, never filled, ahead of its draw).
+    const auto prefetchEmit=[&](std::size_t index,int stage) {
+        if(!hp2::ecstasySceneryPrefetch || index>=draws.size())return;
+        const auto* model=draws[index].model;
+        if(stage==0) {HP2_PREFETCH(model);HP2_PREFETCH(draws[index].model->solid);return;}
+        const auto* solid=model->solid;
+        if(!solid)return;
+        const auto bits=reinterpret_cast<std::uintptr_t>(solid);
+        const auto& slot=S.opaqueBatchCache_[((bits>>3)^(bits>>14))&2047u];
+        if(stage==1) {HP2_PREFETCH(solid->geometry);HP2_PREFETCH(&slot);HP2_PREFETCH(slot.second);return;}
+        if(slot.first!=solid || !slot.second)return;
+        const auto& batch=*slot.second;
+        HP2_PREFETCH(batch.bindings.data());HP2_PREFETCH(batch.uniqueTextures.data());
+        HP2_PREFETCH(batch.emitRuns.data());
+        if(solid->geometry)HP2_PREFETCH(solid->geometry->textures.data());
+    };
     for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
         if(async && async->abort)break;
+        prefetchEmit(drawIndex+4,0);prefetchEmit(drawIndex+2,1);prefetchEmit(drawIndex+1,2);
         auto& draw=draws[drawIndex];
         std::optional<SceneLightContext> localContext;
         std::chrono::steady_clock::time_point lightMark{};
@@ -1302,8 +1435,11 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 split[0]/300,split[1]/300,split[2]/300,split[3]/300,split[4]/300,counts[0]/300,counts[1]/300,counts[2]/300,counts[3]/300,
                 counts[4]/300,counts[5]/300,counts[6]/300,counts[7]/300,counts[8]/300);
             platform::RecordSessionEvent("render.scenery_split",text);
-            std::snprintf(text,sizeof(text),"collect_ms=%.3f roots_ms=%.3f traverse_ms=%.3f dedupe_ms=%.3f parallel_emit=%.2f candidates=%.2f",
-                stages[0]/300,stages[1]/300,stages[2]/300,stages[3]/300,parallelViews/300,candidateViews/300);
+            std::snprintf(text,sizeof(text),"collect_ms=%.3f roots_ms=%.3f traverse_ms=%.3f dedupe_ms=%.3f parallel_emit=%.2f candidates=%.2f tested=%.1f clip_pass=%.1f facing_pass=%.1f pixel_pass=%.1f nodes=%.1f",
+                stages[0]/300,stages[1]/300,stages[2]/300,stages[3]/300,parallelViews/300,candidateViews/300,
+                sceneryWalkCounters[0]/300.0,sceneryWalkCounters[1]/300.0,sceneryWalkCounters[2]/300.0,
+                sceneryWalkCounters[3]/300.0,sceneryWalkCounters[4]/300.0);
+            sceneryWalkCounters={};
             platform::RecordSessionEvent("render.scenery_prepare",text);
             {
                 std::size_t length=0;text[0]=0;

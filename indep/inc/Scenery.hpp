@@ -195,7 +195,7 @@ private:
     struct RenderNode {std::size_t index{};std::int32_t clip{};};
     struct RenderSectionCapture {
         std::vector<RenderDraw> draws;
-        std::vector<RenderNode> nodes;
+        std::vector<RenderNode> nodes,leaves;
         std::array<std::size_t,3> lods{};
         std::size_t visited{};
     };
@@ -231,7 +231,7 @@ private:
             if(slot.first!=solid || !slot.second) {slot.first=solid;slot.second=&opaqueBatches_[solid];}
             return *slot.second;
         }
-        std::vector<RenderNode> nodeScratch_;
+        std::vector<RenderNode> nodeScratch_,leafScratch_;
         std::vector<RenderSectionCapture> sectionCaptureScratch_;
         std::vector<std::optional<SceneLightContext>> lightContextScratch_;
         std::vector<EmitPlan> emitPlanScratch_;
