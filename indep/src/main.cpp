@@ -61,6 +61,7 @@ extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 extern std::array<std::uint64_t,8> mellowSplitMicros;
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
 extern uint64_t collisionSplitMicros[8],collisionSplitCounts[8];
+extern uint64_t collisionKindStats[20];
 extern std::atomic<uint64_t> collisionPickupMicros,collisionPickupCount,collisionPublishCount;
 extern std::atomic<uint64_t> collisionSlotBatches[2],collisionSlotTasks[2];
 extern uint64_t collisionSpecAborted;
@@ -1430,6 +1431,16 @@ bool ApplicationRuntime::Tick()
                 ::collisionFindQueries=::collisionSeparateCalls=::collisionSeparateQueries=0;
                 ::collisionSpecSeparations=::collisionSpecRounds=::collisionSpecAccepted=::collisionSpecWasted=::collisionSpecMispredicts=0;
                 s.host.RecordSessionEvent("render.collision_solve",detail);
+                {
+                    auto& k=::collisionKindStats;
+                    std::snprintf(detail,sizeof(detail),"per_frame queries car/terrain/other=%.1f/%.1f/%.1f steps=%.1f/%.1f/%.1f contacts=%.1f/%.1f/%.1f "
+                        "resolves=%.2f/%.2f/%.2f resolve_ms=%.3f/%.3f/%.3f terrain_scan_ms=%.3f scans=%.1f tested=%.1f created=%.2f",
+                        k[0]/count,k[1]/count,k[2]/count,k[3]/count,k[4]/count,k[5]/count,k[6]/count,k[7]/count,k[8]/count,
+                        k[12]/count,k[13]/count,k[14]/count,k[9]/count/1000.0,k[10]/count/1000.0,k[11]/count/1000.0,
+                        k[15]/count/1000.0,k[18]/count,k[17]/count,k[16]/count);
+                    s.host.RecordSessionEvent("render.collision_kinds",detail);
+                    for(auto& value:k)value=0;
+                }
                 {
                     auto& t=::collisionSplitMicros;auto& n=::collisionSplitCounts;
                     const double f=static_cast<double>(count)*1000.0;

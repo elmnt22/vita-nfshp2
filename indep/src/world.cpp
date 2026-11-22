@@ -655,6 +655,8 @@ uint16_t worldCalculateDebugChecksum(World* world, uint32_t seed,
 }
 
 void collisionSpeculationArm(int on);
+extern uint64_t collisionKindStats[20];
+int collisionPairClass(const CollisionPair* pair);
 extern uint64_t collisionSplitMicros[8],collisionSplitCounts[8];
 uint32_t collisionSplitNow();
 CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed)
@@ -698,8 +700,10 @@ CollisionSystemResult collisionSystemStep(CollisionSystem* system, float elapsed
         CollisionParticipant* first=contact->pair->first;
         CollisionParticipant* second=contact->pair->second;
         const uint32_t resolveStart=collisionSplitNow();
+        const int pairClass=collisionPairClass(contact->pair);
         collisionContactResolve(system,contact);
         collisionSplitMicros[4]+=collisionSplitNow()-resolveStart;++collisionSplitCounts[4];
+        collisionKindStats[9+pairClass]+=collisionSplitNow()-resolveStart;++collisionKindStats[12+pairClass];
         if (system->result!=COLLISION_SYSTEM_OK) return system->result;
         ++contact->pair->processedCount;
         if (first->shape->active) collisionQueueRemoveShape(system,first->shape);

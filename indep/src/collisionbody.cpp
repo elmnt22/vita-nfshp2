@@ -777,6 +777,18 @@ void collisionPairPredictQueueEnd(CollisionSystem* system)
 
 extern uint64_t collisionSplitMicros[8],collisionSplitCounts[8];
 uint32_t collisionSplitNow();
+// Diagnostic (render.collision_kinds): per pair class 0 car-car, 1 car-terrain,
+// 2 other: [c] queue queries, [3+c] walk steps, [6+c] contacts queued,
+// [9+c] resolve us, [12+c] resolves; [15] terrain scan us, [16] terrain
+// shapes created, [17] terrain polygons tested, [18] scans.
+uint64_t collisionKindStats[20]{};
+int collisionPairClass(const CollisionPair* pair)
+{
+    const int a=pair->first->shape->kind,b=pair->second->shape->kind;
+    if (a==0 && b==0) return 0;
+    if ((a==0 && b==3) || (a==3 && b==0)) return 1;
+    return 2;
+}
 static int32_t queueWitnessQuery(CollisionSystem* system, CollisionPair* pair, const float* frames[4])
 {
     QueuePrediction* entry=nullptr;
@@ -792,8 +804,10 @@ static int32_t queueWitnessQuery(CollisionSystem* system, CollisionPair* pair, c
     if (!entry) {
         if (queuePredictionActive) ++collisionQueueFallbacks;
         const uint32_t start=collisionSplitNow();
+        const uint64_t stepsBefore=collisionWitnessIterations;
         const int32_t result=collisionWitnessQuery(&pair->witness,frames[0],frames[2],frames[1],frames[3],system->randomState);
         collisionSplitMicros[1]+=collisionSplitNow()-start;++collisionSplitCounts[1];
+        collisionKindStats[3+collisionPairClass(pair)]+=collisionWitnessIterations-stepsBefore;
         return result;
     }
     const auto apply=[&](CollisionWitness& witness,uint32_t& state) {
@@ -815,6 +829,7 @@ static int32_t queueWitnessQuery(CollisionSystem* system, CollisionPair* pair, c
     apply(pair->witness,*system->randomState);
     collisionWitnessQueries+=entry->counters[0];collisionWitnessIterations+=entry->counters[1];
     collisionWitnessRestarts+=entry->counters[2];collisionWitnessExhausted+=entry->counters[3];
+    collisionKindStats[3+collisionPairClass(pair)]+=entry->counters[1];
     ++collisionQueuePredicted;
     return entry->result;
 }
@@ -834,7 +849,9 @@ void collisionPairQueueContact(CollisionSystem* system, CollisionPair* pair)
     const uint32_t queryStart=collisionSplitNow();
     const int32_t queued=queueWitnessQuery(system,pair,frames);
     collisionSplitMicros[0]+=collisionSplitNow()-queryStart;++collisionSplitCounts[0];
+    ++collisionKindStats[collisionPairClass(pair)];
     if (queued!=2) return;
+    ++collisionKindStats[6+collisionPairClass(pair)];
     // PAL1D6744/1D6754 bypasses suppression for either static participant.
     // A suppressed moving car must still resolve contacts with the track.
     if (first->active && second->active &&
@@ -1051,9 +1068,16 @@ void collisionTerrainShapeDispose(CollisionSystem* system, CollisionTerrainShape
     terrain->occupied=0;
 }
 
+static void collisionSystemFindTerrainPairsBody(CollisionSystem* system, CollisionParticipant* participant);
 void collisionSystemFindTerrainPairs(CollisionSystem* system, CollisionParticipant* participant)
 {
     if (!participant->terrain) return;
+    const uint32_t start=collisionSplitNow();
+    collisionSystemFindTerrainPairsBody(system,participant);
+    collisionKindStats[15]+=collisionSplitNow()-start;++collisionKindStats[18];
+}
+static void collisionSystemFindTerrainPairsBody(CollisionSystem* system, CollisionParticipant* participant)
+{
     TerrainPolygon* candidates[48];
     size_t count=0;
     TerrainSurface* surface=participant->terrain;
@@ -1076,6 +1100,7 @@ void collisionSystemFindTerrainPairs(CollisionSystem* system, CollisionParticipa
         // scanning the fixed terrain cache for every distant polygon, while
         // preserving the source's polygon order, 48-entry limit and contacts.
         if (!vectorBoundsOverlaps2(shape->minimum,shape->maximum,polygon->minimum,polygon->maximum)) continue;
+        ++collisionKindStats[17];
         int exists=0;
         for (size_t current=0;current<occupiedCount;++current)
             if (occupiedList[current]==polygon) {exists=1;break;}
@@ -1099,6 +1124,7 @@ void collisionSystemFindTerrainPairs(CollisionSystem* system, CollisionParticipa
         if (id<0) {system->result=COLLISION_SYSTEM_PARTICIPANT_CAPACITY;return;}
         const CollisionSystemResult result=collisionTerrainShapeInitialize(system,&system->terrainShapes[slot],
                                                                            surface->topology,candidates[i],id);
+        ++collisionKindStats[16];
         if (result!=COLLISION_SYSTEM_OK) {system->result=result;return;}
     }
 }
