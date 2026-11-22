@@ -130,6 +130,36 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         }
     }
     if(PrewarmAllowed())EcstasyConfirmTexturePrewarm(frame.PrewarmTextures());
+    // Geometry prewarm: the ordinary Acquire + vertex preparation (uploaded
+    // with this frame's active entries), no draw, ahead of first use.
+    if(PrewarmAllowed() && !frame.PrewarmStrips().empty()) {
+        for(const auto& item:frame.PrewarmStrips()) {
+            ++nativeGeometryPrewarmCounters[0];
+            const auto& strip=*item.strip;
+            const auto count=strip.positions.size();
+            if(count>48 || strip.textureCoordinates.size()!=count || strip.colors.size()!=count)continue;
+            VkSolidStripJob job;job.strip=item.strip;
+            job.lod={{item.lod[0],item.lod[1]}};job.glyphBoundsIndex=item.glyphBoundsIndex;job.lineTopology=item.lineTopology;
+            bool prepare=false;auto* resident=residentGeometry.Acquire(job,prepare);
+            if(!resident || !prepare)continue;
+            ++nativeGeometryPrewarmCounters[1];
+            residentGeometry.PinPrewarmed(*resident);
+            job.residentOutput=resident->shadow.data();
+            job.workUnits=NativePendingVertexWork(job);
+            if(job.workUnits) {
+                if(directSourcePreparation)PrepareNativeSolidStripVertices(job,job.residentOutput);
+                else {nativePendingWork+=job.workUnits;nativeStripJobs.push_back(job);}
+            }
+        }
+        EcstasyConfirmGeometryPrewarm(frame.PrewarmStrips());
+    }
+    if(platform::nativeDiagnosticsEnabled && gatherSerial%300u==0) {
+        const auto& c=nativeGeometryPrewarmCounters;
+        char text[200];std::snprintf(text,sizeof(text),"handed=%llu prepared=%llu used=%llu verified=%llu mismatches=%llu lod0_only=%llu recorded=%llu",
+            (unsigned long long)c[0],(unsigned long long)c[1],(unsigned long long)c[2],(unsigned long long)c[3],
+            (unsigned long long)c[4],(unsigned long long)c[5],(unsigned long long)c[6]);
+        platform::RecordSessionEvent("render.geometry_prewarm",text);
+    }
     // Logical targets can share one physical attachment. Use the original
     // source identity and keep the raster cache local to this Gather.
     struct TargetRaster {

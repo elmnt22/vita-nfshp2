@@ -1201,7 +1201,20 @@ private:
     std::vector<std::pair<const TextureInfo*,bool>> prewarmTextures_;
     void CollectTexturePrewarm();
 public:
+    // Geometry prewarm (renderer cache only): loaded solid strips recorded as
+    // first made resident in an earlier session, prepared ahead of first draw.
+    struct PrewarmStrip {
+        const EditorMarkerSolidGeometry::Strip* strip{};
+        float lod[2]{};
+        std::uint32_t glyphBoundsIndex{};
+        bool lineTopology{};
+    };
+private:
+    std::vector<PrewarmStrip> prewarmStrips_;
+    void CollectGeometryPrewarm();
+public:
     const std::vector<std::pair<const TextureInfo*,bool>>& PrewarmTextures() const noexcept {return prewarmTextures_;}
+    const std::vector<PrewarmStrip>& PrewarmStrips() const noexcept {return prewarmStrips_;}
 private:
     // Deque growth preserves references. Value-only slots are reused after
     // every source command and preparation worker has released its borrow.

@@ -5300,6 +5300,151 @@ void EcstasyFrame::CollectTexturePrewarm()
         state.appended.clear();
     }
 }
+// Geometry prewarm (Vita geometry_prewarm_off.txt; PC HP2_GEOMETRY_PREWARM=0
+// off, 2 verify). The resident geometry cache records each solid strip's
+// first preparation as "solidKey stripIndex line lod0 lod1 glyph" in
+// geometry_prewarm.txt; once that solid is loaded in a later session, Seal
+// hands its strips to Gather (a few per frame), which prepares and uploads
+// them through the ordinary Acquire path without drawing anything. Cache
+// contents only: the same source bytes, key and vertex preparation.
+int ecstasyGeometryPrewarm=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    if(const char* value=std::getenv("HP2_GEOMETRY_PREWARM"))return std::atoi(value);
+#endif
+    return 1;
+}();
+// handed, prepared, first used, verify checks, full mismatches, lod0-only mismatches, recorded
+std::array<std::uint64_t,7> nativeGeometryPrewarmCounters{};
+namespace {
+struct GeometryPrewarmRecord {
+    std::uint32_t solid{},index{},glyph{};
+    std::uint32_t lod0{},lod1{};
+    bool line{};
+};
+struct GeometryPrewarmState {
+    std::mutex mutex;
+    bool loaded{};
+    std::set<std::string> known;
+    std::vector<std::string> appended;
+    std::unordered_map<std::uint32_t,std::vector<GeometryPrewarmRecord>> bySolid;
+    std::set<std::uint32_t> doneSolids; // queued this session (per root)
+    std::vector<EcstasyFrame::PrewarmStrip> queue,handed;
+    const EditorMarkerResources* root{};std::uint64_t rootRevision{~0ull};
+    std::uint32_t sealsSinceFlush{};
+};
+GeometryPrewarmState& GeometryPrewarm() {static GeometryPrewarmState state;return state;}
+const char* GeometryPrewarmPath() noexcept
+{
+#if defined(__vita__)
+    return "ux0:data/NFSHP2N/geometry_prewarm.txt";
+#else
+    return "Saves/geometry_prewarm.txt";
+#endif
+}
+// Identity without lod0: the resident key (and the GL/GXM vertex stream)
+// ignore it, so another lod0 for the same strip is the same cache entry.
+std::string GeometryPrewarmIdentity(GeometryPrewarmRecord record)
+{
+    record.lod0=0;char text[96];std::snprintf(text,sizeof(text),"%08x %u %d %08x %u",record.solid,record.index,record.line ? 1:0,
+        record.lod1,record.glyph);
+    return text;
+}
+std::string GeometryPrewarmLine(const GeometryPrewarmRecord& record)
+{
+    char text[96];std::snprintf(text,sizeof(text),"%08x %u %d %08x %08x %u",record.solid,record.index,record.line ? 1:0,
+        record.lod0,record.lod1,record.glyph);
+    return text;
+}
+void LoadGeometryPrewarm(GeometryPrewarmState& state)
+{
+    state.loaded=true;
+    FILE* file=std::fopen(GeometryPrewarmPath(),"r");
+    if(!file)return;
+    char line[128];
+    while(std::fgets(line,sizeof(line),file)) {
+        GeometryPrewarmRecord record;unsigned solid=0,index=0,lod0=0,lod1=0,glyph=0;int lineTopology=0;
+        if(std::sscanf(line,"%x %u %d %x %x %u",&solid,&index,&lineTopology,&lod0,&lod1,&glyph)!=6)continue;
+        record.solid=solid;record.index=index;record.line=lineTopology!=0;record.lod0=lod0;record.lod1=lod1;record.glyph=glyph;
+        if(!state.known.insert(GeometryPrewarmIdentity(record)).second)continue;
+        state.bySolid[record.solid].push_back(record);
+    }
+    std::fclose(file);
+}
+}
+// Gather thread: a strip of solid (key) prepared for the first time this session.
+void EcstasyRecordGeometryFirstUse(const EditorMarkerSolid* solid,const EditorMarkerSolidGeometry::Strip* strip,
+    bool lineTopology,const std::array<float,2>& lod,std::uint32_t glyphBoundsIndex)
+{
+    if(!ecstasyGeometryPrewarm || !solid || !solid->key || !solid->geometry || !strip)return;
+    const auto& strips=solid->geometry->strips;
+    if(strips.empty() || strip<strips.data() || strip>=strips.data()+strips.size())return; // posed copies etc.
+    GeometryPrewarmRecord record;
+    record.solid=solid->key;record.index=static_cast<std::uint32_t>(strip-strips.data());record.line=lineTopology;
+    std::memcpy(&record.lod0,&lod[0],4);std::memcpy(&record.lod1,&lod[1],4);record.glyph=glyphBoundsIndex;
+    auto identity=GeometryPrewarmIdentity(record);
+    auto& state=GeometryPrewarm();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if(state.known.size()>=65536 || !state.known.insert(std::move(identity)).second)return;
+    state.appended.push_back(GeometryPrewarmLine(record));++nativeGeometryPrewarmCounters[6];
+}
+// Gather thread: these handed strips went through a Gather.
+void EcstasyConfirmGeometryPrewarm(const std::vector<EcstasyFrame::PrewarmStrip>& done)
+{
+    if(done.empty())return;
+    auto& state=GeometryPrewarm();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.handed.erase(std::remove_if(state.handed.begin(),state.handed.end(),[&](const EcstasyFrame::PrewarmStrip& entry) {
+        for(const auto& other:done)if(other.strip==entry.strip && other.lineTopology==entry.lineTopology &&
+            std::memcmp(other.lod,entry.lod,sizeof(entry.lod))==0 && other.glyphBoundsIndex==entry.glyphBoundsIndex)return true;
+        return false;
+    }),state.handed.end());
+}
+void EcstasyFrame::CollectGeometryPrewarm()
+{
+    prewarmStrips_.clear();
+    if(!ecstasyGeometryPrewarm)return;
+    // The world's catalogue root, from any model this frame draws (game
+    // thread: catalogues attach/detach only on this thread).
+    const EditorMarkerResources* root=nullptr;
+    for(const auto& command:commands_)if(command.model && command.model->resources) {
+        root=command.model->resources;if(root->catalogueRoot)root=root->catalogueRoot;break;
+    }
+    auto& state=GeometryPrewarm();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if(!state.loaded)LoadGeometryPrewarm(state);
+    if(root && (root!=state.root || root->bindingRevision!=state.rootRevision)) {
+        if(root!=state.root) {state.doneSolids.clear();state.queue.clear();state.handed.clear();}
+        state.root=root;state.rootRevision=root->bindingRevision;
+        // Queue the listed strips of every newly present solid.
+        for(const auto* catalogue=root;catalogue;catalogue=catalogue->nextCatalogue)
+            for(std::size_t at=0;at<catalogue->solidCount;++at) {
+                const auto& solid=catalogue->solids[at];
+                if(!solid.key || !solid.geometry || state.doneSolids.count(solid.key))continue;
+                const auto listed=state.bySolid.find(solid.key);
+                if(listed==state.bySolid.end())continue;
+                state.doneSolids.insert(solid.key);
+                for(const auto& record:listed->second) {
+                    if(record.index>=solid.geometry->strips.size())continue;
+                    PrewarmStrip entry;entry.strip=&solid.geometry->strips[record.index];
+                    std::memcpy(&entry.lod[0],&record.lod0,4);std::memcpy(&entry.lod[1],&record.lod1,4);
+                    entry.glyphBoundsIndex=record.glyph;entry.lineTopology=record.line;
+                    state.queue.push_back(entry);
+                }
+            }
+    }
+    // A few strips per frame; handed strips repeat until a Gather confirms
+    // them (a sealed frame can be dropped without being gathered).
+    while(state.handed.size()<32 && !state.queue.empty()) {state.handed.push_back(state.queue.back());state.queue.pop_back();}
+    prewarmStrips_=state.handed;
+    if(++state.sealsSinceFlush>=300 && !state.appended.empty()) {
+        state.sealsSinceFlush=0;
+        if(FILE* file=std::fopen(GeometryPrewarmPath(),"a")) {
+            for(const auto& line:state.appended)std::fprintf(file,"%s\n",line.c_str());
+            std::fclose(file);
+        }
+        state.appended.clear();
+    }
+}
 // Vita defer_order_off.txt: Seal materializes the command order itself.
 int ecstasyDeferOrder=1;
 void EcstasyFrame::Seal()
@@ -5311,7 +5456,7 @@ void EcstasyFrame::Seal()
         Require(pendingAlphaIndices_.empty() && order_.size()==commands_.size(),"Sealed native command order lost a command");
         orderDeferred_=true;
     } else MaterializeOrder();
-    CollectTexturePrewarm();phase_=Phase::Ready;
+    CollectTexturePrewarm();CollectGeometryPrewarm();phase_=Phase::Ready;
 }
 void EcstasyFrame::FinalizeOrder()
 {
@@ -7900,6 +8045,7 @@ public:
         Require(entries_.empty(),"Resident geometry capacity cannot change while entries exist");
         entries_.resize(count);free_.reserve(count);
         slotSerial_.assign(count,0);slotLastGather_.assign(count,0);slotPrepared_.assign(count,0);
+        slotPinnedUntil_.assign(count,0);slotPrewarmed_.assign(count,0);
         for(std::size_t at=count;at;--at)free_.push_back(static_cast<std::uint32_t>(at-1));
     }
     std::size_t Capacity() const noexcept {return entries_.size();}
@@ -7916,6 +8062,7 @@ public:
             for(std::size_t at=entries_.size();at;--at) {
                 entries_[at-1].reset();free_.push_back(static_cast<std::uint32_t>(at-1));
                 slotSerial_[at-1]=0;slotLastGather_[at-1]=0;slotPrepared_[at-1]=0;
+                slotPinnedUntil_[at-1]=0;slotPrewarmed_[at-1]=0;
             }
         }
         gather_=gather;active_.clear();frameEntries_.fill(nullptr);
@@ -7923,9 +8070,13 @@ public:
         frameEpoch_=ecstasyNativeStripEpoch.load(std::memory_order_acquire);
         // Age eviction: a bounded sweep (64 slots per Gather) replaces the
         // recency list; which idle entry is recycled never changes output.
-        for(std::size_t step=0;step<64 && !entries_.empty();++step) {
+        // With geometry prewarm on, idle entries stay while a quarter of the
+        // slots are free (a whole track fits; re-preparing an aged-out strip
+        // at its next sighting was a cut/return hitch).
+        const bool agePressure=!ecstasyGeometryPrewarm || free_.size()*4<entries_.size();
+        for(std::size_t step=0;agePressure && step<64 && !entries_.empty();++step) {
             const auto slot=static_cast<std::uint32_t>(ageHand_);ageHand_=(ageHand_+1)%entries_.size();
-            if(entries_[slot] && gather_-slotLastGather_[slot]>600)Evict(slot);
+            if(entries_[slot] && gather_-slotLastGather_[slot]>600 && slotPinnedUntil_[slot]<=gather_)Evict(slot);
         }
     }
     std::uint64_t FrameEpoch() const noexcept {return frameEpoch_;}
@@ -7994,6 +8145,7 @@ public:
             if(entry.sourceGeneration==source.generation && entry.key==key) {
                 job.count=entry.count;prepare=!entry.prepared && slotLastGather_[entry.slot]!=gather_;
                 if(prepare)job.sourceOrder=(job.lineTopology ? source.lineTopology:source.topology).sourceOrder;
+                if(slotPrewarmed_[entry.slot] && job.draw)PrewarmFirstUse(entry,job,source);
                 Touch(entry);cached=&entry;return &entry;
             }
         }
@@ -8030,6 +8182,9 @@ public:
             }
             entry.prepared=false;entry.uploaded=false;++nativeGatherResidentEvents[3];
             entry.serial=++nextSerial_;slotSerial_[victim]=entry.serial;slotPrepared_[victim]=0;
+            slotPinnedUntil_[victim]=0;slotPrewarmed_[victim]=0;
+            if(job.draw && job.draw->model)
+                EcstasyRecordGeometryFirstUse(job.draw->model->solid,token,job.lineTopology,job.lod,job.glyphBoundsIndex);
             Touch(entry);prepare=true;cached=&entry;return &entry;
         }
         ++nativeGatherResidentEvents[0];
@@ -8050,6 +8205,9 @@ public:
         const auto first=slot*static_cast<std::uint32_t>(VerticesPerSlot);
         for(std::size_t index=0;index<entry.indexCount;++index)entry.indices[index]=first+topology.indices[index];
         entry.serial=++nextSerial_;slotSerial_[slot]=entry.serial;slotPrepared_[slot]=0;slotLastGather_[slot]=0;++live_;
+        slotPinnedUntil_[slot]=0;slotPrewarmed_[slot]=0;
+        if(job.draw && job.draw->model)
+            EcstasyRecordGeometryFirstUse(job.draw->model->solid,token,job.lineTopology,job.lod,job.glyphBoundsIndex);
         entries_[slot]=std::move(owned);source.variants[source.variantCount++]=slot;
         Touch(entry);prepare=true;cached=&entry;return &entry;
     }
@@ -8122,7 +8280,29 @@ public:
     }
     // bit0 prepared, bit1 uploaded (mirrors the entry flags).
     std::uint8_t SlotState(std::uint32_t slot) const noexcept {return slotPrepared_[slot];}
+    // Geometry prewarm: an entry prepared ahead of its first draw is kept
+    // from age eviction (capacity pressure may still take it) until used.
+    void PinPrewarmed(const VkResidentGeometryEntry& entry) {
+        slotPinnedUntil_[entry.slot]=gather_+3000u;slotPrewarmed_[entry.slot]=1;
+    }
 private:
+    std::vector<std::uint64_t> slotPinnedUntil_;
+    std::vector<std::uint8_t> slotPrewarmed_;
+    void PrewarmFirstUse(VkResidentGeometryEntry& entry,const VkSolidStripJob& job,const VkResidentGeometrySource& source) {
+        slotPrewarmed_[entry.slot]=0;slotPinnedUntil_[entry.slot]=0;++nativeGeometryPrewarmCounters[2];
+        if(ecstasyGeometryPrewarm!=2 || !entry.prepared)return;
+        // Verify: the bytes this draw would have prepared.
+        VkSolidStripJob check=job;check.count=entry.count;check.destination=0;
+        check.sourceOrder=(job.lineTopology ? source.lineTopology:source.topology).sourceOrder;
+        VkVertex expected[VerticesPerSlot];
+        PrepareNativeSolidStripVertices(check,expected);
+        ++nativeGeometryPrewarmCounters[3];
+        const auto bytes=sizeof(VkVertex)*entry.count;
+        if(std::memcmp(expected,entry.shadow.data(),bytes)==0)return;
+        ++nativeGeometryPrewarmCounters[4];
+        for(std::size_t at=0;at<entry.count;++at)expected[at].lod[0]=entry.shadow.data()[at].lod[0];
+        if(std::memcmp(expected,entry.shadow.data(),bytes)==0)++nativeGeometryPrewarmCounters[5];
+    }
     VkResidentGeometrySource*& FrameSource(const EditorMarkerSolidGeometry::Strip* token) noexcept {
         const auto identity=reinterpret_cast<std::uintptr_t>(token);
         const auto hash=(identity>>4)^(identity>>12)^(identity>>20);
@@ -8199,6 +8379,7 @@ private:
             const auto slot=static_cast<std::uint32_t>(clockHand_);clockHand_=(clockHand_+1)%entries_.size();
             if(!entries_[slot])continue;
             const auto last=slotLastGather_[slot];
+            if(!pass && slotPinnedUntil_[slot]>gather_)continue;
             if(last!=gather_ && (pass || last+1<gather_))return slot;
         }
         return NoSlot;
