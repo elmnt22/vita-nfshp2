@@ -20,7 +20,10 @@ std::array<float,2> nativeUiCanvasScale(float width,float height)
 // [10] template continuation total, [11] its resident acquire (one call in
 // eight timed), [12] timed continuations, [13] model runs, [14] run strips,
 // [15] run strips continued through the template.
-std::array<double,16> nativeGatherStepMilliseconds{};
+std::array<double,24> nativeGatherStepMilliseconds{};
+// gather_detail: [16..20] sampled cached-scenery first-strip steps (texture+raster, acquire,
+// packet, shading, rest), [21] timed calls; snapshot taken at Gather start.
+std::array<double,24> nativeGatherStepBefore{};
 // Diagnostic: generic solid draws by kind (plain, reflection, specular,
 // shadow), resident misses, resident re-prepares.
 std::array<double,6> nativeSolidKinds{};
@@ -239,14 +242,25 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // then has the template's draw state (appendBatch only merges equal
     // state), so a contiguous next strip extends it without the compare.
     std::size_t sceneryTemplateBatches=0;
+    if(ecstasyGatherDetail)nativeGatherStepBefore=nativeGatherStepMilliseconds;
+    bool timeScenery=false;std::uint32_t sceneryTimeIndex=0;Clock::time_point sceneryMark{};
+    const auto sceneryStep=[&](std::size_t index) {
+        if(!timeScenery)return;
+        const auto now=Clock::now();
+        nativeGatherStepMilliseconds[index]+=std::chrono::duration<double,std::milli>(now-sceneryMark).count();
+        sceneryMark=now;
+    };
     const auto prepareSceneryPacket=[&](const EcstasyDrawCommand& draw,const EditorMarkerSolidGeometry::Strip* runStrip) {
         sceneryTemplateDraw=nullptr;
+        timeScenery=ecstasyGatherDetail && (sceneryTimeIndex++&7u)==0;
+        if(timeScenery) {sceneryMark=Clock::now();nativeGatherStepMilliseconds[21]+=1.0;}
         if(draw.kind!=EcstasyDrawKind::SolidStrip || !draw.instance || !runStrip ||
             !draw.texture || draw.sampledTarget || draw.orderingTexture ||
             draw.carShadow!=EcstasyCarShadow::None || !draw.target ||
             draw.target->id<0 || draw.target->id>14 ||
             draw.target->width<=0 || draw.target->height<=0)return false;
-        const auto textureIndex=resolveTexture(*draw.texture,NativeDrawClampsTexture(draw));
+        const bool clamp=NativeDrawClampsTexture(draw);
+        const auto textureIndex=resolveTexture(*draw.texture,clamp);
         auto& texture=textures[textureIndex];
         const auto* wire=draw.texture->descriptor->authoredRecord;
         // Scrolling materials retain the normal dynamic preparation path.
@@ -274,13 +288,47 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         VkSolidStripJob job;job.draw=&draw;job.strip=runStrip;
         job.lod={{draw.textureQScale,static_cast<std::uint8_t>(strip.autoK)*0.0625f}};
         job.lineTopology=(draw.nativeRenderEggState&EcstasyRenderEggWireframe)!=0;
-        bool prepare=false;
-        auto* resident=residentGeometry.Acquire(job,prepare);
-        if(!resident)return false;
+        sceneryStep(16);
         const auto state=draw.nativeRenderEggState |
             (static_cast<std::uint32_t>(draw.texture->drawFlag4Enabled)<<3) |
             (static_cast<std::uint32_t>(draw.target->id==14)<<4);
+        bool prepare=false;
+        VkResidentGeometryEntry* resident=nullptr;
         VkDrawBatch batch;
+        VkSceneryFirstRecord* first=nullptr;
+        if(ecstasySceneryFirstFast) {
+            if(sceneryFirstRecords.empty())sceneryFirstRecords.resize(8192);
+            const auto id=reinterpret_cast<std::uintptr_t>(runStrip);
+            first=&sceneryFirstRecords[((id>>4)^(id>>13))&(sceneryFirstRecords.size()-1)];
+            if(first->strip==runStrip && first->epoch==residentGeometry.FrameEpoch() && strip.nativeVertexRevision &&
+                first->texture==draw.texture && first->state==state && first->clamp==clamp &&
+                first->textureIndex==textureIndex && first->textureGeneration==texture.generation &&
+                (resident=residentGeometry.ReacquireFast(first->slot,first->serial))) {
+                batch=first->packet;job.count=static_cast<std::uint8_t>(first->count);
+                ++nativeSceneryFirstCounters[0];
+                if(ecstasySceneryFirstFast==2) {
+                    // Verify: the ordinary Acquire + packet lookup must agree.
+                    VkSolidStripJob check=job;bool checkPrepare=false;
+                    auto* expected=residentGeometry.Acquire(check,checkPrepare);
+                    const auto* cached=expected ? sceneryPackets.Find(*expected,texture.generation,state):nullptr;
+                    const bool same=expected==resident && !checkPrepare && check.count==job.count && cached &&
+                        cached->SameDrawState(batch) && cached->count==batch.count && cached->nativeSpanCount==batch.nativeSpanCount &&
+                        cached->residentGeometry==batch.residentGeometry && cached->nativeGpuPosition==batch.nativeGpuPosition;
+                    ++nativeSceneryFirstCounters[2];
+                    if(!same)++nativeSceneryFirstCounters[3];
+                    if((nativeSceneryFirstCounters[2]&16383u)==0 || (!same && nativeSceneryFirstCounters[3]<=4)) {
+                        char text[128];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
+                            (unsigned long long)nativeSceneryFirstCounters[2],(unsigned long long)nativeSceneryFirstCounters[3]);
+                        platform::RecordSessionEvent("render.scenery_first_verify",text);
+                    }
+                }
+                ++statistics.sceneryPacketHits;
+            }
+        }
+        if(!resident) {
+        resident=residentGeometry.Acquire(job,prepare);
+        sceneryStep(17);
+        if(!resident)return false;
         if(const auto* cached=sceneryPackets.Find(*resident,texture.generation,state)) {
             batch=*cached;
             ++statistics.sceneryPacketHits;
@@ -299,6 +347,13 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             sceneryPackets.Store(*resident,texture.generation,state,batch);
             ++statistics.sceneryPacketMisses;
         }
+        if(first && strip.nativeVertexRevision) {
+            *first={runStrip,draw.texture,texture.generation,resident->serial,residentGeometry.FrameEpoch(),
+                textureIndex,resident->slot,state,static_cast<std::uint32_t>(job.count),clamp,batch};
+            ++nativeSceneryFirstCounters[1];
+        }
+        }
+        sceneryStep(18);
         // Frame-local ranges, shading, camera and viewport never enter the cache.
         batch.texture=textureIndex;batch.target=destination;
         batch.viewport=raster.viewport;batch.scissor=raster.scissor;
@@ -308,6 +363,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             static_cast<float>(raster.clipOffset[0]),static_cast<float>(raster.clipOffset[1])}};
         batch.nativeTextureQScale=draw.textureQScale;
         batch.nativeShadingIndex=nativeFrameShading.Capture(job,gatheredGlyphBounds);
+        sceneryStep(19);
         Require(residentFrameIndices+resident->indexCount<=UINT32_MAX,
             "Native resident frame index count exceeds32-bit draw range");
         Require(gatheredResidentIndexSpans.size()<UINT32_MAX,"Native resident index span count exceeds32-bit range");
@@ -323,6 +379,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         }
         if(batch.count)appendBatch(batch);
         sceneryTemplate=batch;sceneryTemplateDraw=&draw;sceneryTemplateBatches=batch.count ? batches.size():0;
+        sceneryStep(20);
         return true;
     };
     // A later strip of the run whose template was just built. Only the
@@ -890,7 +947,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         const auto& draw=*current;
         const auto drawVertexStart=output.size();
         categoryTimer.Enter(draw);
-        timeDraw=sampleCategories && (stepDrawIndex++&7u)==0;
+        timeDraw=(sampleCategories || ecstasyGatherDetail) && (stepDrawIndex++&7u)==0;
         if(timeDraw)stepMark=Clock::now();
 #if defined(HP2_ENABLE_VITAGL) && !defined(HP2_VITA_ENVIRONMENT_MAP)
         // The vitaGL passes drop environment-map (target 14) draws and their
@@ -1477,6 +1534,10 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             char text[256];std::snprintf(text,sizeof(text),"per_frame hits=%.1f misses=%.1f strips=%.1f records=%.1f table=%u fast_strips=%.1f exact_strips=%.1f epoch_bumps=%llu",
                 c[0]/300.0,c[1]/300.0,c[2]/300.0,c[3]/300.0,static_cast<unsigned>(sceneryRunRecords.size()),
                 nativeReplayFastCounters[0]/300.0,nativeReplayFastCounters[1]/300.0,(unsigned long long)(epoch-lastEpoch));
+            const auto used=std::strlen(text);
+            std::snprintf(text+used,sizeof(text)-used," first_fast=%.1f first_records=%.1f",
+                nativeSceneryFirstCounters[0]/300.0,nativeSceneryFirstCounters[1]/300.0);
+            nativeSceneryFirstCounters[0]=nativeSceneryFirstCounters[1]=0;
             lastEpoch=epoch;nativeReplayFastCounters={};
             platform::RecordSessionEvent("render.scenery_replay",text);
             nativeSceneryReplayCounters={};replayFrames=0;

@@ -5141,6 +5141,16 @@ int ecstasySceneryRunReplay=[] {
 #endif
     return 1;
 }();
+// Cached-scenery first strip: epoch-checked resident entry + packet record
+// (Vita scenery_first_off.txt = 0, PC HP2_SCENERY_FIRST; 2 verifies).
+int ecstasySceneryFirstFast=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_SCENERY_FIRST"))return std::atoi(value);
+#endif
+    return 1;
+}();
+// fast hits, records, verify checks, verify mismatches
+std::array<std::uint64_t,4> nativeSceneryFirstCounters{};
 // Epoch-checked replay of recorded run entries (Vita replay_fast_off.txt = 0, PC HP2_REPLAY_FAST).
 int ecstasyReplayFast=[] {
 #if !defined(__vita__)
@@ -7565,6 +7575,8 @@ std::array<std::uint64_t,6> nativeShadingCounters{};
 // resident entries Acquire gave them, replayed as one span range + batch.
 // hits, misses, replayed strips, verify checks, verify mismatches
 std::array<std::uint64_t,5> nativeModelRunCounters{};
+struct VkDrawBatch;
+struct VkSceneryFirstRecord;
 struct VkModelRunRecord {
     std::vector<const EditorMarkerSolidGeometry::Strip*> strips;
     std::vector<std::uint32_t> slots;
@@ -8712,6 +8724,19 @@ private:
     std::vector<Entry> entries_;
 };
 
+// A cached scenery packet's first strip as last built: with the same strip
+// epoch, texture identity/generation/index, clamp and packet state, the slot
+// assignment (serial) still holds exactly that prepared entry, and the packet
+// cache would return this batch for it.
+struct VkSceneryFirstRecord {
+    const EditorMarkerSolidGeometry::Strip* strip{};
+    const TextureInfo* texture{};
+    std::uint64_t textureGeneration{},serial{},epoch{};
+    std::size_t textureIndex{};
+    std::uint32_t slot{},state{},count{};
+    bool clamp{};
+    VkDrawBatch packet;
+};
 struct VkFogDepthPlan {
     std::size_t first{},last{};
     bool present{},direct{};
@@ -8837,6 +8862,7 @@ struct EcstasyVulkanDevice::Storage {
     VkResidentGeometryCache residentGeometry;
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> modelRunRecords;
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> sceneryRunRecords;
+    std::vector<VkSceneryFirstRecord> sceneryFirstRecords;
     std::vector<const EditorMarkerSolidGeometry::Strip*> modelRunScratchStrips;
     std::vector<VkResidentGeometryEntry*> modelRunScratchEntries,modelRunScratchReplay;
     VkResidentIndexCache residentIndexCache;

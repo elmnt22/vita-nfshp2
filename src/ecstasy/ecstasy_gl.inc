@@ -374,6 +374,7 @@ struct EcstasyVulkanDevice::Storage {
     VkResidentGeometryCache residentGeometry;
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> modelRunRecords;
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> sceneryRunRecords;
+    std::vector<VkSceneryFirstRecord> sceneryFirstRecords;
     std::vector<const EditorMarkerSolidGeometry::Strip*> modelRunScratchStrips;
     std::vector<VkResidentGeometryEntry*> modelRunScratchEntries,modelRunScratchReplay;
     VkResidentIndexCache residentIndexCache;
@@ -1483,6 +1484,13 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
                 commandCount,packet.batches.size(),nativeGatherResidentEvents[0],nativeGatherResidentEvents[2],
                 static_cast<unsigned>(statistics.textureUploads));
             platform::RecordSessionEvent("renderer.vitagl.gather_detail",detail);
+            std::array<double,24> d{};
+            for(std::size_t at=0;at<d.size();++at)d[at]=8.0*(nativeGatherStepMilliseconds[at]-nativeGatherStepBefore[at]);
+            std::snprintf(detail,sizeof(detail),
+                "solid: lead=%.2f setup=%.2f preamble=%.2f shading=%.2f acquire=%.2f rest=%.2f append=%.2f other_draws=%.2f "
+                "scenery_first: n=%.0f texture_raster=%.2f acquire=%.2f packet=%.2f shading=%.2f rest=%.2f",
+                d[8],d[9],d[0],d[1],d[2],d[3],d[4],d[5],d[21]/8.0*8.0,d[16],d[17],d[18],d[19],d[20]);
+            platform::RecordSessionEvent("renderer.vitagl.gather_detail_steps",detail);
         }
     }
     glRenderStage=0;
