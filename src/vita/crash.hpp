@@ -1,7 +1,7 @@
 // Crash records for unattended device runs (kubridge v0.3+ exception
 // handlers; kubridge.skprx in the user's taiHEN config). A data abort,
 // prefetch abort or undefined instruction writes a short record to
-// ux0:data/NFSHP2N/crash.txt (registers, fault address, thread, stack words)
+// ux0:data/NFSHP2/crash.txt (registers, fault address, thread, stack words)
 // and ends the process, so no crash-dump popup waits to be closed. Without
 // kubridge, the system's crash dump remains as before.
 //

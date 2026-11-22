@@ -971,7 +971,7 @@ std::string GlProgramCachePath(std::uint32_t key)
 {
     static const std::uint64_t hash=GlShaderSourceHash();
     char path[160];
-    std::snprintf(path,sizeof(path),"ux0:data/NFSHP2N/shader_cache/%03x-%016llx.bin",key,
+    std::snprintf(path,sizeof(path),"ux0:data/NFSHP2/shader_cache/%03x-%016llx.bin",key,
         static_cast<unsigned long long>(hash));
     return path;
 }
@@ -998,7 +998,7 @@ void GlWriteProgramCache(std::uint32_t key,GLuint program)
     GLsizei length=0;GLenum format=0;
     glGetProgramBinary(program,static_cast<GLsizei>(buffer.size()),&length,&format,buffer.data());
     if(length<=0 || static_cast<std::size_t>(length)>buffer.size())return;
-    sceIoMkdir("ux0:data/NFSHP2N/shader_cache",0777);
+    sceIoMkdir("ux0:data/NFSHP2/shader_cache",0777);
     const auto path=GlProgramCachePath(key);
     const auto temporary=path+".tmp";
     if(auto* file=std::fopen(temporary.c_str(),"wb")) {
@@ -1014,7 +1014,7 @@ extern "C" std::uint32_t vsync_interval; // vitaGL: vblanks waited per swap (0 =
 int ecstasyInstancing=1; // Vita instance_off.txt: per-draw uniform matrices
 int ecstasyAffineUV=1; // Vita affine_off.txt restores the projective divide everywhere
 int ecstasyForceNoVsync=0;
-// Vita fps30.txt: present every 2nd vblank (30 fps lock); 0 leaves vitaGL's
+// Vita default 2: present every 2nd vblank (30 fps lock); 0 (fps_uncapped.txt) leaves vitaGL's
 // interval alone. Applied by the GL thread before each swap.
 int ecstasyVsyncInterval=0;
 // Vita gpu_diag.txt N (diagnostic only, wrong images on purpose): 1 = every
@@ -2572,7 +2572,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             std::vector<std::uint32_t> pixels(static_cast<std::size_t>(w)*h);
             for(std::uint32_t y=0;y<h;++y) // stored bottom-up like glReadPixels
                 for(std::uint32_t x=0;x<w;++x)pixels[(h-1-y)*w+x]=source[(y*2)*frameBuffer.pitch+x*2];
-            char path[96];std::snprintf(path,sizeof(path),"ux0:data/NFSHP2N/dshot_%llu_h%d_%ux%u.rgba",
+            char path[96];std::snprintf(path,sizeof(path),"ux0:data/NFSHP2/dshot_%llu_h%d_%ux%u.rgba",
                 static_cast<unsigned long long>(journalFrames+1),lastFrameHalf ? 1:0,w,h);
             if(FILE* file=std::fopen(path,"wb")) {std::fwrite(pixels.data(),4,pixels.size(),file);std::fclose(file);}
         }
@@ -2987,7 +2987,7 @@ void EcstasyVulkanDevice::Storage::SaveScreenshot(std::uint32_t width,std::uint3
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width)*height*4u);
     glBindFramebuffer(GL_FRAMEBUFFER,0);
     glReadPixels(0,0,static_cast<GLsizei>(width),static_cast<GLsizei>(height),GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
-    char path[96];std::snprintf(path,sizeof(path),"ux0:data/NFSHP2N/shot_%llu_%ux%u.rgba",
+    char path[96];std::snprintf(path,sizeof(path),"ux0:data/NFSHP2/shot_%llu_%ux%u.rgba",
         static_cast<unsigned long long>(frame),width,height);
     if(FILE* file=std::fopen(path,"wb")) {std::fwrite(pixels.data(),1,pixels.size(),file);std::fclose(file);}
     platform::RecordSessionEvent("renderer.vitagl.screenshot",path);

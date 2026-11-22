@@ -1,6 +1,6 @@
 # PS Vita host (spike). Stage 1: CPU-only null renderer to measure the
 # engine's logic + capture cost on the Cortex-A9. Users supply their own PAL
-# ZDIR.BIN/ZZDATA.BIN in ux0:data/NFSHP2N; no game data is packaged.
+# ZDIR.BIN/ZZDATA.BIN in ux0:data/NFSHP2; no game data is packaged.
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "NFS HP2 Native")

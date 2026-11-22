@@ -66,7 +66,7 @@ VitaApplicationHost* g_host{};
 // Watchdog diagnostics: main-thread stage and completed-frame counter.
 std::atomic<int> g_mainStage{0};
 std::atomic<unsigned> g_framesDone{0};
-constexpr const char* kDataDirectory = "ux0:data/NFSHP2N";
+constexpr const char* kDataDirectory = "ux0:data/NFSHP2";
 constexpr int kWidth = 960;
 constexpr int kHeight = 544;
 
@@ -569,7 +569,7 @@ int main(int, char**)
         graphicsOptions.fixedRenderExtent = true;
         graphicsOptions.vsync = false;
         auto graphics = std::make_unique<hp2::EcstasyVulkanDevice>(graphicsOptions);
-        // Pipelined rendering is on unless ux0:data/NFSHP2N/nopipeline.txt exists.
+        // Pipelined rendering is on unless ux0:data/NFSHP2/nopipeline.txt exists.
         SceIoStat noPipeline{};
         const bool pipeline = sceIoGetstat((std::string(kDataDirectory) + "/nopipeline.txt").c_str(), &noPipeline) < 0;
         log.Line("vita.gl", pipeline ? "render thread pipelining on" : "render thread pipelining off");
@@ -577,7 +577,7 @@ int main(int, char**)
         hp2::nativeRenderDrainHook = [] { if (g_host) g_host->FinishFrames(); };
         g_host = &host;
 #endif
-        // Audio is on unless ux0:data/NFSHP2N/noaudio.txt exists (then music
+        // Audio is on unless ux0:data/NFSHP2/noaudio.txt exists (then music
         // must be off too: the jukebox needs the audio device as its owner).
         SceIoStat noAudio{};
         if (sceIoGetstat((std::string(kDataDirectory) + "/noaudio.txt").c_str(), &noAudio) >= 0) {
@@ -874,10 +874,12 @@ int main(int, char**)
             std::snprintf(detail, sizeof(detail), "geometry prewarm max %u", hp2::ecstasyGeometryPrewarmMax);
             log.Line("vita.diag", detail);
         }
-        if (sceIoGetstat((std::string(kDataDirectory) + "/fps30.txt").c_str(), &probe) >= 0) {
-            hp2::ecstasyVsyncInterval = 2;
-            log.Line("vita.diag", "30 fps lock (vsync interval 2)");
-        }
+        // 30 fps lock by default (present every 2nd vblank); fps_uncapped.txt
+        // restores vitaGL's one-vblank interval.
+        hp2::ecstasyVsyncInterval = 2;
+        if (sceIoGetstat((std::string(kDataDirectory) + "/fps_uncapped.txt").c_str(), &probe) >= 0)
+            hp2::ecstasyVsyncInterval = 0;
+        log.Line("vita.diag", hp2::ecstasyVsyncInterval ? "30 fps lock (vsync interval 2)" : "uncapped (vsync interval 1)");
         if (sceIoGetstat((std::string(kDataDirectory) + "/vsync_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyForceNoVsync = 1;
             log.Line("vita.diag", "vsync forced off");

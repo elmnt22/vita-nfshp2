@@ -5183,7 +5183,7 @@ TexturePrewarmState& TexturePrewarm() {static TexturePrewarmState state;return s
 const char* TexturePrewarmPath() noexcept
 {
 #if defined(__vita__)
-    return "ux0:data/NFSHP2N/texture_prewarm.txt";
+    return "ux0:data/NFSHP2/texture_prewarm.txt";
 #else
     return "Saves/texture_prewarm.txt";
 #endif
@@ -5344,7 +5344,7 @@ GeometryPrewarmState& GeometryPrewarm() {static GeometryPrewarmState state;retur
 const char* GeometryPrewarmPath() noexcept
 {
 #if defined(__vita__)
-    return "ux0:data/NFSHP2N/geometry_prewarm.txt";
+    return "ux0:data/NFSHP2/geometry_prewarm.txt";
 #else
     return "Saves/geometry_prewarm.txt";
 #endif
