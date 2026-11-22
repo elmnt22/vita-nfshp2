@@ -18,6 +18,17 @@
 #include "indep/inc/Race.hpp"
 
 #include <math.h>
+#include <cstdlib>
+namespace hp2 {
+// Native speed-trap settle (see pursuitEntryDoSpeedTrap). Vita
+// speedtrap_retail.txt / PC HP2_SPEEDTRAP_RETAIL=1 restore the original.
+int nativeSpeedTrapSettle=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    if(const char* value=std::getenv("HP2_SPEEDTRAP_RETAIL"))return *value=='1' ? 0:1;
+#endif
+    return 1;
+}();
+}
 #include "bware/inc/bWare.hpp"
 #include "indep/inc/CarInfo.hpp"
 #include <memory>
@@ -604,6 +615,7 @@ CarDriverResult pursuitEntryAssignSpeedTrap(PursuitCollisionEntry* entry, Pursui
     // transition must not publish a new officer in two owners at once.
     PursuitSpeedTrap* previousTrap=entry->speedTrap;
     PursuitCollisionEntry* previousOfficer=trap->officer;
+    entry->nativeTrapOffset[0]=entry->nativeTrapOffset[1]=0.0f;entry->nativeTrapAdjusted=0;entry->nativeTrapHeadingOffset=0;
     entry->speedTrap = trap;
     trap->officer = entry;
     const CarDriverResult result = pursuitEntryTeleport(entry, trap->position, trap->heading);
@@ -788,19 +800,55 @@ CarDriverResult pursuitEntryDoSpeedTrap(PursuitManager* manager, PursuitCollisio
 
     const PursuitSpeedTrap* trap = entry->speedTrap;
     if (!trap) return CAR_DRIVER_MISSING_PURSUIT;
-    const float x = trap->position[0] - state->position[0];
-    const float y = trap->position[1] - state->position[1];
+    float site[2] = {trap->position[0], trap->position[1]};
+    uint16_t siteHeading = trap->heading;
+    if (entry->nativeTrapAdjusted) {
+        site[0] += entry->nativeTrapOffset[0]; site[1] += entry->nativeTrapOffset[1];
+        siteHeading = (uint16_t)(siteHeading + entry->nativeTrapHeadingOffset);
+    }
+    const float x = site[0] - state->position[0];
+    const float y = site[1] - state->position[1];
     const float xx = x * x;
     const float yy = y * y;
-    int32_t angle = (uint16_t)(trap->heading - state->heading);
-    if (angle >= 32768) angle -= 65536;
-    if (angle < 0) angle = -angle;
-    if (0.009999999776482582f < sqrtf(xx + yy) || 100 < angle) {
+    int32_t signedAngle = (uint16_t)(siteHeading - state->heading);
+    if (signedAngle >= 32768) signedAngle -= 65536;
+    int32_t angle = signedAngle < 0 ? -signedAngle : signedAngle;
+    const float distance = sqrtf(xx + yy);
+    if (hp2::nativeSpeedTrapSettle && !entry->nativeTrapAdjusted && angle < 2000 &&
+        (0.009999999776482582f < distance || 100 < angle) && distance < 4.0f &&
+        !(worldGetDistanceToClosestPlayer2D(manager->world, state->position) < 100.0f)) {
+        // The original teleports the officer back to its authored site
+        // every time static geometry pushes it out; a site inside a barrier
+        // (Radar21_02) then penetrates every few ticks for the whole parked
+        // time (13 ms collision steps on Vita). With no player near, the
+        // first push-out is from the world, not a car: park at that resolved
+        // pose plus 5 cm instead (once per assignment): the pose retail shows
+        // after every push-out. A car shove near a player keeps the original
+        // snap-back. (Radar21_02: pushed 2.65 m, heading +278 every tick.)
+        const float scale = distance > 0.001f ? (distance + 0.05f) / distance : 1.0f;
+        entry->nativeTrapOffset[0] = -x * scale;
+        entry->nativeTrapOffset[1] = -y * scale;
+        entry->nativeTrapHeadingOffset = -signedAngle;
+        entry->nativeTrapAdjusted = 1;
+        {
+            char text[160];
+            std::snprintf(text,sizeof(text),"pushed=%.3f heading=%d offset=(%.3f,%.3f)",
+                distance,-signedAngle,entry->nativeTrapOffset[0],entry->nativeTrapOffset[1]);
+            hp2::platform::RecordSessionEvent("cop.speedtrap_settle",text);
+        }
+        site[0] = trap->position[0] + entry->nativeTrapOffset[0];
+        site[1] = trap->position[1] + entry->nativeTrapOffset[1];
+        siteHeading = (uint16_t)(trap->heading + entry->nativeTrapHeadingOffset);
+        int32_t settled = (uint16_t)(siteHeading - state->heading);
+        if (settled >= 32768) settled -= 65536;
+        angle = settled < 0 ? -settled : settled;
+    }
+    if (0.009999999776482582f < distance || 100 < angle) {
         int32_t clear = 0;
-        const CarDriverResult query = pursuitCanTeleport(manager->world, movement, trap->position, &clear);
+        const CarDriverResult query = pursuitCanTeleport(manager->world, movement, site, &clear);
         if (query != CAR_DRIVER_OK) return query;
         if (clear) {
-            const CarDriverResult placed = pursuitEntryTeleport(entry, trap->position, trap->heading);
+            const CarDriverResult placed = pursuitEntryTeleport(entry, site, siteHeading);
             if (placed != CAR_DRIVER_OK) return placed;
         }
     }
@@ -1598,6 +1646,12 @@ void pursuitAiCopDoSnapshot(PursuitManager* manager,PursuitCollisionEntry* entry
     carRecoverySnapshotPoseInGroup(entry->recovery.group,snapshot,&entry->recovery.pose);
     if(snapshot->restoring && entry->speedTrap)entry->speedTrap->officer=entry;
     replaySnapshotMoveFloat(snapshot,&entry->graceRemaining);
+    if(hp2::nativeSpeedTrapSettle) {
+        replaySnapshotMoveFloat(snapshot,&entry->nativeTrapOffset[0]);
+        replaySnapshotMoveFloat(snapshot,&entry->nativeTrapOffset[1]);
+        replaySnapshotMoveInteger(snapshot,&entry->nativeTrapAdjusted,1);
+        replaySnapshotMoveInteger(snapshot,&entry->nativeTrapHeadingOffset,4);
+    }
     replaySnapshotEndSection(snapshot);
 }
 

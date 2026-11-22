@@ -93,6 +93,13 @@ extern int collisionMemoGate;
 extern std::atomic<uint64_t> collisionMemoGateFlips;
 extern std::atomic<uint64_t> collisionMemoLookups,collisionMemoHits,collisionMemoStores,collisionMemoVerified,collisionMemoMismatches,collisionMemoSavedSteps;
 namespace hp2 { void InitDisplaySystem(const GameResources& files,GameTime& clock); }
+// Race-start drain (Vita main.cpp sets it; race_start_drain.txt "<frames>").
+// The first race presentations upload most of the track's textures and
+// strips (170-470 ms Gather). Completing them before the race clock starts
+// extends loading instead of skipping the pre-race camera: after each of the
+// first N in-game submissions wait for the render pipeline, then restart the
+// logical clock exactly as the existing load boundary does. 0 = off.
+namespace hp2 { int nativeRaceStartDrainFrames=0; }
 extern std::array<double,4> worldCollisionSubPhaseMs; // indep/src/world.cpp diagnostic
 extern std::array<double,4> worldCollisionSolveMs;
 
@@ -875,6 +882,7 @@ void ApplicationRuntime::Initialize(const std::filesystem::path& configFile)
     ChangeGameFlow(s.flow,1,0);s.initialized=true;
 }
 
+static int raceStartDrainsLeft=0;
 bool ApplicationRuntime::Tick()
 {
     using namespace frontend;auto& s=*storage_;Require(s.initialized,"Application frame precedes initialization");
@@ -968,6 +976,7 @@ bool ApplicationRuntime::Tick()
                 // a newly created race or skip the first visible countdown.
                 observed=s.host.FrameTime();s.simulationClock.Reset(observed);
                 s.replayStepSeconds=1.0f/60.0f;
+                raceStartDrainsLeft=s.flow.inGameFlag ? nativeRaceStartDrainFrames:0;
             }
             s.RecordLifecycle(simulation,session);
             // PAL12F40C gates the application checksum on the live InGameFlag.
@@ -1270,6 +1279,16 @@ bool ApplicationRuntime::Tick()
         s.host.SetFramePipelining(s.flow.inGameFlag!=0);
         s.host.SubmitFrame(*s.frame);
         if(s.host.FrameInFlight())std::swap(s.frame,s.spareFrame);
+        if(raceStartDrainsLeft>0 && s.flow.inGameFlag) {
+            --raceStartDrainsLeft;
+            const auto drainStarted=s.host.FrameTime();
+            s.host.FinishFrames();
+            const auto drained=s.host.FrameTime();
+            s.simulationClock.Reset(drained);
+            char detail[64]{};std::snprintf(detail,sizeof(detail),"left=%d wait_ms=%.2f",raceStartDrainsLeft,
+                std::chrono::duration<double,std::milli>(drained-drainStarted).count());
+            s.host.RecordSessionEvent("render.race_start_drain",detail);
+        }
     }
     // Native timings have separate clock domains. CPU work includes capture,
     // Gather and recording/submission; waiting and presentation are reported
@@ -1712,6 +1731,10 @@ bool ApplicationRuntime::Tick()
         (s.frame->State()==EcstasyFrame::Phase::Building && s.frame->Commands().empty()),
         "Physical presenter did not retire the CPU frame capture");
     if(advancedPresentation) {
+        // A decode drains the render pipeline; right after SubmitFrame that
+        // waits for the whole in-flight Gather (20-40 ms mid-race NIS loads).
+        // In a race, defer a ready decode to the next tick before capture,
+        // where the update has already overlapped most of that Gather.
         s.ServiceFrameResources();
     }
     if(s.preparedSceneValid && !s.PreparedSceneUnchanged())s.InvalidatePreparedScene();

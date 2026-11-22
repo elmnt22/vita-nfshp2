@@ -242,6 +242,12 @@ struct PursuitCollisionEntry {
     float flankSide;
     /* Source base +08 officer index; not the target Car's table index. */
     int32_t officerIndex;
+    /* Native (not in the original): a parked speed-trap officer's site
+     * offset after its authored site proved to sit inside static geometry
+     * (Radar21_02 in a barrier column). See pursuitEntryDoSpeedTrap. */
+    float nativeTrapOffset[2];
+    int32_t nativeTrapAdjusted;
+    int32_t nativeTrapHeadingOffset;
 };
 
 typedef enum PursuitCollisionResult {

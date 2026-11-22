@@ -49,6 +49,7 @@ unsigned int _newlib_heap_size_user = 280u * 1024u * 1024u;
 unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 }
 
+namespace hp2 { extern int nativeRaceStartDrainFrames; extern int nativeSpeedTrapSettle; }
 namespace hp2 { extern int ecstasyHalfCompositeBounds; extern int ecstasyHalfDepthPolicy; extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern std::atomic<int> debugDemoStarted; extern int debugBenchMirror; }
 extern int collisionWitnessWarmProbe;
 extern int collisionQueuePrediction;
@@ -687,6 +688,17 @@ int main(int, char**)
             std::fclose(fade);
             log.Line("vita.diag", ("particle near fade " + std::to_string(hp2::ecstasyParticleNearFadeStart) + " " +
                 std::to_string(hp2::ecstasyParticleNearFadeEnd)).c_str());
+        }
+        hp2::nativeRaceStartDrainFrames = 3;
+        if (FILE* drain = std::fopen((std::string(kDataDirectory) + "/race_start_drain.txt").c_str(), "r")) {
+            int frames = 3;
+            if (std::fscanf(drain, "%d", &frames) == 1 && frames >= 0 && frames <= 60) hp2::nativeRaceStartDrainFrames = frames;
+            std::fclose(drain);
+        }
+        log.Line("vita.diag", ("race start drain frames " + std::to_string(hp2::nativeRaceStartDrainFrames)).c_str());
+        if (sceIoGetstat((std::string(kDataDirectory) + "/speedtrap_retail.txt").c_str(), &probe) >= 0) {
+            hp2::nativeSpeedTrapSettle = 0;
+            log.Line("vita.diag", "speed trap: retail snap-back");
         }
         if (FILE* detail = std::fopen((std::string(kDataDirectory) + "/gather_detail.txt").c_str(), "r")) {
             double value = 26.0;

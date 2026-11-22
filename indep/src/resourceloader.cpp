@@ -516,7 +516,8 @@ std::size_t ResourceLoader::ServiceResourceLoading()
         std::size_t decodedBytes=file.data.size();
         NativeDrainRendering();
         logResourceEvent("resource.decode.begin",file.filename,file.bindings.kind,file.type,file.flags,
-            0,decodedBytes,service.pendingFiles);
+            0,decodedBytes,service.pendingFiles,
+            std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-began).count());
         try {
         if ((file.flags&8u) && file.data.size()>=4 &&
             std::memcmp(file.data.data(),"COMP",4)==0)
@@ -618,7 +619,12 @@ std::size_t ResourceLoader::ServiceResourceLoading()
         if (file.flags&4u)std::vector<std::uint8_t>().swap(file.data);
         // This is an actual CPU dependency, not a renderer-complete callback.
         // It must refresh the same model/animation/texture/Flailer owners.
-        service.registry.PostLoadFixup();
+        {
+            const auto fixupBegan=std::chrono::steady_clock::now();
+            service.registry.PostLoadFixup();
+            logResourceEvent("resource.fixup",file.filename,file.bindings.kind,file.type,file.flags,0,decodedBytes,
+                service.pendingFiles,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-fixupBegan).count());
+        }
         } catch (...) {
             file.failure=std::current_exception();
             const auto elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-began).count();

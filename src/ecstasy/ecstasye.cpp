@@ -43,6 +43,7 @@
 #include <algorithm>
 #ifdef __vita__
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
 #endif
 #ifdef __SWITCH__
 #include <switch.h>
@@ -8027,6 +8028,7 @@ struct VkResidentGeometrySource {
 // A resident hit reads this header without walking through the 3 KiB
 // vertex shadow and index payload. Payload bytes and the GPU slot layout
 // are unchanged; the small counts retain their source packet bounds.
+std::uint32_t nativeAcquireSlowMicros{},nativeAcquireSlowCalls{};
 struct VkResidentGeometryEntry {
     const EditorMarkerSolidGeometry::Strip* source{};
     std::uint64_t sourceGeneration{},indexToken{};
@@ -8150,6 +8152,15 @@ public:
         if(cached && cached->source==token && cached->key==key) {
             job.count=cached->count;Touch(*cached);return cached;
         }
+        // Diagnostic: time of every Acquire past the frame front (slow_prepare).
+        struct SlowAcquireTimer {
+#ifdef __vita__
+            std::uint64_t began{sceKernelGetProcessTimeWide()};
+            ~SlowAcquireTimer() {nativeAcquireSlowMicros+=static_cast<std::uint32_t>(sceKernelGetProcessTimeWide()-began);++nativeAcquireSlowCalls;}
+#else
+            ~SlowAcquireTimer() {++nativeAcquireSlowCalls;}
+#endif
+        } slowAcquireTimer;
         auto* resolved=FindSource(token);
         if(!resolved) {
             if(free_.empty() && active_.size()>=live_) {
@@ -8420,20 +8431,23 @@ struct VkResidentIndexEntry {
     bool uploaded{};
 };
 
+// Last ResolveNativeResidentIndices: front hits, map hits, new entries, new
+// index words, evictions, streamed batches, streamed words.
+std::array<std::uint32_t,7> nativeIndexEvents{};
 class VkResidentIndexCache {
 public:
     void Configure(std::uint32_t capacity) {
         Require(entries_.empty(),"Resident index capacity cannot change while entries exist");
-        capacity_=capacity&~std::uint32_t(63);free_.clear();
-        if(capacity_)free_.emplace(0,capacity_);
+        capacity_=capacity&~std::uint32_t(63);free_.clear();bySize_.clear();
+        if(capacity_)AddFree(0,capacity_);
     }
     std::uint32_t Capacity() const noexcept {return capacity_;}
     std::size_t Size() const noexcept {return entries_.size();}
     const std::vector<VkResidentIndexEntry*>& Active() const noexcept {return active_;}
     void Begin(std::uint64_t gather) {
         if(gather<=gather_) {
-            entries_.clear();lookup_.clear();free_.clear();front_.fill({});
-            if(capacity_)free_.emplace(0,capacity_);
+            entries_.clear();lookup_.clear();free_.clear();bySize_.clear();front_.fill({});
+            if(capacity_)AddFree(0,capacity_);
         }
         gather_=gather;active_.clear();
         while(!entries_.empty() && gather_-entries_.front().lastGather>600)Evict(entries_.begin());
@@ -8470,7 +8484,7 @@ public:
                 for(std::size_t at=0;at<count;++at)
                     if(entryTokens[at]!=tokens[first+at]) {equal=false;break;}
             }
-            if(equal) {Touch(slot.entry);return &*slot.entry;}
+            if(equal) {++nativeIndexEvents[0];Touch(slot.entry);return &*slot.entry;}
         }
         const auto candidates=lookup_.equal_range(hash);
         for(auto found=candidates.first;found!=candidates.second;++found) {
@@ -8480,7 +8494,7 @@ public:
             for(std::size_t at=0;at<count;++at)
                 if(entry->tokens[at]!=tokens[first+at]) {equal=false;break;}
             if(!equal)continue;
-            SetFront(entry);Touch(entry);return &*entry;
+            ++nativeIndexEvents[1];SetFront(entry);Touch(entry);return &*entry;
         }
         const auto needed=(static_cast<std::uint32_t>(indices)+63u)&~std::uint32_t(63);
         auto range=Find(needed);
@@ -8490,11 +8504,12 @@ public:
             // range it merges into, so first-fit Find can return only that
             // one: test it instead of rescanning every fragment (quadratic
             // under pressure: 40-240 ms Gather spikes on Vita).
-            const auto merged=Evict(entries_.begin());
+            const auto merged=Evict(entries_.begin());++nativeIndexEvents[4];
             if(merged->second>=needed)range=merged;
         }
         // Allocate payload before consuming a free range, so allocation
         // failures cannot leave a partially published GPU index entry.
+        ++nativeIndexEvents[2];nativeIndexEvents[3]+=static_cast<std::uint32_t>(indices);
         VkResidentIndexEntry value;value.hash=hash;value.first=range->first;value.allocated=needed;
         value.tokens.reserve(count);value.shadow.reserve(static_cast<std::size_t>(indices));
         for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at) {
@@ -8506,11 +8521,11 @@ public:
         entries_.push_back(std::move(value));auto entry=std::prev(entries_.end());
         try {lookup_.emplace(hash,entry);}catch(...) {entries_.erase(entry);throw;}
         if(remaining) {
-            try {free_.emplace(after,remaining);}catch(...) {
+            try {AddFree(after,remaining);}catch(...) {
                 EraseLookup(entry);entries_.erase(entry);throw;
             }
         }
-        free_.erase(range);SetFront(entry);Touch(entry);
+        EraseFree(range);SetFront(entry);Touch(entry);
         return &*entry;
     }
     void InvalidateUploads() {for(auto& entry:entries_)entry.uploaded=false;}
@@ -8531,8 +8546,22 @@ private:
         slot.count=static_cast<std::uint32_t>(entry->tokens.size());
         slot.token=entry->tokens.empty() ? 0:entry->tokens.front();
     }
+    // Best fit through a size index (a first-fit walk of the fragmented
+    // offset map cost tens of microseconds per new entry on Vita). Placement
+    // changes only where indices live in the buffer, never what is drawn.
     Ranges::iterator Find(std::uint32_t count) {
-        return std::find_if(free_.begin(),free_.end(),[&](const auto& range){return range.second>=count;});
+        const auto fit=bySize_.lower_bound(count);
+        return fit==bySize_.end() ? free_.end():free_.find(fit->second);
+    }
+    Ranges::iterator AddFree(std::uint32_t first,std::uint32_t count) {
+        const auto added=free_.emplace(first,count).first;
+        try {bySize_.emplace(count,first);}catch(...) {free_.erase(added);throw;}
+        return added;
+    }
+    void EraseFree(Ranges::iterator range) {
+        const auto candidates=bySize_.equal_range(range->second);
+        for(auto at=candidates.first;at!=candidates.second;++at)if(at->second==range->first) {bySize_.erase(at);break;}
+        free_.erase(range);
     }
     void Touch(Entries::iterator entry) {
         if(entry->lastGather==gather_)return; // already after every older entry
@@ -8550,12 +8579,12 @@ private:
         if(next!=free_.begin()) {
             auto previous=std::prev(next);
             if(previous->first+previous->second==first) {
-                first=previous->first;count+=previous->second;free_.erase(previous);
+                first=previous->first;count+=previous->second;EraseFree(previous);
             }
         }
         next=free_.lower_bound(first);
-        if(next!=free_.end() && first+count==next->first) {count+=next->second;free_.erase(next);}
-        const auto merged=free_.emplace(first,count).first;EraseLookup(entry);
+        if(next!=free_.end() && first+count==next->first) {count+=next->second;EraseFree(next);}
+        const auto merged=AddFree(first,count);EraseLookup(entry);
         if(auto& slot=front_[FrontIndex(entry->hash)];slot.live && slot.entry==entry)slot={};
         entries_.erase(entry);
         return merged;
@@ -8564,6 +8593,7 @@ private:
     std::uint32_t capacity_{};
     Entries entries_;
     Ranges free_;
+    std::multimap<std::uint32_t,std::uint32_t> bySize_; // free range size -> first
     std::unordered_multimap<std::uint64_t,Entries::iterator> lookup_;
     std::array<FrontSlot,FrontSize> front_{};
     std::vector<VkResidentIndexEntry*> active_;
@@ -8974,6 +9004,7 @@ void ResolveNativeResidentIndices(VkResidentIndexCache& cache,
     std::vector<std::uint32_t>& indices,std::vector<VkDrawBatch>& batches)
 {
     Require(tokens.size()==spans.size(),"Resident span tokens lost their spans");
+    nativeIndexEvents={};
     for(auto& batch:batches) {
         if(!batch.residentGeometry)continue;
         if(auto* entry=cache.Acquire(spans,tokens,batch.nativeSpanFirst,batch.nativeSpanCount,batch.count)) {
@@ -8985,6 +9016,7 @@ void ResolveNativeResidentIndices(VkResidentIndexCache& cache,
             Require(indices.size()+batch.count<=std::numeric_limits<std::uint32_t>::max(),
                 "Native streamed frame index count exceeds32-bit draw range");
             batch.first=static_cast<std::uint32_t>(indices.size());
+            ++nativeIndexEvents[5];nativeIndexEvents[6]+=batch.count;
             for(std::size_t at=batch.nativeSpanFirst;at<static_cast<std::size_t>(batch.nativeSpanFirst)+batch.nativeSpanCount;++at) {
                 const auto& source=*spans[at];
                 indices.insert(indices.end(),source.indices.begin(),source.indices.begin()+source.indexCount);
