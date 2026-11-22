@@ -425,6 +425,17 @@ void FrontendDemoMode::BuildDemoTrackList()
     // PAL16EC10 caches the original one-based authored order, up to32.
     if (trackListBuilt)return;
     Require(raceSetup && raceSetup->tracks,"Demo track list has no actual track catalogue");
+#if !defined(__vita__) && !defined(__SWITCH__)
+    if (std::getenv("HP2_LIST_TRACKS")) {
+        // Diagnostic: the scenario catalogue (bench track ids).
+        const auto count=raceSetup->tracks->Catalog().scenarioCount;
+        if (std::FILE* list=std::fopen("track_list.txt","w")) {
+        for (std::size_t number=1;number<=count;++number)
+            if (auto* info=raceSetup->tracks->Find(static_cast<std::int32_t>(number)))
+                std::fprintf(list,"track %zu route=%d tod=%d name=%s\n",number,info->routeKind,info->timeOfDay,info->name);
+        std::fclose(list);}
+    }
+#endif
     if (hp2::debugDemoTrack>=0 && raceSetup->tracks->Find(hp2::debugDemoTrack)) {
         tracks[0]=hp2::debugDemoTrack;trackCount=1;
     } else if (applicationBootState.trackSelectedInConfigFile!=-1) {

@@ -5308,6 +5308,11 @@ void EcstasyFrame::CollectTexturePrewarm()
 // hands its strips to Gather (a few per frame), which prepares and uploads
 // them through the ordinary Acquire path without drawing anything. Cache
 // contents only: the same source bytes, key and vertex preparation.
+// Strips prewarmed per world (first-use order). The resident cache holds
+// about one track's worth (24 MB on Vita): prewarming every strip a track
+// has ever shown (28k on the larger tracks) evicts the strips in view and
+// thrashes the cache. Vita geometry_prewarm_max.txt "<strips>".
+std::uint32_t ecstasyGeometryPrewarmMax=6000;
 int ecstasyGeometryPrewarm=[] {
 #if !defined(__vita__) && !defined(__SWITCH__)
     if(const char* value=std::getenv("HP2_GEOMETRY_PREWARM"))return std::atoi(value);
@@ -5321,6 +5326,7 @@ struct GeometryPrewarmRecord {
     std::uint32_t solid{},index{},glyph{};
     std::uint32_t lod0{},lod1{};
     bool line{};
+    std::uint32_t sequence{}; // file order = first-use order
 };
 struct GeometryPrewarmState {
     std::mutex mutex;
@@ -5331,6 +5337,7 @@ struct GeometryPrewarmState {
     std::set<std::uint32_t> doneSolids; // queued this session (per root)
     std::vector<EcstasyFrame::PrewarmStrip> queue,handed;
     const EditorMarkerResources* root{};std::uint64_t rootRevision{~0ull};
+    std::uint32_t queuedTotal{}; // per root, capped by ecstasyGeometryPrewarmMax
     std::uint32_t sealsSinceFlush{};
 };
 GeometryPrewarmState& GeometryPrewarm() {static GeometryPrewarmState state;return state;}
@@ -5367,6 +5374,7 @@ void LoadGeometryPrewarm(GeometryPrewarmState& state)
         if(std::sscanf(line,"%x %u %d %x %x %u",&solid,&index,&lineTopology,&lod0,&lod1,&glyph)!=6)continue;
         record.solid=solid;record.index=index;record.line=lineTopology!=0;record.lod0=lod0;record.lod1=lod1;record.glyph=glyph;
         if(!state.known.insert(GeometryPrewarmIdentity(record)).second)continue;
+        record.sequence=static_cast<std::uint32_t>(state.known.size());
         state.bySolid[record.solid].push_back(record);
     }
     std::fclose(file);
@@ -5414,8 +5422,9 @@ void EcstasyFrame::CollectGeometryPrewarm()
     std::lock_guard<std::mutex> lock(state.mutex);
     if(!state.loaded)LoadGeometryPrewarm(state);
     if(root && (root!=state.root || root->bindingRevision!=state.rootRevision)) {
-        if(root!=state.root) {state.doneSolids.clear();state.queue.clear();state.handed.clear();}
+        if(root!=state.root) {state.doneSolids.clear();state.queue.clear();state.handed.clear();state.queuedTotal=0;}
         state.root=root;state.rootRevision=root->bindingRevision;
+        std::vector<std::pair<std::uint32_t,PrewarmStrip>> fresh;
         // Queue the listed strips of every newly present solid.
         for(const auto* catalogue=root;catalogue;catalogue=catalogue->nextCatalogue)
             for(std::size_t at=0;at<catalogue->solidCount;++at) {
@@ -5429,9 +5438,19 @@ void EcstasyFrame::CollectGeometryPrewarm()
                     PrewarmStrip entry;entry.strip=&solid.geometry->strips[record.index];
                     std::memcpy(&entry.lod[0],&record.lod0,4);std::memcpy(&entry.lod[1],&record.lod1,4);
                     entry.glyphBoundsIndex=record.glyph;entry.lineTopology=record.line;
-                    state.queue.push_back(entry);
+                    fresh.emplace_back(record.sequence,entry);
                 }
             }
+        // Earliest first-use first, up to the per-world cap; the queue pops
+        // from the back, so store it reversed.
+        std::stable_sort(fresh.begin(),fresh.end(),[](const auto& a,const auto& b) {return a.first<b.first;});
+        const std::size_t room=state.queuedTotal<ecstasyGeometryPrewarmMax ? ecstasyGeometryPrewarmMax-state.queuedTotal:0u;
+        if(fresh.size()>room)fresh.resize(room);
+        state.queuedTotal+=static_cast<std::uint32_t>(fresh.size());
+        std::vector<PrewarmStrip> merged;merged.reserve(fresh.size()+state.queue.size());
+        for(auto it=fresh.rbegin();it!=fresh.rend();++it)merged.push_back(it->second);
+        merged.insert(merged.end(),state.queue.begin(),state.queue.end());
+        state.queue.swap(merged);
     }
     // A few strips per frame; handed strips repeat until a Gather confirms
     // them (a sealed frame can be dropped without being gathered).

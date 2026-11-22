@@ -54,7 +54,7 @@ extern int collisionWitnessWarmProbe;
 extern int collisionQueuePrediction;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern int ecstasySceneryPrefetch; extern int ecstasySceneryFirstFast; extern int ecstasyReplayFast; extern int ecstasySceneryRunReplay; extern int ecstasyGatherDetail; extern double ecstasyGatherDetailMs; extern float ecstasyParticleNearFadeStart, ecstasyParticleNearFadeEnd; extern int ecstasyParticleMirrorCull; extern int ecstasySceneryReuseCensus; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasyGpuDiag; extern int ecstasyModelRunCache; extern int ecstasyTexturePrewarm; extern int ecstasyGeometryPrewarm; extern int ecstasyScissorElide; extern int ecstasySunQuery; extern int ecstasyInstancing; extern int ecstasyGxmDirect; extern int ecstasyGxmParity; extern int ecstasyGxmFlushDraws; extern int ecstasyGxmProf; extern int ecstasyDeferOrder; extern int ecstasyGpuTimeline; extern int ecstasyGpuHeavyShots; extern int ecstasyResidentVram; extern int ecstasyAlphaElide; extern int ecstasyAlphaCheck; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
+namespace hp2 { extern int ecstasySceneryPrefetch; extern int ecstasySceneryFirstFast; extern int ecstasyReplayFast; extern int ecstasySceneryRunReplay; extern int ecstasyGatherDetail; extern double ecstasyGatherDetailMs; extern float ecstasyParticleNearFadeStart, ecstasyParticleNearFadeEnd; extern int ecstasyParticleMirrorCull; extern int ecstasySceneryReuseCensus; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasyVsyncInterval; extern std::uint32_t ecstasyGeometryPrewarmMax; extern int ecstasyGpuDiag; extern int ecstasyModelRunCache; extern int ecstasyTexturePrewarm; extern int ecstasyGeometryPrewarm; extern int ecstasyScissorElide; extern int ecstasySunQuery; extern int ecstasyInstancing; extern int ecstasyGxmDirect; extern int ecstasyGxmParity; extern int ecstasyGxmFlushDraws; extern int ecstasyGxmProf; extern int ecstasyDeferOrder; extern int ecstasyGpuTimeline; extern int ecstasyGpuHeavyShots; extern int ecstasyResidentVram; extern int ecstasyAlphaElide; extern int ecstasyAlphaCheck; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -846,9 +846,14 @@ int main(int, char**)
             hp2::ecstasyTexturePrewarm = 0;
             log.Line("vita.diag", "texture prewarm off");
         }
-        if (sceIoGetstat((std::string(kDataDirectory) + "/geometry_prewarm_off.txt").c_str(), &probe) >= 0) {
-            hp2::ecstasyGeometryPrewarm = 0;
-            log.Line("vita.diag", "geometry prewarm off");
+        // Geometry prewarm is off by default: on the larger tracks the listed
+        // strips exceed the 24 MB resident cache and thrash it (track 62 at
+        // 30 fps lock: 25.1 fps with 1.2 s hitches vs 29.2 off; track 24
+        // 29.7 vs 29.6). geometry_prewarm_on.txt enables it (capped).
+        hp2::ecstasyGeometryPrewarm = 0;
+        if (sceIoGetstat((std::string(kDataDirectory) + "/geometry_prewarm_on.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyGeometryPrewarm = 1;
+            log.Line("vita.diag", "geometry prewarm on");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/model_run_cache_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyModelRunCache = 0;
@@ -860,6 +865,18 @@ int main(int, char**)
             std::fclose(diag);
             char text[48];std::snprintf(text, sizeof(text), "gpu diagnostic mode %d", hp2::ecstasyGpuDiag);
             log.Line("vita.diag", text);
+        }
+        if (FILE* file = std::fopen((std::string(kDataDirectory) + "/geometry_prewarm_max.txt").c_str(), "r")) {
+            unsigned value = 0;
+            if (std::fscanf(file, "%u", &value) == 1) hp2::ecstasyGeometryPrewarmMax = value;
+            std::fclose(file);
+            char detail[48];
+            std::snprintf(detail, sizeof(detail), "geometry prewarm max %u", hp2::ecstasyGeometryPrewarmMax);
+            log.Line("vita.diag", detail);
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/fps30.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyVsyncInterval = 2;
+            log.Line("vita.diag", "30 fps lock (vsync interval 2)");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/vsync_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyForceNoVsync = 1;

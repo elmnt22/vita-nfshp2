@@ -1010,9 +1010,13 @@ void GlWriteProgramCache(std::uint32_t key,GLuint program)
 }
 }
 
+extern "C" std::uint32_t vsync_interval; // vitaGL: vblanks waited per swap (0 = no vsync)
 int ecstasyInstancing=1; // Vita instance_off.txt: per-draw uniform matrices
 int ecstasyAffineUV=1; // Vita affine_off.txt restores the projective divide everywhere
 int ecstasyForceNoVsync=0;
+// Vita fps30.txt: present every 2nd vblank (30 fps lock); 0 leaves vitaGL's
+// interval alone. Applied by the GL thread before each swap.
+int ecstasyVsyncInterval=0;
 // Vita gpu_diag.txt N (diagnostic only, wrong images on purpose): 1 = every
 // texture a 1x1 white, 2 = lit vertex shading replaced by the plain path,
 // 3 = every draw scissored to 8x8 pixels, 4 = particle (half-eligible) draws skipped.
@@ -2485,6 +2489,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     const auto submitDone=Clock::now();
     const auto vsync=vsyncRequest.exchange(-1);
     if(vsync>=0)vglWaitVblankStart(vsync ? GL_TRUE:GL_FALSE);
+    if(ecstasyVsyncInterval>0 && vsync_interval!=0u)vsync_interval=static_cast<std::uint32_t>(ecstasyVsyncInterval);
     glRenderStage=4;
     const auto swapStarted=Clock::now();
     const auto timelineSubmitEnd=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
