@@ -586,7 +586,18 @@ int main(int, char**)
             log.Line("vita.audio", "disabled by noaudio.txt");
         }
         SceIoStat probe{};
-        collisionWitnessClockMicros = []{ return (uint32_t)sceKernelGetProcessTimeLow(); };
+        collisionWitnessClockMicros = []{ extern uint32_t diagClockReads; ++diagClockReads; return (uint32_t)sceKernelGetProcessTimeLow(); };
+        {
+            // Diagnostic: cost of one timer read (the split timers are hot).
+            const uint64_t started = sceKernelGetProcessTimeWide();
+            volatile uint32_t sink = 0;
+            for (int index = 0; index < 1000; ++index) sink += collisionWitnessClockMicros();
+            (void)sink;
+            char detail[64];
+            std::snprintf(detail, sizeof(detail), "ns_per_read=%llu",
+                (unsigned long long)(sceKernelGetProcessTimeWide() - started));
+            log.Line("vita.clock", detail);
+        }
         // Exact speculative collision separation on cores 1/2 (exact commit
         // check per query). Serial verification of the first separations is
         // off by default: it ran at the first race start and is a test, not
@@ -963,6 +974,25 @@ int main(int, char**)
             extern int collisionSeparatePipelined;
             collisionSeparatePipelined = 0;
             log.Line("vita.diag", "pipelined separation off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/memo_gate_off.txt").c_str(), &probe) >= 0) {
+            extern int collisionMemoGate;
+            collisionMemoGate = 0;
+            log.Line("vita.diag", "walk memo gate off");
+        }
+        if (FILE* file = std::fopen((std::string(kDataDirectory) + "/pred_min.txt").c_str(), "r")) {
+            extern int collisionPredictMinimum;
+            int value = 0;
+            if (std::fscanf(file, "%d", &value) == 1 && value >= 2) collisionPredictMinimum = value;
+            std::fclose(file);
+            char detail[48];
+            std::snprintf(detail, sizeof(detail), "prediction minimum %d", collisionPredictMinimum);
+            log.Line("vita.diag", detail);
+        }
+        {
+            extern int diagFineTimers;
+            diagFineTimers = sceIoGetstat((std::string(kDataDirectory) + "/diag_fine.txt").c_str(), &probe) >= 0;
+            log.Line("vita.diag", diagFineTimers ? "fine timers on" : "fine timers off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/queue_pred_off.txt").c_str(), &probe) >= 0) {
             collisionQueuePrediction = 0;

@@ -708,6 +708,9 @@ void runQueuePrediction(void* context,unsigned index)
 // a pair queued twice in one pass (both participants affected) uses the
 // prediction once and queries serially the second time.
 int collisionRequeuePrediction=1; // Vita requeue_pred_off.txt: 0
+// Smallest batch handed to the helpers; smaller batches query serially
+// (identical results either way). Vita pred_min.txt holds the number.
+int collisionPredictMinimum=2;
 void collisionPairPredictQueue(CollisionSystem* system,CollisionParticipant* const* affected,size_t affectedCount)
 {
     queuePredictionActive=false;
@@ -728,7 +731,7 @@ void collisionPairPredictQueue(CollisionSystem* system,CollisionParticipant* con
         entry.pair=pair;queueFrames(pair,entry.frames);
         queuePredictions.push_back(entry);
     }
-    if (queuePredictions.size()<2) return;
+    if (queuePredictions.size()<(size_t)collisionPredictMinimum) return;
     if (queuePredictionSlot.size()<system->pairCapacity) queuePredictionSlot.assign(system->pairCapacity,-1);
     const bool pipeline=collisionContactPipelineEnabled();
     if (pipeline) collisionContactPlanReserve(queuePredictions.size());

@@ -695,6 +695,16 @@ int collisionWitnessWarmProbe=0;
 // Diagnostic per feature-kind split (Vita sets the clock when probing).
 uint32_t (*collisionWitnessProbeClock)()=nullptr;
 uint32_t (*collisionWitnessClockMicros)()=nullptr;
+// Diagnostic: timer reads (approximate, racy), counted by the Vita clocks.
+uint32_t diagClockReads=0;
+// Fine diagnostic timers (per query, task, substep, model). Each read is a
+// kernel call on Vita (~0.4 us, ~1900 per frame with all on), so Vita
+// turns them off unless diag_fine.txt exists; coarse per-frame timers stay.
+int diagFineTimers=1;
+uint32_t diagFineClock()
+{
+    return diagFineTimers && collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+}
 uint64_t collisionWitnessKindMicros[9]={},collisionWitnessKindSteps[9]={};
 uint64_t collisionWitnessWarmMismatches=0;
 static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float firstFrame[16],
@@ -736,6 +746,8 @@ int32_t collisionWitnessQuery(CollisionWitness* witness, const float firstFrame[
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState)
 {
+    if(!diagFineTimers && !collisionWitnessWarmProbe)
+        return collisionWitnessQueryBody(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState);
     if(collisionWitnessClockMicros && !collisionWitnessWarmProbe) {
         // Cheap host microsecond clock (Vita): ~0.4 us vs ~0.75 us per read.
         const uint32_t started=collisionWitnessClockMicros();
@@ -787,6 +799,15 @@ int collisionWitnessMemo=[] {
 // Bumped per collision system init: entries from an earlier world (whose
 // geometry addresses may be reused) never match.
 std::atomic<uint32_t> collisionWitnessMemoEpoch{1};
+int collisionMemoGate=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    const char* value=getenv("HP2_MEMO_GATE");return value ? atoi(value):1;
+#else
+    return 1;
+#endif
+}();
+// Diagnostic: gate flips (open<->closed) across threads.
+std::atomic<uint64_t> collisionMemoGateFlips{0};
 std::atomic<uint64_t> collisionMemoLookups{0},collisionMemoHits{0},collisionMemoStores{0},
     collisionMemoVerified{0},collisionMemoMismatches{0},collisionMemoSavedSteps{0};
 namespace {
@@ -979,6 +1000,20 @@ inline bool walkWitnessEqual(const CollisionWitness& x,const CollisionWitness& y
         memcmp(&x.distance,&y.distance,4)==0;
 }
 }
+// Adaptive memo gate (per thread, no shared writes): sampled lookups decide
+// whether the other 7 of 8 queries use the memo. Opens at >=10% sampled
+// hits (measured while closed, from the sparser sample-only table), closes
+// below 6% (measured while open); 64 samples per decision.
+struct MemoGate {uint32_t tick=0,samples=0,hits=0;bool open=true;};
+thread_local MemoGate memoGate;
+inline void memoGateRecord(bool hit)
+{
+    ++memoGate.samples;memoGate.hits+=hit ? 1u:0u;
+    if (memoGate.samples<64u) return;
+    const bool open=memoGate.open ? memoGate.hits*100u>=6u*64u : memoGate.hits*100u>=10u*64u;
+    if (open!=memoGate.open) collisionMemoGateFlips.fetch_add(1,std::memory_order_relaxed);
+    memoGate.open=open;memoGate.samples=memoGate.hits=0;
+}
 // Serial verify references walk without the memo (independent reference).
 void collisionWitnessMemoBypass(bool bypass) {walkMemoBypass=bypass;}
 // Advanced once per world frame (pose replacement age).
@@ -991,6 +1026,20 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
     if (!collisionWitnessMemo || walkMemoBypass || !walkMemoEnsure())
         return collisionWitnessQueryWalk(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState,
             counters,predictPending,stop,nullptr,nullptr,nullptr);
+    // Adaptive gate (exact either way: a memo hit replays a bit-identical
+    // walk). Outside frozen phases (race start) hits are 1.5-4.5% and every
+    // lookup/store misses cache in the 16 MB table, so each thread only uses
+    // the memo while its sampled hit rate (1 in 8 open, 1 in 16 closed) is
+    // high. Vita memo_gate_off.txt / PC HP2_MEMO_GATE=0 disables the gate.
+    bool gateSample=true;
+    if (collisionMemoGate) {
+        // 1 in 8 while open, 1 in 16 while closed (less sampled overhead).
+        gateSample=(++memoGate.tick&(memoGate.open ? 7u:15u))==0u;
+        if (!memoGate.open && !gateSample) {
+            return collisionWitnessQueryWalk(witness,firstFrame,firstPosition,secondFrame,secondPosition,randomState,
+                counters,predictPending,stop,nullptr,nullptr,nullptr);
+        }
+    }
     const bool detached=counters!=nullptr;
     const uint32_t epoch=collisionWitnessMemoEpoch.load(std::memory_order_relaxed);
     PoseBlock pose;
@@ -1002,12 +1051,14 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
     collisionMemoLookups.fetch_add(1,std::memory_order_relaxed);
     WalkKey key;
     uint32_t hash=0;
-    WalkValue entry;
+    WalkValue entry{};
     if (havePose) {
         walkKeyFill(key,witness,poseSlot,poseSequence);
         hash=hashWords(&key,sizeof(key),poseHash);
     }
-    if (havePose && walkMemoFind(key,hash,epoch,&entry)) {
+    const bool memoHit=havePose && walkMemoFind(key,hash,epoch,&entry);
+    if (collisionMemoGate && gateSample) memoGateRecord(memoHit);
+    if (memoHit) {
         collisionMemoHits.fetch_add(1,std::memory_order_relaxed);
         collisionMemoSavedSteps.fetch_add((uint64_t)entry.steps,std::memory_order_relaxed);
 #if !defined(__vita__) && !defined(__SWITCH__)

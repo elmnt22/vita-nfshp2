@@ -103,8 +103,11 @@ std::atomic<uint64_t> collisionPickupMicros{0},collisionPickupCount{0},collision
 // Per helper slot: batches joined, tasks run.
 std::atomic<uint64_t> collisionSlotBatches[2]{},collisionSlotTasks[2]{};
 static thread_local int collisionHelperSlot=-1;
+extern int diagFineTimers;
+uint32_t diagFineClock();
 uint32_t collisionSplitNow()
 {
+    if(!diagFineTimers)return 0u;
     if(collisionWitnessClockMicros)return collisionWitnessClockMicros();
     return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -174,7 +177,7 @@ public:
     void Run(unsigned count,void (*function)(void*,unsigned),void* context)
     {
         if(helpers_==0 || count<2) {for(unsigned index=0;index<count;++index)function(context,index);return;}
-        const uint32_t runStart=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+        const uint32_t runStart=diagFineClock();
         generation_=(generation_+1)&0xffffu;
         state_.store((generation_<<16)|0xffffu);
         function_=function;context_=context;count_=count;floatingPoint_=ReadFloatingPoint();
@@ -193,13 +196,13 @@ public:
 #endif
         unsigned index;
         while(Claim(generation_,index)) {
-            const uint32_t taskStart=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+            const uint32_t taskStart=diagFineClock();
             function(context,index);++collisionPoolMainTasks;
-            if(collisionWitnessClockMicros)collisionPoolMainMicros+=collisionWitnessClockMicros()-taskStart;
+            if(diagFineTimers)collisionPoolMainMicros+=diagFineClock()-taskStart;
         }
-        const uint32_t waitStart=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+        const uint32_t waitStart=diagFineClock();
         while(inFlight_.load()!=0) {}
-        if(collisionWitnessClockMicros) {
+        if(diagFineTimers && collisionWitnessClockMicros) {
             const uint32_t now=collisionWitnessClockMicros();
             collisionPoolRunMicros+=now-runStart;collisionPoolWaitMicros+=now-waitStart;
         }
@@ -314,10 +317,10 @@ private:
                     const uint32_t saved=ReadFloatingPoint();
                     WriteFloatingPoint(floatingPoint_);
                     do {
-                        const uint32_t taskStart=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
+                        const uint32_t taskStart=diagFineClock();
                         function_(context_,index);collisionPoolHelperTasks.fetch_add(1,std::memory_order_relaxed);
                         if(collisionHelperSlot>=0) collisionSlotTasks[collisionHelperSlot].fetch_add(1,std::memory_order_relaxed);
-                        if(collisionWitnessClockMicros)collisionPoolHelperMicros.fetch_add(collisionWitnessClockMicros()-taskStart,std::memory_order_relaxed);
+                        if(diagFineTimers)collisionPoolHelperMicros.fetch_add(diagFineClock()-taskStart,std::memory_order_relaxed);
                     } while(Claim(generation,index));
                     WriteFloatingPoint(saved);
                     inFlight_.fetch_sub(1);

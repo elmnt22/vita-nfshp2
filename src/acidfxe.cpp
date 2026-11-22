@@ -1507,6 +1507,7 @@ int ecstasyParallelParticles=[] {
 }();
 } // namespace hp2
 extern uint32_t (*collisionWitnessClockMicros)();
+extern int diagFineTimers;
 namespace hp2 {
 // Diagnostic split per view kind (main, mirror): walk, build, attach us; calls, particles.
 static std::array<std::array<std::uint64_t,8>,2> particleSplitMicros{}; // +drawn, center, size/distance
@@ -1519,7 +1520,7 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
 {
     WorldParticleRenderSummary result;
     if(!system.firstGroup)return result;
-    const bool splitTimed=collisionWitnessClockMicros!=nullptr;
+    const bool splitTimed=diagFineTimers && collisionWitnessClockMicros!=nullptr;
     auto& split=particleSplitMicros[view.id==3 ? 1:0];
     std::uint32_t splitMark=splitTimed ? collisionWitnessClockMicros():0u;
     const auto splitAt=[&](std::size_t part) {

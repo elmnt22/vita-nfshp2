@@ -222,6 +222,7 @@ void appendCarMarker(CarAppearance& appearance,uint32_t key,const std::array<flo
 }
 
 extern uint32_t (*collisionWitnessClockMicros)();
+extern int diagFineTimers;
 
 namespace hp2 {
 struct CarEffectsResources::Storage {
@@ -1230,7 +1231,7 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     struct CensusScope {bool on;CensusScope(bool v):on(v){if(on)hp2::ecstasyCarCensusActive=true;}~CensusScope(){if(on)hp2::ecstasyCarCensusActive=false;}} censusScope{census};
     if(census)++hp2::ecstasyCarCensus[0];
 #endif
-    const bool timed=collisionWitnessClockMicros!=nullptr;
+    const bool timed=diagFineTimers && collisionWitnessClockMicros!=nullptr;
     std::uint32_t carMark=timed ? collisionWitnessClockMicros():0u;
     const auto carAt=[&](std::size_t part) {
         if(!timed)return;

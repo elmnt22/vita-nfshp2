@@ -94,6 +94,7 @@ EditorMarkerTexture* findModelTexture(EditorMarkerResources* root,uint32_t key)
 }
 
 extern uint32_t (*collisionWitnessClockMicros)();
+extern int diagFineTimers;
 // Diagnostic: serial skinned strips copy/skin/capture us, [3] strips, [4] vertices.
 #include "bware/inc/bMathNeon.hpp"
 extern int bMatrixNeonEnabled;
@@ -4210,7 +4211,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
             }
         }
     } clear{visible,sources,chunks,textures};
-    const bool splitTimed=ecstasyCarScope && collisionWitnessClockMicros;
+    const bool splitTimed=diagFineTimers && ecstasyCarScope && collisionWitnessClockMicros;
     std::uint32_t splitMark=splitTimed ? collisionWitnessClockMicros():0u;
     const auto splitAt=[&](std::size_t part) {
         if(!splitTimed)return;
@@ -4366,7 +4367,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
         if (flags&2u)draw&=~0x80u;
         if (!lightContext)draw&=~0x1c0u; // released10DDE0 null-context mask
         const auto* submitted=&strip;
-        const bool skinTimed=boneMatrices && !parallel && collisionWitnessClockMicros;
+        const bool skinTimed=diagFineTimers && boneMatrices && !parallel && collisionWitnessClockMicros;
         std::uint32_t skinMark=skinTimed ? collisionWitnessClockMicros():0u;
         const auto skinAt=[&](std::size_t part) {
             if(!skinTimed)return;

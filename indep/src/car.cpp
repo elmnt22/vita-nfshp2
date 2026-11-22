@@ -1739,8 +1739,10 @@ static int32_t tickDifference(int32_t now, int32_t start)
 std::array<double,8> carMoverModeMs{};
 std::array<std::uint32_t,8> carMoverModeCalls{};
 static float carMovementCaptureBody(CarMovement* movement, float elapsed);
+extern int diagFineTimers;
 float carMovementCapture(CarMovement* movement, float elapsed)
 {
+    if (!diagFineTimers) return carMovementCaptureBody(movement,elapsed);
     const auto started=std::chrono::steady_clock::now();
     const auto mode=static_cast<std::size_t>(movement->mode)&7u;
     const float advanced=carMovementCaptureBody(movement,elapsed);

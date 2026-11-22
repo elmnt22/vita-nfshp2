@@ -17,15 +17,24 @@
 // component prepare (suspension/terrain), collect forces, orthonormalize,
 // publish, terrain queries; [7] substeps.
 extern uint32_t (*collisionWitnessClockMicros)();
-std::array<std::uint64_t,8> mellowSplitMicros{};
+std::array<std::uint64_t,16> mellowSplitMicros{};
+// Split timers follow diagFineTimers (Vita: off unless diag_fine.txt).
+extern int diagFineTimers;
 namespace {
 struct MellowMark {
     std::uint32_t at;
-    MellowMark():at(collisionWitnessClockMicros ? collisionWitnessClockMicros():0u) {}
+    MellowMark():at(diagFineTimers && collisionWitnessClockMicros ? collisionWitnessClockMicros():0u) {}
     void Lap(std::size_t part) {
-        if(!collisionWitnessClockMicros)return;
+        if(!diagFineTimers || !collisionWitnessClockMicros)return;
         const auto now=collisionWitnessClockMicros();mellowSplitMicros[part]+=now-at;at=now;
     }
+};
+// Nested diagnostic scope: [8] suspension prepare step, [9] bottom-out
+// impulses, [10] tyre forces, [11] aerodynamics, [12] airborne stabilizer.
+struct MellowScope {
+    std::size_t part;MellowMark mark;
+    explicit MellowScope(std::size_t index):part(index) {}
+    ~MellowScope() {mark.Lap(part);}
 };
 }
 
@@ -210,8 +219,12 @@ void mellowMoverPrepare(MellowMover* mover)
 {
     MellowMark mark;
     componentSystemPrepare(&mover->components);
-    const float impulse = mellovatorResolveBottomOutImpulses(mover->suspension, mover->state,
-        mover->environment->contact.tuning->contactImpulseScale);
+    float impulse;
+    {
+        MellowScope scope(9);
+        impulse = mellovatorResolveBottomOutImpulses(mover->suspension, mover->state,
+            mover->environment->contact.tuning->contactImpulseScale);
+    }
     if (0.0f < impulse) componentSystemPrepare(&mover->components);
     mark.Lap(2);
     mellowMoverCollectForces(mover);
@@ -220,9 +233,9 @@ void mellowMoverPrepare(MellowMover* mover)
 
 void mellowMoverCollectForces(MellowMover* mover)
 {
-    mellovatorResolveForces(mover->suspension);
-    aerodynamicsApplyForces(mover->aerodynamics, NULL);
-    mellowMoverStabilizeAirborne(mover);
+    {MellowScope scope(10);mellovatorResolveForces(mover->suspension);}
+    {MellowScope scope(11);aerodynamicsApplyForces(mover->aerodynamics, NULL);}
+    {MellowScope scope(12);mellowMoverStabilizeAirborne(mover);}
 }
 
 void mellowMoverSetBoost(MellowMover* mover, float boost)
@@ -540,6 +553,7 @@ void mellovatorComputeSuspensionForces(Mellovator* component, float elapsed)
 
 void mellovatorPrepareStep(Mellovator* component, float elapsed)
 {
+    MellowScope scope(8);
     mellovatorComputeSuspensionForces(component, elapsed);
     for (int wheel = 0; wheel < 4; ++wheel) {
         if (0.949999988079071f < component->brake && fabsf(component->motion.wheelAngularVelocity[wheel]) < 30.0f) {

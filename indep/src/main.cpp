@@ -58,7 +58,8 @@
 // Native terminal lifetime API in the proven weatherman.cpp definition path.
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
-extern std::array<std::uint64_t,8> mellowSplitMicros;
+extern std::array<std::uint64_t,16> mellowSplitMicros;
+extern uint32_t diagClockReads;
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
 extern uint64_t collisionSplitMicros[8],collisionSplitCounts[8];
 extern uint64_t collisionKindStats[20];
@@ -88,6 +89,8 @@ static double soundUpdatePeakMs=0;
 extern std::array<double,8> carMoverModeMs;
 extern std::array<std::uint32_t,8> carMoverModeCalls;
 extern std::atomic<uint64_t> collisionWitnessCacheChecks,collisionWitnessCacheMismatches;
+extern int collisionMemoGate;
+extern std::atomic<uint64_t> collisionMemoGateFlips;
 extern std::atomic<uint64_t> collisionMemoLookups,collisionMemoHits,collisionMemoStores,collisionMemoVerified,collisionMemoMismatches,collisionMemoSavedSteps;
 namespace hp2 { void InitDisplaySystem(const GameResources& files,GameTime& clock); }
 extern std::array<double,4> worldCollisionSubPhaseMs; // indep/src/world.cpp diagnostic
@@ -1414,10 +1417,14 @@ bool ApplicationRuntime::Tick()
                     ms={};calls={};
                     if(auto& t=mellowSplitMicros;t[7]) {
                         const double n=static_cast<double>(t[7]);
-                        std::snprintf(detail,sizeof(detail),"substeps=%llu per_substep_us setup=%.1f integrate=%.1f prepare=%.1f forces=%.1f ortho=%.1f publish=%.1f terrain=%.1f",
-                            static_cast<unsigned long long>(t[7]),t[0]/n,t[1]/n,t[2]/n,t[3]/n,t[4]/n,t[5]/n,t[6]/n);
+                        std::snprintf(detail,sizeof(detail),"substeps=%llu per_substep_us setup=%.1f integrate=%.1f prepare=%.1f forces=%.1f ortho=%.1f publish=%.1f terrain=%.1f "
+                            "susp_step=%.1f bottom_out=%.1f tyres=%.1f aero=%.1f airborne=%.1f",
+                            static_cast<unsigned long long>(t[7]),t[0]/n,t[1]/n,t[2]/n,t[3]/n,t[4]/n,t[5]/n,t[6]/n,
+                            t[8]/n,t[9]/n,t[10]/n,t[11]/n,t[12]/n);
                         s.host.RecordSessionEvent("render.mellow_split",detail);t={};
                     }
+                    std::snprintf(detail,sizeof(detail),"reads=%u",diagClockReads);diagClockReads=0;
+                    s.host.RecordSessionEvent("render.clock_reads",detail);
                 }
                 auto& solve=worldCollisionSolveMs;
                 std::snprintf(detail,sizeof(detail),"find_ms=%.3f queue_ms=%.3f resolve_ms=%.3f tail_ms=%.3f "
@@ -1519,10 +1526,11 @@ bool ApplicationRuntime::Tick()
                     s.host.RecordSessionEvent("render.witness_window",detail);
                     {
                         const uint64_t lookups=::collisionMemoLookups.exchange(0),hits=::collisionMemoHits.exchange(0);
-                        std::snprintf(detail,sizeof(detail),"lookups_per_frame=%.1f hit_frac=%.3f stores_per_frame=%.1f saved_steps_per_frame=%.1f verified=%llu mismatches=%llu",
+                        std::snprintf(detail,sizeof(detail),"lookups_per_frame=%.1f hit_frac=%.3f stores_per_frame=%.1f saved_steps_per_frame=%.1f verified=%llu mismatches=%llu gate=%d gate_flips=%llu",
                             lookups/count,lookups?double(hits)/double(lookups):0.0,::collisionMemoStores.exchange(0)/count,
                             ::collisionMemoSavedSteps.exchange(0)/count,static_cast<unsigned long long>(::collisionMemoVerified.load()),
-                            static_cast<unsigned long long>(::collisionMemoMismatches.load()));
+                            static_cast<unsigned long long>(::collisionMemoMismatches.load()),::collisionMemoGate,
+                            static_cast<unsigned long long>(::collisionMemoGateFlips.exchange(0)));
                         s.host.RecordSessionEvent("render.walk_memo",detail);
                     }
                     if(::collisionWitnessProbeClock) {

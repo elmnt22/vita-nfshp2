@@ -5,8 +5,11 @@
 
 #include <chrono>
 
+#include <cstdint>
+extern uint32_t diagClockReads;
 extern "C" std::chrono::steady_clock::time_point __wrap__ZNSt6chrono3_V212steady_clock3nowEv() noexcept
 {
+    ++diagClockReads;
     return std::chrono::steady_clock::time_point(
         std::chrono::microseconds(static_cast<long long>(sceKernelGetProcessTimeWide())));
 }
