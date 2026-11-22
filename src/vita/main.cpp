@@ -897,6 +897,14 @@ int main(int, char**)
             char text[64]; std::snprintf(text, sizeof(text), "collision pool hot polling %u us", value);
             log.Line("vita.diag", text);
         }
+        if (FILE* file = std::fopen((std::string(kDataDirectory) + "/walk_prefetch.txt").c_str(), "r")) {
+            extern int collisionWalkPrefetch;
+            int value = 0;
+            if (std::fscanf(file, "%d", &value) == 1) collisionWalkPrefetch = value;
+            std::fclose(file);
+            char text[64]; std::snprintf(text, sizeof(text), "collision walk prefetch %d", value);
+            log.Line("vita.diag", text);
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/witness_bench.txt").c_str(), &probe) >= 0) {
             extern int collisionWitnessBench; extern void (*collisionWitnessBenchLog)(const char*);
             static auto* benchLog = &log;

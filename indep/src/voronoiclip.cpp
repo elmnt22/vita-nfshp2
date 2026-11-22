@@ -1,4 +1,5 @@
 #include <atomic>
+#include <vector>
 #include <new>
 #include <mutex>
 #include "indep/inc/VoronoiClip.hpp"
@@ -1068,12 +1069,43 @@ static int32_t collisionWitnessQueryBody(CollisionWitness* witness, const float 
 // The walk itself. With converged set, it reports the converged witness and
 // whether the terminal restart happened (*convergedPending 0/1), or -1 when
 // the walk is not replayable (a restart before termination, exhaustion, stop).
+// Walk prefetch (read-only, exact): 1 = each step prefetches the current
+// features' neighbours (the next step's candidates); 2 = also the two
+// geometries' feature/plane arrays at query start. Vita walk_prefetch.txt "<n>".
+int collisionWalkPrefetch=1;
+#if defined(__GNUC__)
+#define HP2_WALK_PREFETCH(address) __builtin_prefetch(address)
+#else
+#define HP2_WALK_PREFETCH(address) ((void)(address))
+#endif
+static inline void prefetchNeighbours(const CollisionFeature* feature,bool planes2)
+{
+    const CollisionPlane* planes=feature->adjacent;
+    for(int32_t index=0;index<feature->adjacentCount;++index) {
+        const CollisionFeature* next=planes[index].feature;
+        HP2_WALK_PREFETCH(next);
+        // The neighbour itself was prefetched by the previous step (mode 3).
+        if(planes2)HP2_WALK_PREFETCH(next->adjacent);
+    }
+}
+static inline void prefetchGeometry(const CollisionGeometry* geometry)
+{
+    const auto range=[](const void* begin,size_t bytes) {
+        const char* at=static_cast<const char*>(begin);
+        for(size_t offset=0;offset<bytes;offset+=32)HP2_WALK_PREFETCH(at+offset);
+    };
+    range(geometry->vertices,sizeof(CollisionFeature)*(size_t)geometry->vertexCount);
+    range(geometry->edges,sizeof(CollisionFeature)*(size_t)geometry->edgeCount);
+    range(geometry->faces,sizeof(CollisionFeature)*(size_t)geometry->faceCount);
+    range(geometry->planes,sizeof(CollisionPlane)*(size_t)geometry->planeCount);
+}
 static int32_t collisionWitnessQueryWalk(CollisionWitness* witness, const float firstFrame[16],
                               const float firstPosition[4], const float secondFrame[16],
                               const float secondPosition[4], uint32_t* randomState,
                               uint64_t* counters, int32_t* predictPending, const std::atomic<int>* stop,
                               CollisionWitness* converged, int32_t* convergedPending, int32_t* steps)
 {
+    if(collisionWalkPrefetch==2) {prefetchGeometry(witness->firstGeometry);prefetchGeometry(witness->secondGeometry);}
     const bool detached=counters!=nullptr;
     if(!detached) ++collisionWitnessQueries; else ++counters[0];
     // Both relative transforms are pure functions of the two frames and
@@ -1098,6 +1130,10 @@ static int32_t collisionWitnessQueryWalk(CollisionWitness* witness, const float 
     do {
         if (stop && stop->load(std::memory_order_relaxed)) return -1;
         const int firstKind = witness->first->kind, secondKind = witness->second->kind;
+        if (collisionWalkPrefetch) {
+            const bool planes2=collisionWalkPrefetch==3;
+            prefetchNeighbours(witness->first,planes2);prefetchNeighbours(witness->second,planes2);
+        }
         const uint32_t stepStarted = !detached && collisionWitnessProbeClock ? collisionWitnessProbeClock() : 0;
         if (firstKind == 0 && secondKind == 0) {
             witness->side = 1;
@@ -1375,6 +1411,35 @@ void runWitnessBench()
     std::snprintf(text,sizeof(text),"witness_bench cases=%u first_pass_us_per_query=%.2f warm_us_per_query=%.2f iterations_per_query=%.2f",
         witnessBenchCount,double(passMicros[0])/witnessBenchCount,double(warm)/9.0/witnessBenchCount,double(counters[1])/(10.0*witnessBenchCount));
     collisionWitnessBenchLog(text);
+    {
+        // Cold-cache walk A/B: evict (stream a 4 MB buffer) before each
+        // query, time only the query, for prefetch modes 0/1/2; compare
+        // every result against mode 0.
+        static std::vector<uint32_t> evict(1u<<20,1u);
+        volatile uint32_t sink=0;
+        const int savedPrefetch=collisionWalkPrefetch;
+        uint64_t modeMicros[4]={};uint32_t mismatches=0;
+        for(int pass=0;pass<1;++pass)for(unsigned index=0;index<witnessBenchCount;++index) {
+            const auto& entry=witnessBenchCases[index];
+            CollisionWitness reference{};uint32_t referenceState=0;int32_t referenceResult=0;
+            for(int mode=0;mode<4;++mode) {
+                uint32_t sum=0;for(size_t at=0;at<evict.size();at+=8)sum+=evict[at];sink=sink+sum;
+                collisionWalkPrefetch=mode;
+                CollisionWitness witness=entry.witness;uint32_t state=entry.state;
+                const uint32_t start=collisionWitnessClockMicros();
+                const int32_t result=collisionWitnessQueryWalk(&witness,entry.firstFrame,entry.firstPosition,entry.secondFrame,entry.secondPosition,
+                    &state,counters,nullptr,nullptr,nullptr,nullptr,nullptr);
+                modeMicros[mode]+=collisionWitnessClockMicros()-start;
+                if(mode==0) {reference=witness;referenceState=state;referenceResult=result;}
+                else if(result!=referenceResult || state!=referenceState || memcmp(&witness,&reference,sizeof(witness))!=0)++mismatches;
+            }
+        }
+        collisionWalkPrefetch=savedPrefetch;
+        const double n=1.0*witnessBenchCount;
+        std::snprintf(text,sizeof(text),"witness_bench_cold none_us=%.2f neighbours_us=%.2f geometry_us=%.2f neighbour_planes_us=%.2f mismatches=%u",
+            double(modeMicros[0])/n,double(modeMicros[1])/n,double(modeMicros[2])/n,double(modeMicros[3])/n,mismatches);
+        collisionWitnessBenchLog(text);
+    }
     // Per kind (warm, probe clock overhead included and reported).
     const uint32_t clockStart=collisionWitnessClockMicros();
     for(int i=0;i<1000;++i)(void)collisionWitnessClockMicros();
