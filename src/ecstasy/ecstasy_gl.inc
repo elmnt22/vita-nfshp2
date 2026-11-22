@@ -466,6 +466,7 @@ struct EcstasyVulkanDevice::Storage {
     GLuint sunQueryProgram{},sunQueryBuffer{};GLint sunQueryDepth{-1};bool sunQueryFailed{};
     std::vector<float> sunQueryVertices;
     void IssueSunQueries(const GlFramePacket& packet);
+    bool EnsureSunQueryProgram();
     void PublishSunQueries();
     void BeginHalfParticles(std::uint32_t width,std::uint32_t height);
     void EndHalfParticles(std::uint32_t width,std::uint32_t height);
@@ -2379,6 +2380,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             at+=std::max<std::uint32_t>(instanceRun[head],1u);
         }
         if(!offscreen && !halfPrewarmed && ecstasyHalfResParticles && !halfCompositeFailed) {
+            // (Also compiles the sun occlusion query program, see EnsureSunQueryProgram.)
             // One-time setup of the half and quarter passes (programs, quad,
             // targets) costs ~340 ms on first use; pay it on the first
             // displayed frame instead of mid-race. Each target is cleared to
@@ -2394,6 +2396,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 EndHalfParticles(packet.width,packet.height);
             }
             halfDivisor=savedDivisor;resetState();
+            (void)EnsureSunQueryProgram();
             if(collisionWitnessClockMicros) {
                 char detail[64];std::snprintf(detail,sizeof(detail),"ms=%.2f",(collisionWitnessClockMicros()-prewarmStarted)*0.001);
                 platform::RecordSessionEvent("renderer.vitagl.halfres_prewarm",detail);
@@ -2657,9 +2660,12 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
 }
 
 int ecstasySunQuery=1;
-void EcstasyVulkanDevice::Storage::IssueSunQueries(const GlFramePacket& packet)
+// The query program is compiled by vitaGL's runtime GLSL compiler (~340 ms on
+// Vita). First use is the race-start camera cut (sun first in view), so the
+// boot prewarm calls this on the first displayed frame instead.
+bool EcstasyVulkanDevice::Storage::EnsureSunQueryProgram()
 {
-    if(!ecstasySunQuery || sunQueryFailed)return;
+    if(!ecstasySunQuery || sunQueryFailed)return false;
     if(!sunQueryProgram) {
         static const char* vertexSource=
             "attribute vec2 a_pos;\nuniform float u_z;\n"
@@ -2684,12 +2690,18 @@ void EcstasyVulkanDevice::Storage::IssueSunQueries(const GlFramePacket& packet)
         if(!linked) {
             sunQueryFailed=true;
             platform::RecordSessionEvent("renderer.vitagl.sun_query","program failed; sun stays unoccluded");
-            return;
+            return false;
         }
         sunQueryDepth=glGetUniformLocation(sunQueryProgram,"u_z");
         glGenBuffers(1,&sunQueryBuffer);
         for(auto& slot:sunQueries)glGenQueries(1,&slot.query);
     }
+    return true;
+}
+
+void EcstasyVulkanDevice::Storage::IssueSunQueries(const GlFramePacket& packet)
+{
+    if(!EnsureSunQueryProgram())return;
     const auto width=static_cast<std::int32_t>(packet.width),height=static_cast<std::int32_t>(packet.height);
     glBindFramebuffer(GL_FRAMEBUFFER,0);
     glViewport(0,0,width,height);glDepthRangef(0.0f,1.0f);
