@@ -522,6 +522,7 @@ void carReplayAnimationResourceEndFixup(CarReplayAnimationRegistry* registry);
 #include <cstdint>
 #include <memory>
 #include <array>
+#include <atomic>
 #include <vector>
 #include <optional>
 #include "indep/inc/eLight.hpp"
@@ -638,6 +639,24 @@ private:
 
 } // namespace hp2
 
+// Advances whenever a revisioned strip (nonzero vertex revision) is
+// restamped, reset, assigned over or destroyed, and when mip K values are
+// recomputed: an unchanged epoch proves every revisioned strip that was
+// exactly validated earlier still holds those bytes at that address.
+extern std::atomic<std::uint64_t> ecstasyNativeStripEpoch;
+struct NativeStripRevision {
+    std::uint64_t value{};
+    NativeStripRevision() noexcept=default;
+    NativeStripRevision(const NativeStripRevision& other) noexcept:value(other.value) {}
+    NativeStripRevision& operator=(const NativeStripRevision& other) noexcept {Set(other.value);return *this;}
+    NativeStripRevision& operator=(std::uint64_t next) noexcept {Set(next);return *this;}
+    ~NativeStripRevision() {if(value)Bump();}
+    operator std::uint64_t() const noexcept {return value;}
+    static void Bump() noexcept {ecstasyNativeStripEpoch.fetch_add(1,std::memory_order_acq_rel);}
+private:
+    void Set(std::uint64_t next) noexcept {if(value)Bump();value=next;}
+};
+
 // Source strip packets become native CPU vertices. Refresh and rendering
 // share the live ST array and mip attributes; no console/GPU object exists.
 struct EditorMarkerSolidGeometry {
@@ -678,7 +697,7 @@ struct EditorMarkerSolidGeometry {
         // Source revision the posed copy's non-XYZ channels were copied at:
         // a pooled copy of an unchanged source re-skins XYZ only.
         std::uint64_t nativePoseSourceRevision{};
-        std::uint64_t nativeVertexRevision{}; // Zero retains exact byte validation.
+        NativeStripRevision nativeVertexRevision{}; // Zero retains exact byte validation.
         void PrepareNativeTopology();
         void StampNativeVertexRevision() noexcept;
     };

@@ -373,6 +373,7 @@ struct EcstasyVulkanDevice::Storage {
     std::map<std::int32_t,VkDrawTarget> renderedTargets;
     VkResidentGeometryCache residentGeometry;
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> modelRunRecords;
+    std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> sceneryRunRecords;
     std::vector<const EditorMarkerSolidGeometry::Strip*> modelRunScratchStrips;
     std::vector<VkResidentGeometryEntry*> modelRunScratchEntries,modelRunScratchReplay;
     VkResidentIndexCache residentIndexCache;
@@ -1468,6 +1469,20 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
                 nativeGatherFrameMs[0],nativeGatherFrameMs[1],nativeGatherFrameMs[2],nativeGatherFrameMs[3],
                 nativeGatherResidentEvents[0],nativeGatherResidentEvents[1],nativeGatherResidentEvents[2]);
             platform::RecordSessionEvent("renderer.vitagl.slow_prepare",detail);
+        }
+        if(ecstasyGatherDetail && prepareMs>ecstasyGatherDetailMs) {
+            const auto& ms=nativeGatherDetail.gatherCategoryMilliseconds;const auto& n=nativeGatherDetail.gatherCategoryCommands;
+            char detail[512];
+            std::snprintf(detail,sizeof(detail),
+                "prepare_ms=%.2f gather_ms=%.2f validate_ms=%.2f loop_ms=%.2f vjobs_ms=%.2f indices_ms=%.2f "
+                "scenery=%.2f/%llu solid=%.2f/%llu particle=%.2f/%llu world=%.2f/%llu ui=%.2f/%llu other=%.2f/%llu "
+                "commands=%" HP2_ZU " batches=%" HP2_ZU " resident_new=%u resident_capture=%u texture_uploads=%u",
+                prepareMs,statistics.gatherMilliseconds,nativeGatherFrameMs[0],nativeGatherFrameMs[1],nativeGatherFrameMs[2],nativeGatherFrameMs[3],
+                ms[0],(unsigned long long)n[0],ms[1],(unsigned long long)n[1],ms[2],(unsigned long long)n[2],
+                ms[3],(unsigned long long)n[3],ms[4],(unsigned long long)n[4],ms[5],(unsigned long long)n[5],
+                commandCount,packet.batches.size(),nativeGatherResidentEvents[0],nativeGatherResidentEvents[2],
+                static_cast<unsigned>(statistics.textureUploads));
+            platform::RecordSessionEvent("renderer.vitagl.gather_detail",detail);
         }
     }
     glRenderStage=0;

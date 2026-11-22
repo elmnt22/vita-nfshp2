@@ -123,7 +123,9 @@ double ecstasyQuarterResMinScreens=10.0; // 0 disables (Vita quarterres_off.txt)
 // zero (skipped) at End; particles are not drawn into the rear-view mirror.
 float ecstasyParticleNearFadeStart=0.15f,ecstasyParticleNearFadeEnd=0.45f; // Vita particle_fade.txt "S E" (0 0 = off)
 int ecstasyParticleMirrorCull=1; // Vita particle_mirror_on.txt = 0
-int nativeMirrorTargetId=-1; // target sampled by the last rear-view composite (gather thread)
+int nativeMirrorTargetId=-1;
+// Diagnostic: per-frame gather category split, logged for gathers over the threshold (Vita gather_detail.txt "<ms>").
+int ecstasyGatherDetail=0;double ecstasyGatherDetailMs=26.0; // target sampled by the last rear-view composite (gather thread)
 // Display depth load/store around the half-res split (see drawPass); Vita half_depth_policy.txt N.
 int ecstasyHalfDepthPolicy=2;
 int ecstasyHalfCompositeBounds=1; // composite only the particle rectangle (Vita half_bounds_off.txt = 0)
@@ -457,6 +459,8 @@ void EditorMarkerSolidGeometry::Strip::PrepareNativeTopology()
     nativeTopologyMask=drawDisableMask;
 }
 
+std::atomic<std::uint64_t> ecstasyNativeStripEpoch{1};
+
 void EditorMarkerSolidGeometry::Strip::StampNativeVertexRevision() noexcept
 {
     static std::atomic<std::uint64_t> nextRevision{};
@@ -492,6 +496,7 @@ void EditorMarkerSolidGeometry::FixStripSTs()
 
 void EditorMarkerSolidGeometry::CalcAutoK()
 {
+    NativeStripRevision::Bump(); // autoK feeds resident geometry keys
     for (auto& strip:strips) {
         const auto& texture=stripTexture(*this,strip);
         const float projection=static_cast<float>(strip.autoKProjection)*0.00006103515625f;
@@ -5127,6 +5132,26 @@ void EcstasyFrame::MarkSceneHistoryBoundary(const EcstasyRenderTarget& display,b
 // beyond the texture lookup.
 int ecstasyTexturePrewarm=1;
 int ecstasyModelRunCache=1;
+// Scenery run replay (Vita scenery_replay.txt, PC HP2_SCENERY_REPLAY=1, 2 =
+// verify): a cached scenery run's continuation strips replay the exact
+// resident entries recorded for that strip sequence (see Gather).
+int ecstasySceneryRunReplay=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_SCENERY_REPLAY"))return std::atoi(value);
+#endif
+    return 1;
+}();
+// Epoch-checked replay of recorded run entries (Vita replay_fast_off.txt = 0, PC HP2_REPLAY_FAST).
+int ecstasyReplayFast=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_REPLAY_FAST"))return std::atoi(value);
+#endif
+    return 1;
+}();
+// Replayed strips: epoch fast path, exact revalidation.
+std::array<std::uint64_t,2> nativeReplayFastCounters{};
+// hits, misses, replayed strips, recorded runs
+std::array<std::uint64_t,4> nativeSceneryReplayCounters{};
 namespace {
 struct TexturePrewarmState {
     std::mutex mutex;
@@ -7544,6 +7569,13 @@ struct VkModelRunRecord {
     std::vector<const EditorMarkerSolidGeometry::Strip*> strips;
     std::vector<std::uint32_t> slots;
     std::vector<std::uint64_t> tokens;
+    // Fast replay (unchanged strip epoch): slot serials and the entry
+    // counts copied at record time, so no entry is read.
+    std::vector<std::uint64_t> serials;
+    std::vector<std::uint16_t> indexCounts;
+    std::vector<std::uint8_t> counts;
+    std::uint64_t epoch{};
+    bool revisioned{}; // every strip had a nonzero vertex revision
     bool wireframe{},solidKind{};float lod1{};
 };
 // Last Gather's resident geometry events: new entries, evictions, source
@@ -7820,8 +7852,11 @@ struct VkResidentGeometrySource {
 // are unchanged; the small counts retain their source packet bounds.
 struct VkResidentGeometryEntry {
     const EditorMarkerSolidGeometry::Strip* source{};
-    std::uint64_t sourceGeneration{},lastGather{},indexToken{};
-    std::list<std::uint32_t>::iterator recency;
+    std::uint64_t sourceGeneration{},indexToken{};
+    // Changes on every (re)assignment of this slot's source/key/generation;
+    // VkResidentGeometryCache mirrors it, the recency gather and the
+    // prepared flag in compact per-slot arrays (ReacquireFast).
+    std::uint64_t serial{};
     VkResidentGeometryKey key;
     std::uint32_t slot{};
     std::uint16_t indexCount{};
@@ -7852,10 +7887,11 @@ public:
     void Configure(std::size_t count) {
         Require(entries_.empty(),"Resident geometry capacity cannot change while entries exist");
         entries_.resize(count);free_.reserve(count);
+        slotSerial_.assign(count,0);slotLastGather_.assign(count,0);slotPrepared_.assign(count,0);
         for(std::size_t at=count;at;--at)free_.push_back(static_cast<std::uint32_t>(at-1));
     }
     std::size_t Capacity() const noexcept {return entries_.size();}
-    std::size_t Size() const noexcept {return recency_.size();}
+    std::size_t Size() const noexcept {return live_;}
     const std::vector<std::uint32_t>& Active() const noexcept {return active_;}
     VkResidentGeometryEntry& Entry(std::uint32_t slot) {return *entries_.at(slot);}
     void Begin(std::uint64_t gather) {
@@ -7864,16 +7900,23 @@ public:
         // presenter still waits before any GPU allocation, upload or reuse.
         // No current-Gather slot is recycled, even under cache pressure.
         if(gather<=gather_) {
-            sources_.clear();recency_.clear();free_.clear();frameSources_.fill(nullptr);
+            sources_.clear();free_.clear();frameSources_.fill(nullptr);live_=0;
             for(std::size_t at=entries_.size();at;--at) {
                 entries_[at-1].reset();free_.push_back(static_cast<std::uint32_t>(at-1));
+                slotSerial_[at-1]=0;slotLastGather_[at-1]=0;slotPrepared_[at-1]=0;
             }
         }
         gather_=gather;active_.clear();frameEntries_.fill(nullptr);
         validations_.clear();validationsReady_=false;
-        while(!recency_.empty() && gather_-entries_[recency_.front()]->lastGather>600)
-            Evict(recency_.front());
+        frameEpoch_=ecstasyNativeStripEpoch.load(std::memory_order_acquire);
+        // Age eviction: a bounded sweep (64 slots per Gather) replaces the
+        // recency list; which idle entry is recycled never changes output.
+        for(std::size_t step=0;step<64 && !entries_.empty();++step) {
+            const auto slot=static_cast<std::uint32_t>(ageHand_);ageHand_=(ageHand_+1)%entries_.size();
+            if(entries_[slot] && gather_-slotLastGather_[slot]>600)Evict(slot);
+        }
     }
+    std::uint64_t FrameEpoch() const noexcept {return frameEpoch_;}
     std::size_t PreparedValidationCount() const noexcept {return validationsReady_ ? validations_.size():0;}
     void ValidateSources(const std::vector<EcstasyDrawCommand>& commands,
         const std::vector<const EditorMarkerSolidGeometry::Strip*>& runStrips,unsigned workers) {
@@ -7926,7 +7969,7 @@ public:
         }
         auto* resolved=FindSource(token);
         if(!resolved) {
-            if(free_.empty() && (!recency_.empty() && entries_[recency_.front()]->lastGather==gather_)) {
+            if(free_.empty() && active_.size()>=live_) {
                 return nullptr;
             }
             resolved=sources_.emplace(token,std::unique_ptr<VkResidentGeometrySource>(new VkResidentGeometrySource)).first->second.get();
@@ -7937,7 +7980,7 @@ public:
         for(std::size_t at=0;at<source.variantCount;++at) {
             auto& entry=*entries_[source.variants[at]];
             if(entry.sourceGeneration==source.generation && entry.key==key) {
-                job.count=entry.count;prepare=!entry.prepared && entry.lastGather!=gather_;
+                job.count=entry.count;prepare=!entry.prepared && slotLastGather_[entry.slot]!=gather_;
                 if(prepare)job.sourceOrder=(job.lineTopology ? source.lineTopology:source.topology).sourceOrder;
                 Touch(entry);cached=&entry;return &entry;
             }
@@ -7952,8 +7995,8 @@ public:
         if(source.variantCount==source.variants.size()) {
             auto victim=source.variants[0];
             for(std::size_t at=1;at<source.variantCount;++at)
-                if(entries_[source.variants[at]]->lastGather<entries_[victim]->lastGather)victim=source.variants[at];
-            if(entries_[victim]->lastGather==gather_) {return nullptr;}
+                if(slotLastGather_[source.variants[at]]<slotLastGather_[victim])victim=source.variants[at];
+            if(slotLastGather_[victim]==gather_) {return nullptr;}
             // A changed strip metadata value needs new vertex bytes, not
             // a new allocation or a new identity for identical GPU indices.
             // This variant has not been referenced by this Gather. Its CPU
@@ -7974,15 +8017,17 @@ public:
 
             }
             entry.prepared=false;entry.uploaded=false;++nativeGatherResidentEvents[3];
+            entry.serial=++nextSerial_;slotSerial_[victim]=entry.serial;slotPrepared_[victim]=0;
             Touch(entry);prepare=true;cached=&entry;return &entry;
         }
         ++nativeGatherResidentEvents[0];
         if(free_.empty()) {
-            if(recency_.empty() || entries_[recency_.front()]->lastGather==gather_) {
+            const auto victim=PickVictim();
+            if(victim==NoSlot) {
                 if(!source.variantCount)ForgetSource(token);
                 return nullptr;
             }
-            Evict(recency_.front());++nativeGatherResidentEvents[1];
+            Evict(victim);++nativeGatherResidentEvents[1];
         }
         const auto slot=free_.back();free_.pop_back();
         auto owned=std::unique_ptr<VkResidentGeometryEntry>(new VkResidentGeometryEntry);auto& entry=*owned;
@@ -7992,7 +8037,7 @@ public:
         entry.indexToken=++nextIndexToken_;entry.indexCount=static_cast<std::uint16_t>(topology.indexCount);
         const auto first=slot*static_cast<std::uint32_t>(VerticesPerSlot);
         for(std::size_t index=0;index<entry.indexCount;++index)entry.indices[index]=first+topology.indices[index];
-        recency_.push_back(slot);entry.recency=std::prev(recency_.end());
+        entry.serial=++nextSerial_;slotSerial_[slot]=entry.serial;slotPrepared_[slot]=0;slotLastGather_[slot]=0;++live_;
         entries_[slot]=std::move(owned);source.variants[source.variantCount++]=slot;
         Touch(entry);prepare=true;cached=&entry;return &entry;
     }
@@ -8016,6 +8061,17 @@ public:
         frameEntries_[hash&(frameEntries_.size()-1)]=entry;
         Touch(*entry);return entry;
     }
+    // Replay of an entry recorded in an earlier Gather whose strip epoch is
+    // unchanged (no revisioned strip was restamped, reset, assigned over or
+    // destroyed since; the caller checks): the same slot assignment (serial)
+    // still holds exactly the bytes Acquire validated then, prepared. Only
+    // compact per-slot arrays are read; the entry itself is not touched.
+    VkResidentGeometryEntry* ReacquireFast(std::uint32_t slot,std::uint64_t serial) {
+        if(slot>=slotSerial_.size() || !serial || slotSerial_[slot]!=serial || !slotPrepared_[slot])return nullptr;
+        auto& last=slotLastGather_[slot];
+        if(last!=gather_) {active_.push_back(slot);last=gather_;}
+        return entries_[slot].get();
+    }
     // Hint only: warms the lookup slot and source of a strip about to be
     // acquired (scenery runs walk strips whose sources are cold).
     void Prefetch(const EditorMarkerSolidGeometry::Strip* token) const noexcept {
@@ -8030,6 +8086,10 @@ public:
     }
     void CompletePreparation() {
         for(const auto slot:active_) {
+            // Prepared entries stay prepared until reassigned (which clears
+            // the compact flag): no read of the large entry is needed.
+            if(slotPrepared_[slot])continue;
+            slotPrepared_[slot]=1;
             auto& entry=*entries_[slot];
             if(!entry.prepared) {
                 // Smallest prepared vertex alpha (alpha-test elision input).
@@ -8062,7 +8122,7 @@ private:
     }
     void ValidateSource(VkResidentGeometrySource& source,const EditorMarkerSolidGeometry::Strip* token) {
         if(source.validatedGather==gather_)return;
-        const auto revision=token->nativeVertexRevision;
+        const std::uint64_t revision=token->nativeVertexRevision;
         const bool compared=validationsReady_ && source.queuedValidationGather==gather_;
         const bool sameRevision=revision!=0 && revision==source.vertexRevision;
         const bool matches=sameRevision || (compared ? validations_[source.queuedValidation].matches:
@@ -8081,13 +8141,13 @@ private:
     void Touch(VkResidentGeometryEntry& entry) {
         // Entries touched this Gather already follow every older entry and
         // are never evicted during it; repeated touches need no list splice.
-        if(entry.lastGather==gather_)return;
-        active_.push_back(entry.slot);entry.lastGather=gather_;
-        recency_.splice(recency_.end(),recency_,entry.recency);
+        auto& last=slotLastGather_[entry.slot];
+        if(last==gather_)return;
+        active_.push_back(entry.slot);last=gather_;
     }
     void Evict(std::uint32_t slot) {
         auto& entry=*entries_[slot];
-        Require(entry.lastGather!=gather_,"Cannot recycle resident geometry referenced by the current frame");
+        Require(slotLastGather_[slot]!=gather_,"Cannot recycle resident geometry referenced by the current frame");
         auto found=sources_.find(entry.source);
         if(found!=sources_.end()) {
             auto& source=*found->second;
@@ -8096,7 +8156,8 @@ private:
             }
             if(!source.variantCount && source.validatedGather!=gather_)ForgetSource(entry.source);
         }
-        recency_.erase(entry.recency);entries_[slot].reset();free_.push_back(slot);
+        entries_[slot].reset();free_.push_back(slot);--live_;
+        slotSerial_[slot]=0;slotPrepared_[slot]=0;
     }
     std::uint64_t gather_{};
     std::uint64_t nextIndexToken_{};
@@ -8109,7 +8170,24 @@ private:
     std::vector<Validation> validations_;
     bool validationsReady_{};
     std::vector<std::uint32_t> free_,active_;
-    std::list<std::uint32_t> recency_;
+    // Compact per-slot mirrors (serial 0 = empty slot).
+    std::vector<std::uint64_t> slotSerial_,slotLastGather_;
+    std::vector<std::uint8_t> slotPrepared_;
+    std::size_t live_{},clockHand_{},ageHand_{};
+    std::uint64_t nextSerial_{},frameEpoch_{};
+    static constexpr std::uint32_t NoSlot=0xffffffffu;
+    // Recycling choice (cache full): CLOCK sweep for an entry idle for at
+    // least one full Gather, else any entry not referenced by this Gather.
+    std::uint32_t PickVictim() {
+        if(entries_.empty() || active_.size()>=live_)return NoSlot;
+        for(int pass=0;pass<2;++pass)for(std::size_t step=0;step<entries_.size();++step) {
+            const auto slot=static_cast<std::uint32_t>(clockHand_);clockHand_=(clockHand_+1)%entries_.size();
+            if(!entries_[slot])continue;
+            const auto last=slotLastGather_[slot];
+            if(last!=gather_ && (pass || last+1<gather_))return slot;
+        }
+        return NoSlot;
+    }
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,std::unique_ptr<VkResidentGeometrySource>> sources_;
 };
 
@@ -8758,6 +8836,7 @@ struct EcstasyVulkanDevice::Storage {
     VkNativeBuffer residentIndices,residentIndexStaging;
     VkResidentGeometryCache residentGeometry;
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> modelRunRecords;
+    std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> sceneryRunRecords;
     std::vector<const EditorMarkerSolidGeometry::Strip*> modelRunScratchStrips;
     std::vector<VkResidentGeometryEntry*> modelRunScratchEntries,modelRunScratchReplay;
     VkResidentIndexCache residentIndexCache;

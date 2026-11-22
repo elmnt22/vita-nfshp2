@@ -54,7 +54,7 @@ extern int collisionWitnessWarmProbe;
 extern int collisionQueuePrediction;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
-namespace hp2 { extern float ecstasyParticleNearFadeStart, ecstasyParticleNearFadeEnd; extern int ecstasyParticleMirrorCull; extern int ecstasySceneryReuseCensus; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasyGpuDiag; extern int ecstasyModelRunCache; extern int ecstasyTexturePrewarm; extern int ecstasyScissorElide; extern int ecstasySunQuery; extern int ecstasyInstancing; extern int ecstasyGxmDirect; extern int ecstasyGxmParity; extern int ecstasyGxmFlushDraws; extern int ecstasyGxmProf; extern int ecstasyDeferOrder; extern int ecstasyGpuTimeline; extern int ecstasyGpuHeavyShots; extern int ecstasyResidentVram; extern int ecstasyAlphaElide; extern int ecstasyAlphaCheck; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
+namespace hp2 { extern int ecstasyReplayFast; extern int ecstasySceneryRunReplay; extern int ecstasyGatherDetail; extern double ecstasyGatherDetailMs; extern float ecstasyParticleNearFadeStart, ecstasyParticleNearFadeEnd; extern int ecstasyParticleMirrorCull; extern int ecstasySceneryReuseCensus; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasyGpuDiag; extern int ecstasyModelRunCache; extern int ecstasyTexturePrewarm; extern int ecstasyScissorElide; extern int ecstasySunQuery; extern int ecstasyInstancing; extern int ecstasyGxmDirect; extern int ecstasyGxmParity; extern int ecstasyGxmFlushDraws; extern int ecstasyGxmProf; extern int ecstasyDeferOrder; extern int ecstasyGpuTimeline; extern int ecstasyGpuHeavyShots; extern int ecstasyResidentVram; extern int ecstasyAlphaElide; extern int ecstasyAlphaCheck; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -677,6 +677,12 @@ int main(int, char**)
             log.Line("vita.diag", ("particle near fade " + std::to_string(hp2::ecstasyParticleNearFadeStart) + " " +
                 std::to_string(hp2::ecstasyParticleNearFadeEnd)).c_str());
         }
+        if (FILE* detail = std::fopen((std::string(kDataDirectory) + "/gather_detail.txt").c_str(), "r")) {
+            double value = 26.0;
+            if (std::fscanf(detail, "%lf", &value) == 1) hp2::ecstasyGatherDetailMs = value;
+            std::fclose(detail);hp2::ecstasyGatherDetail = 1;
+            log.Line("vita.diag", ("gather detail over ms " + std::to_string(hp2::ecstasyGatherDetailMs)).c_str());
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/particle_mirror_on.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyParticleMirrorCull = 0;
             log.Line("vita.diag", "particles drawn in mirror");
@@ -800,6 +806,14 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_reuse.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryReuseCensus = 1;
             log.Line("vita.diag", "scenery reuse census on");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/replay_fast_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyReplayFast = 0;
+            log.Line("vita.diag", "epoch replay fast path off");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_replay_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasySceneryRunReplay = 0;
+            log.Line("vita.diag", "scenery run replay off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/sun_query_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySunQuery = 0;

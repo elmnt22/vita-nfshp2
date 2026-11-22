@@ -27,6 +27,8 @@ std::array<double,6> nativeSolidKinds{};
 std::array<double,12> nativeBatchBreaks{};
 // Last Gather's phases (ms): validation, command loop, vertex jobs, indices.
 std::array<double,4> nativeGatherFrameMs{};
+// ecstasyGatherDetail: this Gather's category split (only the two category arrays are used).
+EcstasyVulkanRenderProfile nativeGatherDetail;
 
 void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     std::vector<VkVertex>& output,std::vector<std::uint32_t>& elementIndices,
@@ -326,7 +328,11 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // A later strip of the run whose template was just built. Only the
     // per-strip resident geometry, its validation and its index span differ;
     // the packet cache, raster, depth range and shading resolve identically.
+    // Resident entry of the last fast-path continuation (null otherwise):
+    // the scenery run replay records it.
+    VkResidentGeometryEntry* sceneryLastResident=nullptr;
     const auto continueSceneryRun=[&](const EcstasyDrawCommand& draw,const EditorMarkerSolidGeometry::Strip* runStrip) {
+        sceneryLastResident=nullptr;
         if(!ecstasySceneryRunFastPath || sceneryTemplateDraw!=&draw)return prepareSceneryPacket(draw,runStrip);
 #if !defined(__vita__) && !defined(__SWITCH__)
         // PC HP2_VERIFY_RUN_FAST=1: take the full path and compare its batch
@@ -365,6 +371,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         bool prepare=false;
         auto* resident=residentGeometry.Acquire(job,prepare);
         if(!resident) {sceneryTemplateDraw=nullptr;return false;}
+        sceneryLastResident=resident;
         Require(residentFrameIndices+resident->indexCount<=UINT32_MAX,
             "Native resident frame index count exceeds32-bit draw range");
         Require(gatheredResidentIndexSpans.size()<UINT32_MAX,"Native resident index span count exceeds32-bit range");
@@ -398,7 +405,8 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     };
     const bool sampleCategories=platform::nativeDiagnosticsEnabled && nextSubmission%32u==0;
     if(sampleCategories)++profile.gatherCategorySamples;
-    NativeGatherCategoryTimer categoryTimer(sampleCategories ? &profile:nullptr);
+    if(ecstasyGatherDetail) {nativeGatherDetail.gatherCategoryCommands={};nativeGatherDetail.gatherCategoryMilliseconds={};}
+    NativeGatherCategoryTimer categoryTimer(sampleCategories ? &profile:ecstasyGatherDetail ? &nativeGatherDetail:nullptr);
     if(sampleCategories)nativeGatherStepMilliseconds[6]+=1.0;
     Clock::time_point stepMark{};
     // Time one draw in eight (scaled at report) so clock reads do not
@@ -541,33 +549,78 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     const auto runLod1=[](const EcstasyDrawCommand& draw,const SolidTemplate& slot,const EditorMarkerSolidGeometry::Strip& strip) {
         return draw.kind==EcstasyDrawKind::SolidStrip ? static_cast<std::uint8_t>(strip.autoK)*0.0625f:slot.lod1;
     };
+    // Per-strip replay data shared by model and scenery run records.
+    const auto fillRunRecord=[&](VkModelRunRecord& record,const std::vector<const EditorMarkerSolidGeometry::Strip*>& strips,
+        const std::vector<VkResidentGeometryEntry*>& entries) {
+        const auto n=entries.size();
+        record.strips=strips;record.slots.resize(n);record.tokens.resize(n);record.serials.resize(n);
+        record.indexCounts.resize(n);record.counts.resize(n);record.revisioned=true;
+        for(std::size_t at=0;at<n;++at) {
+            const auto& entry=*entries[at];
+            record.slots[at]=entry.slot;record.tokens[at]=entry.indexToken;record.serials[at]=entry.serial;
+            record.indexCounts[at]=entry.indexCount;record.counts[at]=entry.count;
+            if(!strips[at]->nativeVertexRevision)record.revisioned=false;
+        }
+        record.epoch=residentGeometry.FrameEpoch();
+    };
+    // A recorded run's entries. Fast: the strip epoch is unchanged since the
+    // record was last exactly validated and every strip is revisioned, so
+    // each slot assignment (serial) still holds exactly those prepared bytes
+    // and only compact slot state is read. Otherwise Reacquire validates
+    // each source exactly and refreshes the record. Sums index counts.
+    const auto resolveRunRecord=[&](VkModelRunRecord& record,const EditorMarkerSolidGeometry::Strip* const* strips,
+        std::size_t count,const auto& keyFor,std::size_t& indices)->bool {
+        auto& entries=modelRunScratchReplay;entries.resize(count);indices=0;
+        if(ecstasyReplayFast && record.revisioned && record.epoch==residentGeometry.FrameEpoch() && record.serials.size()==count) {
+            for(std::size_t at=0;at<count;++at) {
+                auto* entry=residentGeometry.ReacquireFast(record.slots[at],record.serials[at]);
+                if(!entry)return false;
+                entries[at]=entry;indices+=record.indexCounts[at];
+            }
+            nativeReplayFastCounters[0]+=count;
+            return true;
+        }
+        bool revisioned=true;
+        for(std::size_t at=0;at<count;++at) {
+            auto* entry=residentGeometry.Reacquire(strips[at],record.slots[at],record.tokens[at],keyFor(at));
+            if(!entry || !entry->indexCount)return false;
+            entries[at]=entry;indices+=entry->indexCount;
+            if(!strips[at]->nativeVertexRevision)revisioned=false;
+        }
+        record.serials.resize(count);record.indexCounts.resize(count);record.counts.resize(count);
+        for(std::size_t at=0;at<count;++at) {
+            record.serials[at]=entries[at]->serial;record.indexCounts[at]=entries[at]->indexCount;record.counts[at]=entries[at]->count;
+        }
+        record.revisioned=revisioned;record.epoch=residentGeometry.FrameEpoch();
+        nativeReplayFastCounters[1]+=count;
+        return true;
+    };
     const auto replayModelRun=[&](const EcstasyDrawCommand& run,const EcstasyDrawCommand& draw,const SolidTemplate& slot)->bool {
         const std::size_t count=run.sceneryRunCount-1u;
         const auto* strips=&runStrips[run.sceneryRunFirst+1u];
         const auto found=modelRunRecords.find(strips[0]);
         const bool solidKind=draw.kind==EcstasyDrawKind::SolidStrip;
         if(found==modelRunRecords.end()) {++nativeModelRunCounters[1];return false;}
-        const auto& record=found->second;
+        auto& record=found->second;
         if(record.strips.size()!=count || std::memcmp(record.strips.data(),strips,count*sizeof(strips[0])) ||
             record.wireframe!=slot.batch.wireframe || record.solidKind!=solidKind ||
             (!solidKind && std::memcmp(&record.lod1,&slot.lod1,sizeof(float)))) {++nativeModelRunCounters[1];return false;}
-        auto& entries=modelRunScratchReplay;entries.resize(count);
-        for(std::size_t at=0;at<count;++at) {
+        std::size_t indices=0;
+        const auto keyFor=[&](std::size_t at) {
             VkResidentGeometryKey key;
             key.words[0]=slot.batch.wireframe ? 1u:0u;
             const float lod1=runLod1(draw,slot,*strips[at]);
             std::memcpy(&key.words[1],&lod1,sizeof(float));key.words[2]=0;
-            auto* entry=residentGeometry.Reacquire(strips[at],record.slots[at],record.tokens[at],key);
-            if(!entry || !entry->indexCount) {++nativeModelRunCounters[1];return false;}
-            entries[at]=entry;
-        }
+            return key;
+        };
+        if(!resolveRunRecord(record,strips,count,keyFor,indices)) {++nativeModelRunCounters[1];return false;}
+        const auto& entries=modelRunScratchReplay;
         VkDrawBatch batch=slot.batch;
         batch.residentGeometry=true;batch.first=static_cast<std::uint32_t>(residentFrameIndices);
         Require(gatheredResidentIndexSpans.size()+count<std::numeric_limits<std::uint32_t>::max(),
             "Native resident index span count exceeds32-bit range");
         batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());
         batch.nativeSpanCount=static_cast<std::uint32_t>(count);
-        std::size_t indices=0;for(const auto* entry:entries)indices+=entry->indexCount;
         Require(residentFrameIndices+indices<=std::numeric_limits<std::uint32_t>::max(),
             "Native resident frame index count exceeds32-bit draw range");
         batch.count=static_cast<std::uint32_t>(indices);
@@ -579,9 +632,9 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             modelRunVerify.expected=batch;modelRunVerify.entries=entries;
             return true;
         }
-        for(auto* entry:entries) {
-            gatheredResidentIndexSpans.push_back(entry);gatheredResidentSpanTokens.push_back(entry->indexToken);
-            residentFrameVertices+=entry->count;
+        for(std::size_t at=0;at<count;++at) {
+            gatheredResidentIndexSpans.push_back(entries[at]);gatheredResidentSpanTokens.push_back(record.tokens[at]);
+            residentFrameVertices+=record.counts[at];
         }
         residentFrameIndices+=indices;
         textureLod[0]=draw.textureQScale;textureLod[1]=runLod1(draw,slot,*strips[count-1]);glyphBoundsIndex=0;
@@ -600,10 +653,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         if(recordStrips.size()+1u!=run.sceneryRunCount)return;
         if(modelRunRecords.size()>=4096)modelRunRecords.clear();
         auto& record=modelRunRecords[recordStrips[0]];
-        record.strips=recordStrips;record.slots.resize(recordEntries.size());record.tokens.resize(recordEntries.size());
-        for(std::size_t at=0;at<recordEntries.size();++at) {
-            record.slots[at]=recordEntries[at]->slot;record.tokens[at]=recordEntries[at]->indexToken;
-        }
+        fillRunRecord(record,recordStrips,recordEntries);
         record.wireframe=slot.batch.wireframe;record.solidKind=draw.kind==EcstasyDrawKind::SolidStrip;record.lod1=slot.lod1;
     };
     const auto checkModelRunVerify=[&] {
@@ -637,6 +687,71 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             platform::RecordSessionEvent("render.model_run_verify",text);
         }
         verify.run=nullptr;
+    };
+    // Scenery run replay (ecstasySceneryRunReplay). After a cached scenery
+    // run's first strip built the template, its remaining strips replay the
+    // resident entries recorded for that exact strip sequence when each is
+    // still the same prepared entry with exactly validated source bytes
+    // (Reacquire). Every per-strip continuation would append the template
+    // with that entry's index range: equal state and adjacent index/span
+    // ranges, so the ordinary path merges them into one batch, the same one
+    // the replay appends. Any changed entry takes the per-strip path.
+    const EcstasyDrawCommand* sceneryRecording=nullptr;
+    std::uint32_t sceneryRecordFrom=0;
+    std::vector<const EditorMarkerSolidGeometry::Strip*> sceneryRecordStrips;
+    std::vector<VkResidentGeometryEntry*> sceneryRecordEntries;
+    const auto replaySceneryRun=[&](const EcstasyDrawCommand& run,std::uint32_t from)->bool {
+        const std::size_t count=run.sceneryRunCount-from;
+        const auto* strips=&runStrips[run.sceneryRunFirst+from];
+        const bool wireframe=(run.nativeRenderEggState&EcstasyRenderEggWireframe)!=0;
+        const auto found=sceneryRunRecords.find(strips[0]);
+        if(found==sceneryRunRecords.end()) {++nativeSceneryReplayCounters[1];return false;}
+        auto& record=found->second;
+        if(record.strips.size()!=count || std::memcmp(record.strips.data(),strips,count*sizeof(strips[0])) ||
+            record.wireframe!=wireframe) {++nativeSceneryReplayCounters[1];return false;}
+        std::size_t indices=0;
+        const auto keyFor=[&](std::size_t at) {
+            VkResidentGeometryKey key;
+            key.words[0]=wireframe ? 1u:0u;
+            const float lod1=static_cast<std::uint8_t>(strips[at]->autoK)*0.0625f;
+            std::memcpy(&key.words[1],&lod1,sizeof(float));key.words[2]=0;
+            return key;
+        };
+        if(!resolveRunRecord(record,strips,count,keyFor,indices)) {++nativeSceneryReplayCounters[1];return false;}
+        const auto& entries=modelRunScratchReplay;
+        VkDrawBatch batch=sceneryTemplate;
+        Require(gatheredResidentIndexSpans.size()+count<std::numeric_limits<std::uint32_t>::max(),
+            "Native resident index span count exceeds32-bit range");
+        Require(residentFrameIndices+indices<=std::numeric_limits<std::uint32_t>::max(),
+            "Native resident frame index count exceeds32-bit draw range");
+        batch.first=static_cast<std::uint32_t>(residentFrameIndices);
+        batch.nativeSpanFirst=static_cast<std::uint32_t>(gatheredResidentIndexSpans.size());
+        batch.nativeSpanCount=static_cast<std::uint32_t>(count);batch.count=static_cast<std::uint32_t>(indices);
+        if(ecstasySceneryRunReplay==2) {
+            // Verify: the per-strip path runs and must produce this.
+            modelRunVerify.run=&run;modelRunVerify.spansBefore=gatheredResidentIndexSpans.size();
+            modelRunVerify.batchesBefore=batches.size();modelRunVerify.hadBack=!batches.empty();
+            if(modelRunVerify.hadBack)modelRunVerify.backBefore=batches.back();
+            modelRunVerify.expected=batch;modelRunVerify.entries=entries;
+            return false;
+        }
+        for(std::size_t at=0;at<count;++at) {
+            gatheredResidentIndexSpans.push_back(entries[at]);gatheredResidentSpanTokens.push_back(record.tokens[at]);
+            residentFrameVertices+=record.counts[at];
+        }
+        residentFrameIndices+=indices;
+        statistics.sceneryPacketHits+=count;
+        appendBatch(batch);sceneryTemplateBatches=batches.size();
+        ++nativeSceneryReplayCounters[0];nativeSceneryReplayCounters[2]+=count;
+        return true;
+    };
+    const auto finishSceneryRecord=[&](const EcstasyDrawCommand& run) {
+        if(sceneryRecordFrom+sceneryRecordStrips.size()!=run.sceneryRunCount || sceneryRecordStrips.empty())return;
+        if(sceneryRunRecords.size()>=8192)sceneryRunRecords.clear();
+        auto& record=sceneryRunRecords[sceneryRecordStrips[0]];
+        fillRunRecord(record,sceneryRecordStrips,sceneryRecordEntries);
+        record.wireframe=(run.nativeRenderEggState&EcstasyRenderEggWireframe)!=0;
+        ++nativeSceneryReplayCounters[3];
     };
     // Scenery reuse census (HP2_SCENERY_REUSE=1 / scenery_reuse.txt): counts
     // only, no output change. Per view (0 main, 1 other targets): cached
@@ -735,12 +850,33 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             if(ecstasySceneryReuseCensus && runResume==0)
                 censusSequence(run,&runStrips[run.sceneryRunFirst],run.sceneryRunCount);
             while(runResume<run.sceneryRunCount) {
+                const auto stripAt=runResume;
                 const auto* strip=runStrips[run.sceneryRunFirst+runResume++];
                 if(runResume<run.sceneryRunCount)residentGeometry.Prefetch(runStrips[run.sceneryRunFirst+runResume]);
 #if defined(HP2_ENABLE_VITAGL) && !defined(HP2_VITA_ENVIRONMENT_MAP)
                 if(run.target && run.target->id==14)continue;
 #endif
-                if(continueSceneryRun(run,strip))continue;
+                const bool fastPath=ecstasySceneryRunFastPath && sceneryTemplateDraw==&run;
+                if(continueSceneryRun(run,strip)) {
+                    if(ecstasySceneryRunReplay) {
+                        if(sceneryRecording==&run) {
+                            // Only fast-path continuations with indices are recordable.
+                            if(fastPath && sceneryLastResident && sceneryLastResident->indexCount) {
+                                sceneryRecordStrips.push_back(strip);sceneryRecordEntries.push_back(sceneryLastResident);
+                                if(runResume==run.sceneryRunCount) {finishSceneryRecord(run);sceneryRecording=nullptr;}
+                            } else sceneryRecording=nullptr;
+                        }
+                        if(stripAt==0 && runResume<run.sceneryRunCount && sceneryTemplateDraw==&run && ecstasySceneryRunFastPath) {
+                            if(replaySceneryRun(run,runResume)) {runResume=run.sceneryRunCount;break;}
+                            sceneryRecording=&run;sceneryRecordFrom=runResume;
+                            sceneryRecordStrips.clear();sceneryRecordEntries.clear();
+                        }
+                    }
+                    if(modelRunVerify.run==&run && runResume==run.sceneryRunCount)checkModelRunVerify();
+                    continue;
+                }
+                if(sceneryRecording==&run)sceneryRecording=nullptr;
+                if(modelRunVerify.run==&run)modelRunVerify.run=nullptr;
                 ++statistics.sceneryPacketFallbacks;
                 sceneryRunFallbacks.push_back(run);
                 auto& single=sceneryRunFallbacks.back();
@@ -1332,6 +1468,20 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         }
     }
     categoryTimer.Finish();
+    if(ecstasySceneryRunReplay) {
+        static unsigned replayFrames=0;
+        if(++replayFrames==300) {
+            const auto& c=nativeSceneryReplayCounters;
+            const auto epoch=ecstasyNativeStripEpoch.load(std::memory_order_relaxed);
+            static std::uint64_t lastEpoch=epoch;
+            char text[256];std::snprintf(text,sizeof(text),"per_frame hits=%.1f misses=%.1f strips=%.1f records=%.1f table=%u fast_strips=%.1f exact_strips=%.1f epoch_bumps=%llu",
+                c[0]/300.0,c[1]/300.0,c[2]/300.0,c[3]/300.0,static_cast<unsigned>(sceneryRunRecords.size()),
+                nativeReplayFastCounters[0]/300.0,nativeReplayFastCounters[1]/300.0,(unsigned long long)(epoch-lastEpoch));
+            lastEpoch=epoch;nativeReplayFastCounters={};
+            platform::RecordSessionEvent("render.scenery_replay",text);
+            nativeSceneryReplayCounters={};replayFrames=0;
+        }
+    }
     if(ecstasySceneryReuseCensus) {
         auto& census=reuseCensus;
         std::swap(census.lastSeq,census.frameSeq);std::swap(census.lastSeqInst,census.frameSeqInst);
