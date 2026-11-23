@@ -2492,6 +2492,8 @@ std::vector<EcstasyDrawCommand> EcstasyFrame::PendingAlphaValues() const
 }
 #endif
 
+// AttachSolidPolys command prefetch (Vita attach_prefetch_off.txt = 0).
+int ecstasyAttachPrefetch=1;
 void EcstasyFrame::AttachSolidPolys()
 {
     const auto attachStarted=std::chrono::steady_clock::now();
@@ -2558,6 +2560,22 @@ void EcstasyFrame::AttachSolidPolys()
     // store index of each command.
     const auto rangeBegin=pendingAlphaBegin_,rangeEnd=order_.size();
     std::size_t alphaCount=0;
+#if defined(__GNUC__)
+    if(ecstasyAttachPrefetch) {
+        // First touch of each command since capture: request the three lines
+        // this flush reads (ordering texture, targets, depthSorted) ahead.
+        const auto request=[this](std::size_t at) {
+            const auto& ahead=commands_[order_[at]];
+            __builtin_prefetch(&ahead.orderingTexture);__builtin_prefetch(&ahead.sampledTarget);
+            __builtin_prefetch(&ahead.depthSorted);
+        };
+        for(auto index=rangeBegin;index<rangeEnd && index<rangeBegin+6;++index)request(index);
+        for(auto index=rangeBegin;index<rangeEnd;++index) {
+            if(index+6<rangeEnd)request(index+6);
+            alphaCount+=commands_[order_[index]].depthSorted ? 1u:0u;
+        }
+    } else
+#endif
     for(auto index=rangeBegin;index<rangeEnd;++index)alphaCount+=commands_[order_[index]].depthSorted ? 1u:0u;
     if(alphaCount) {
         pendingAlphaIndices_.reserve(pendingAlphaIndices_.size()+alphaCount);
