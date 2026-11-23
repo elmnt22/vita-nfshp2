@@ -68,6 +68,22 @@ void wheelTrailUpdate(WheelTrailStore* store, WheelTrail** attachment, const voi
                       const float ownerCenter[3], uint32_t flags, const float position[4],
                       const float width[3], int32_t materialIndex, float intensity);
 void wheelEffectsTransformDirection(float output[3], const float matrix[16], const float input[3]);
+#ifdef __cplusplus
+}
+#include <vector>
+/* Parallel participant capture: while a thread has a recorder, trail
+ * detach/update calls are captured by value and replayed later on the
+ * owner thread, in the original car order. */
+struct WheelTrailDeferredOp {
+    WheelTrailStore* store; WheelTrail** attachment; const void* owner;
+    float center[3]; uint32_t flags; float position[4]; float width[3];
+    int32_t materialIndex; float intensity; bool detach; bool hasCenter;
+};
+struct WheelTrailRecorder { std::vector<WheelTrailDeferredOp> ops; };
+extern thread_local WheelTrailRecorder* wheelTrailRecorder;
+void wheelTrailReplay(WheelTrailRecorder& recorder);
+extern "C" {
+#endif
 void wheelEffectsUpdate(const Wheel* wheel, const WheelContactContext* contact,
                         WheelTrailStore* store, WheelTrail** attachment, const void* owner,
                         const float ownerCenter[3], uint32_t flags, uint8_t disabledWheelMask);

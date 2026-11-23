@@ -1,3 +1,4 @@
+#include <atomic>
 #include "indep/inc/Collision.hpp"
 #include <array>
 #include "indep/inc/Contact.hpp"
@@ -45,6 +46,158 @@ std::array<double,4> worldCollisionSolveMs{};
 #include <cassert>
 #include <cstdio>
 
+#include "indep/inc/Skids.hpp"
+#include "indep/inc/PhysicsCar.hpp"
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <exception>
+void collisionHelperRun(unsigned count,void (*function)(void*,unsigned),void* context);
+unsigned collisionHelperPoolSize();
+extern std::atomic<uint32_t> terrainTopologyAcquireFailures;
+extern int diagFineTimers;
+extern std::array<std::uint32_t,8> carMoverModeCalls;
+
+// Parallel participant capture: 0 serial, 1 parallel (default), 2 parallel +
+// per-step car state hash, 3 serial + hash (PC: participants_hash.txt; Vita
+// parallel_capture_off.txt = 0). AI mover steps (mellow/traffic/cop/belt/
+// delivery/null) touch only their own car, so they run on the collision
+// helpers first; everything order-dependent (skid trail ops, the capture
+// tail, collision notify, bounds, physics cars, breakables) then runs
+// serially in the original order. Rockets read other cars, so any active
+// munition keeps the whole loop serial.
+int worldParallelCapture=[] {
+#if !defined(__vita__)
+    if (const char* text=std::getenv("HP2_PARALLEL_CAPTURE")) return std::atoi(text);
+#endif
+    return 1;
+}();
+uint64_t worldParallelCaptureStats[4]{}; // parallel loops, parallel movers, serial loops, terrain-full disables
+
+namespace {
+struct ParallelCaptureTask {
+    CollisionParticipant* participant;
+    float rewind;
+    float advanced;
+    int tail;
+    PhysicsStepContext step;
+    WheelTrailRecorder recorder;
+    std::exception_ptr failure;
+};
+struct ParallelCaptureBatch {
+    std::vector<ParallelCaptureTask> tasks;
+    std::vector<int> slot; // participant index -> task index or -1
+};
+// Bit pattern no substep writes (a quiet NaN payload): marks "not written".
+constexpr uint32_t parallelStepUnwritten=0x7fc0beefu;
+
+void runParallelCapture(void* context,unsigned index)
+{
+    auto& task=static_cast<ParallelCaptureBatch*>(context)->tasks[index];
+    CarMovement* movement=task.participant->movement;
+    PhysicsCarEnvironment* environment=movement->bindings.environment;
+    PhysicsStepContext* shared=environment->stepContext;
+    memcpy(&task.step.lastSubstepElapsed,&parallelStepUnwritten,sizeof(float));
+    environment->stepContext=&task.step;
+    wheelTrailRecorder=&task.recorder;
+    try {
+        collisionShapeCapture(task.participant->shape,task.rewind);
+        task.advanced=carMovementCaptureMove(movement,task.rewind,&task.tail);
+    } catch (...) {task.failure=std::current_exception();}
+    wheelTrailRecorder=nullptr;
+    environment->stepContext=shared;
+}
+
+void hashParticipants(const CollisionSystem* system,CollisionParticipant* const* active,size_t count,float elapsed)
+{
+#if !defined(__vita__)
+    static FILE* file=std::fopen("participants_hash.txt","w");
+    static uint64_t step=0;
+    if (!file) return;
+    uint64_t hash=1469598103934665603ull;
+    auto mix=[](uint64_t& value,const void* data,size_t size) {
+        const auto* bytes=static_cast<const unsigned char*>(data);
+        for (size_t i=0;i<size;++i) {value^=bytes[i];value*=1099511628211ull;}
+    };
+    size_t cars=0;
+    char perCar[COLLISION_ID_COUNT*12+1];size_t used=0;perCar[0]=0;
+    for (size_t index=0;index<count;++index) {
+        const CollisionParticipant* participant=active[index];
+        if (!participant->movement) continue;
+        ++cars;
+        uint64_t own=1469598103934665603ull;
+        const VehicleState* state=participant->movement->bindings.state;
+        mix(own,state->position,4*sizeof(float));
+        mix(own,state->wheelSideOffset,offsetof(VehicleState,engineSoundRpm)-offsetof(VehicleState,wheelSideOffset));
+        mix(own,participant->shape->previousFrame,sizeof(participant->shape->previousFrame));
+        mix(own,&participant->movement->mode,sizeof(participant->movement->mode));
+        mix(hash,&own,sizeof(own));
+        if (used+16<sizeof(perCar)) used+=static_cast<size_t>(std::snprintf(perCar+used,sizeof(perCar)-used," %d:%04x",
+            static_cast<int>(participant->movement->mode),static_cast<unsigned>(own&0xffffu)));
+    }
+    mix(hash,&system->result,sizeof(system->result));
+    std::fprintf(file,"%llu %zu %016llx e=%a%s\n",static_cast<unsigned long long>(step++),cars,
+        static_cast<unsigned long long>(hash),static_cast<double>(elapsed),perCar);
+    if ((step&63u)==0) std::fflush(file);
+#else
+    (void)system;(void)active;(void)count;(void)elapsed;
+#endif
+}
+
+// Returns false (nothing run) when fewer than two movers qualify.
+bool advanceParticipantsParallel(CollisionSystem* system,CollisionParticipant* const* active,
+    size_t count,float elapsed)
+{
+    static ParallelCaptureBatch batch;
+    batch.tasks.clear();batch.slot.assign(count,-1);
+    for (size_t index=0;index<count;++index) {
+        CollisionParticipant* participant=active[index];
+        if (!participant->movement || !participant->shape->active) continue;
+        if (!carMovementCaptureParallelEligible(participant->movement)) continue;
+        batch.slot[index]=static_cast<int>(batch.tasks.size());
+        batch.tasks.emplace_back();
+        auto& task=batch.tasks.back();
+        task.participant=participant;task.rewind=elapsed;task.advanced=0.0f;task.tail=0;
+    }
+    if (batch.tasks.size()<2) return false;
+    const uint32_t failuresBefore=terrainTopologyAcquireFailures.load(std::memory_order_relaxed);
+    collisionHelperRun(static_cast<unsigned>(batch.tasks.size()),runParallelCapture,&batch);
+    if (terrainTopologyAcquireFailures.load(std::memory_order_relaxed)!=failuresBefore) {
+        // A full terrain cache: from here on, serial order decides who misses.
+        worldParallelCapture=0;++worldParallelCaptureStats[3];
+    }
+    ++worldParallelCaptureStats[0];worldParallelCaptureStats[1]+=batch.tasks.size();
+    for (size_t index=0;index<count;++index) {
+        CollisionParticipant* participant=active[index];
+        const int slot=batch.slot[index];
+        if (slot<0) {
+            collisionParticipantCapture(system,participant,elapsed);
+        } else {
+            auto& task=batch.tasks[static_cast<size_t>(slot)];
+            if (task.failure) std::rethrow_exception(task.failure);
+            CarMovement* movement=participant->movement;
+            uint32_t bits;memcpy(&bits,&task.step.lastSubstepElapsed,sizeof(bits));
+            if (bits!=parallelStepUnwritten)
+                movement->bindings.environment->stepContext->lastSubstepElapsed=task.step.lastSubstepElapsed;
+            wheelTrailReplay(task.recorder);
+            float captured=task.advanced;
+            if (task.tail) {
+                captured=carMovementCaptureTail(movement,task.advanced);
+                if (diagFineTimers) ++carMoverModeCalls[static_cast<size_t>(movement->mode)&7u];
+            }
+            if (captured<elapsed) {
+                collisionParticipantNotify(participant,NULL);
+                carMovementCapture(movement,elapsed-captured);
+            }
+            collisionShapeUpdateBounds(system->space,participant->shape);
+            if (movement->result!=CAR_MOVEMENT_OK) system->result=COLLISION_SYSTEM_OWNER_FAILURE;
+        }
+        if (system->result!=COLLISION_SYSTEM_OK) return true;
+    }
+    return true;
+}
+}
+
 // Original World::DoTimestepMove PAL14D898..14D940. Freeze the active
 // traversal before running any concrete mover/lifetime owner.
 CollisionSystemResult worldServicesAdvanceParticipants(CollisionSystem* system, float elapsed)
@@ -59,10 +212,21 @@ CollisionSystemResult worldServicesAdvanceParticipants(CollisionSystem* system, 
             return system->result=COLLISION_SYSTEM_MISSING_OWNER;
         active[count++]=participant;
     }
+    const bool hash=worldParallelCapture==2 || worldParallelCapture==3;
+    bool parallel=(worldParallelCapture==1 || worldParallelCapture==2) && collisionHelperPoolSize()>0;
+    if (parallel)
+        for (size_t index=0;index<count;++index)
+            if (active[index]->breakable && active[index]->breakable->munition) {parallel=false;break;}
+    if (parallel && advanceParticipantsParallel(system,active,count,elapsed)) {
+        if (hash) hashParticipants(system,active,count,elapsed);
+        return system->result;
+    }
+    ++worldParallelCaptureStats[2];
     for (size_t index=0;index<count;++index) {
         collisionParticipantCapture(system,active[index],elapsed);
         if (system->result!=COLLISION_SYSTEM_OK) return system->result;
     }
+    if (hash) hashParticipants(system,active,count,elapsed);
     return COLLISION_SYSTEM_OK;
 }
 

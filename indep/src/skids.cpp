@@ -75,8 +75,14 @@ void wheelTrailDelete(WheelTrailStore* store, WheelTrail* trail)
     memset(trail,0,sizeof(*trail));
 }
 
+thread_local WheelTrailRecorder* wheelTrailRecorder=nullptr;
 void wheelTrailDetach(WheelTrailStore* store, WheelTrail** attachment)
 {
+    if (wheelTrailRecorder) {
+        WheelTrailDeferredOp op{};op.store=store;op.attachment=attachment;op.detach=true;
+        wheelTrailRecorder->ops.push_back(op);
+        return;
+    }
     if (*attachment != NULL) wheelTrailStop(store, *attachment);
 }
 
@@ -161,6 +167,15 @@ void wheelTrailUpdate(WheelTrailStore* store, WheelTrail** attachment, const voi
     const float ownerCenter[3], uint32_t flags, const float position[4],
     const float width[3], int32_t materialIndex, float intensity)
 {
+    if (wheelTrailRecorder) {
+        WheelTrailDeferredOp op{};op.store=store;op.attachment=attachment;op.owner=owner;
+        op.hasCenter=ownerCenter!=NULL;
+        if (ownerCenter) memcpy(op.center,ownerCenter,sizeof(op.center));
+        op.flags=flags;memcpy(op.position,position,sizeof(op.position));memcpy(op.width,width,sizeof(op.width));
+        op.materialIndex=materialIndex;op.intensity=intensity;
+        wheelTrailRecorder->ops.push_back(op);
+        return;
+    }
     if (owner != NULL) {
         float difference[3];
         for (int axis = 0; axis < 3; ++axis) difference[axis] = ownerCenter[axis] - position[axis];
@@ -299,4 +314,14 @@ void wheelTrailPrepareRender(hp2::SkidResources& skids,WheelTrail* first,
         // Extra displayed frames must not change which live trail is evicted.
         if(advanceState)trail->creation=++skids.Trails().revision;
     }
+}
+
+void wheelTrailReplay(WheelTrailRecorder& recorder)
+{
+    for (const auto& op : recorder.ops) {
+        if (op.detach) wheelTrailDetach(op.store, op.attachment);
+        else wheelTrailUpdate(op.store, op.attachment, op.owner, op.hasCenter ? op.center : NULL, op.flags,
+                              op.position, op.width, op.materialIndex, op.intensity);
+    }
+    recorder.ops.clear();
 }

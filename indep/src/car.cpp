@@ -1750,8 +1750,11 @@ float carMovementCapture(CarMovement* movement, float elapsed)
     ++carMoverModeCalls[mode];
     return advanced;
 }
-static float carMovementCaptureBody(CarMovement* movement, float elapsed)
+// Split for parallel participant capture: the mover step (own state only)
+// and the tail (gear publish, ground recovery, collision window).
+static float carMovementCaptureMoveStep(CarMovement* movement, float elapsed, bool& tail)
 {
+    tail=false;
     if (movement->result != CAR_MOVEMENT_OK) return 0.0f;
     carMovementUpdateRacePerformance(movement);
     if (movement->result != CAR_MOVEMENT_OK) return 0.0f;
@@ -1775,6 +1778,11 @@ static float carMovementCaptureBody(CarMovement* movement, float elapsed)
     else if (movement->mode == 4 && movement->mellow) advanced = mellowMoverMove(movement->mellow, elapsed);
     else if (movement->mode == 0 && movement->inactive) advanced = nullMoverMove(movement->inactive, elapsed);
     else { movement->result = CAR_MOVEMENT_INVALID_BINDING; return 0.0f; }
+    tail=true;
+    return advanced;
+}
+static float carMovementCaptureTailStep(CarMovement* movement, float advanced)
+{
     VehicleState* state = movement->bindings.state;
     CarMotionState* ownerMotion = movement->bindings.ownerMotion;
     carMovementSetPublishedGear(movement, state->gear);
@@ -1824,6 +1832,36 @@ static float carMovementCaptureBody(CarMovement* movement, float elapsed)
         }
     }
     return advanced;
+}
+static float carMovementCaptureBody(CarMovement* movement, float elapsed)
+{
+    bool tail;
+    const float advanced=carMovementCaptureMoveStep(movement,elapsed,tail);
+    return tail ? carMovementCaptureTailStep(movement,advanced):advanced;
+}
+int carMovementCaptureParallelEligible(const CarMovement* movement)
+{
+    if (movement->result != CAR_MOVEMENT_OK || movement->bindings.player) return 0;
+    switch (movement->mode) {
+    case 0: return movement->inactive != NULL;
+    case 2: return movement->traffic != NULL;
+    case 3: return movement->delivery != NULL;
+    case 4: return movement->mellow != NULL;
+    case 5: return movement->cop != NULL;
+    case 6: return movement->belt != NULL;
+    default: return 0;
+    }
+}
+float carMovementCaptureMove(CarMovement* movement, float elapsed, int* tail)
+{
+    bool run;
+    const float advanced=carMovementCaptureMoveStep(movement,elapsed,run);
+    *tail=run ? 1:0;
+    return advanced;
+}
+float carMovementCaptureTail(CarMovement* movement, float advanced)
+{
+    return carMovementCaptureTailStep(movement,advanced);
 }
 
 

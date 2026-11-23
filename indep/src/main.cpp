@@ -91,6 +91,9 @@ extern uint64_t collisionWitnessKindMicros[9],collisionWitnessKindSteps[9];
 static double soundUpdatePeakMs=0;
 extern std::array<double,8> carMoverModeMs;
 extern std::array<std::uint32_t,8> carMoverModeCalls;
+extern uint64_t worldParallelCaptureStats[4];
+extern std::atomic<uint32_t> terrainTopologyAcquireFailures;
+extern int worldParallelCapture;
 extern std::atomic<uint64_t> collisionWitnessCacheChecks,collisionWitnessCacheMismatches;
 extern int collisionMemoGate;
 extern std::atomic<uint64_t> collisionMemoGateFlips;
@@ -112,7 +115,12 @@ float applicationPreviousCpuFrameRate=0.0f;
 float applicationPreviousGpuFrameRate=0.0f;
 bool applicationGpuTimingAvailable=false;
 
-namespace hp2 {int debugBenchSeed=0;int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};int debugBenchMirror=[] {
+namespace hp2 {int debugBenchSeed=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_BENCH_SEED"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 0;
+}();int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};int debugBenchMirror=[] {
 #if !defined(__vita__)
     if(const char* value=std::getenv("HP2_BENCH_MIRROR"))return std::atoi(value)!=0 ? 1:0;
 #endif
@@ -1474,6 +1482,14 @@ bool ApplicationRuntime::Tick()
                         calls[0],calls[1],calls[2],calls[3],calls[4],calls[5],calls[6]);
                     s.host.RecordSessionEvent("render.mover_window",detail);
                     ms={};calls={};
+                    {
+                        auto& pc=::worldParallelCaptureStats;
+                        std::snprintf(detail,sizeof(detail),"mode=%d parallel_loops=%llu parallel_movers=%llu serial_loops=%llu terrain_full_disables=%llu terrain_acquire_failures=%u",
+                            ::worldParallelCapture,static_cast<unsigned long long>(pc[0]),static_cast<unsigned long long>(pc[1]),
+                            static_cast<unsigned long long>(pc[2]),static_cast<unsigned long long>(pc[3]),
+                            ::terrainTopologyAcquireFailures.load());
+                        s.host.RecordSessionEvent("render.parallel_capture",detail);pc[0]=pc[1]=pc[2]=0;
+                    }
                     if(auto& t=mellowSplitMicros;t[7]) {
                         const double n=static_cast<double>(t[7]);
                         std::snprintf(detail,sizeof(detail),"substeps=%llu per_substep_us setup=%.1f integrate=%.1f prepare=%.1f forces=%.1f ortho=%.1f publish=%.1f terrain=%.1f "

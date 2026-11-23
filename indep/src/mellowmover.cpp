@@ -350,14 +350,15 @@ float mellowMoverMove(MellowMover* mover, float elapsed)
     mark.Lap(0);
     for (int32_t index = 0; index < steps; ++index) {
         mover->environment->stepContext->lastSubstepElapsed = step;
-        const auto before2=mellowSplitMicros[2]+mellowSplitMicros[3];
+        const auto before2=diagFineTimers ? mellowSplitMicros[2]+mellowSplitMicros[3]:0u;
         componentSystemIntegrateEuler(&mover->components, step, mover->derivatives, 33);
-        mark.Lap(1);mellowSplitMicros[1]-=mellowSplitMicros[2]+mellowSplitMicros[3]-before2;
+        mark.Lap(1);
+        if(diagFineTimers)mellowSplitMicros[1]-=mellowSplitMicros[2]+mellowSplitMicros[3]-before2;
         motionMatrixOrthonormalize(mover->body->motion.orientation, mover->body->motion.orientation);
         // The integrator prepared omega before this normalization. Refresh its
         // angular cache without discarding the forces already collected.
         rigidBodyRefreshAngularVelocity(mover->body);
-        mark.Lap(4);++mellowSplitMicros[7];
+        mark.Lap(4);if(diagFineTimers)++mellowSplitMicros[7];
     }
     mellowMoverPublishState(mover, elapsed);
     mark.Lap(5);

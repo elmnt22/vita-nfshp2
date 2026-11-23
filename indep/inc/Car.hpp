@@ -360,6 +360,11 @@ VehicleState* carMovementState(CarMovement* movement);
 CarMotionState* carMovementOwnerMotion(CarMovement* movement);
 struct CarDamage* carMovementDamage(CarMovement* movement);
 float carMovementCapture(CarMovement* movement, float elapsed);
+/* Parallel participant capture: the AI mover step touches only its own car
+ * (non-player, non-physics modes); the tail runs later in car order. */
+int carMovementCaptureParallelEligible(const CarMovement* movement);
+float carMovementCaptureMove(CarMovement* movement, float elapsed, int* tail);
+float carMovementCaptureTail(CarMovement* movement, float advanced);
 void carMovementNotifyCollision(CarMovement* movement, CarMovement* other);
 void carMovementRecordCollisionImpact(CarMovement* movement, const float impulse[4],
                                       const float lever[4], float impulseMagnitude);

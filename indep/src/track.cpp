@@ -1,3 +1,4 @@
+#include <atomic>
 #include "indep/inc/Track.hpp"
 #include "bware/inc/bMath.hpp"
 
@@ -485,6 +486,10 @@ size_t terrainTopologyPurgeUnused(TerrainTopology *topology)
     return released;
 }
 
+// Cache exhaustion count (terrainTopologyAcquire returned NULL). Parallel
+// participant capture switches itself off once one is seen: which car
+// misses a polygon on a full cache depends on acquisition order.
+std::atomic<uint32_t> terrainTopologyAcquireFailures{0};
 TerrainPolygon *terrainTopologyAcquire(TerrainTopology *topology,
                                       TerrainEncodedPolygon *encoded)
 {
@@ -498,7 +503,7 @@ TerrainPolygon *terrainTopologyAcquire(TerrainTopology *topology,
             }
             if (!polygon && attempt == 0) terrainTopologyPurgeUnused(topology);
         }
-        if (!polygon) return NULL;
+        if (!polygon) {terrainTopologyAcquireFailures.fetch_add(1,std::memory_order_relaxed);return NULL;}
         terrainPolygonDecode(topology, polygon, encoded);
         polygon->previous = topology->newest;
         polygon->next = NULL;
@@ -535,6 +540,17 @@ size_t terrainTopologyCollectBounds(TerrainTopology *topology,
     return acquired;
 }
 
+// Shared topology cache guard (reference counts, visited flags, slots and
+// LRU links). Parallel participant capture runs several cars' surface
+// updates at once; decoded polygon contents do not depend on slot order.
+namespace {
+std::atomic_flag terrainTopologyGuard=ATOMIC_FLAG_INIT;
+struct TerrainTopologyLock {
+    TerrainTopologyLock() noexcept {while(terrainTopologyGuard.test_and_set(std::memory_order_acquire)) {}}
+    ~TerrainTopologyLock() {terrainTopologyGuard.clear(std::memory_order_release);}
+};
+}
+
 TerrainSurface *terrainSurfaceInitialize(TerrainSurface *surface, TerrainTopology *topology)
 {
     memset(surface, 0, sizeof(*surface));
@@ -545,6 +561,7 @@ TerrainSurface *terrainSurfaceInitialize(TerrainSurface *surface, TerrainTopolog
 
 void terrainSurfaceDispose(TerrainSurface *surface)
 {
+    TerrainTopologyLock lock;
     terrainTopologyReleaseMany(surface->topology, surface->polygons, surface->polygonCount);
     surface->polygonCount = 0;
     surface->lastGround = NULL;
@@ -554,7 +571,10 @@ void terrainSurfaceReset(TerrainSurface *surface)
 {
     vectorBoundsInitialize2(surface->queryMinimum, surface->queryMaximum);
     vectorBoundsInitialize2(surface->cacheMinimum, surface->cacheMaximum);
-    terrainTopologyReleaseMany(surface->topology, surface->polygons, surface->polygonCount);
+    {
+        TerrainTopologyLock lock;
+        terrainTopologyReleaseMany(surface->topology, surface->polygons, surface->polygonCount);
+    }
     surface->lastGround = NULL;
     surface->polygonCount = 0;
     surface->groundCount = 0;
@@ -569,6 +589,7 @@ void terrainSurfaceUpdate(TerrainSurface *surface, const float point[2],
     vectorBoundsExpandRadius2(surface->queryMinimum, surface->queryMaximum, point, radius);
     if (vectorBoundsContainsBounds2(surface->cacheMinimum, surface->cacheMaximum,
                                     surface->queryMinimum, surface->queryMaximum)) return;
+    TerrainTopologyLock lock;
     terrainTopologyReleaseMany(surface->topology, surface->polygons, surface->polygonCount);
     surface->polygonCount = 0;
     surface->groundCount = 0;
