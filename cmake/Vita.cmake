@@ -3,7 +3,7 @@
 # ZDIR.BIN/ZZDATA.BIN in ux0:data/NFSHP2; no game data is packaged.
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
-set(VITA_APP_NAME "NFS HP2 Native")
+set(VITA_APP_NAME "NFS Hot Pursuit 2")
 set(VITA_TITLEID  "NFSHP2002")
 set(VITA_VERSION  "00.01")
 
@@ -56,6 +56,26 @@ if(HP2_VITA_LTO)
 endif()
 
 vita_create_self(eboot.bin NFSHP2 UNSAFE)
-vita_create_vpk(NFSHP2.vpk ${VITA_TITLEID} eboot.bin
-    VERSION ${VITA_VERSION}
-    NAME ${VITA_APP_NAME})
+# Packaged here instead of vita_create_vpk: its vita-pack-vpk -a arguments
+# are unquoted, so the LiveArea paths split on the spaces in this tree.
+# ATTRIBUTE2=12: extended user memory (~356 MB); the 280 MB heap needs it.
+set(HP2_VITA_LIVEAREA "${CMAKE_CURRENT_SOURCE_DIR}/src/vita/livearea")
+set(HP2_VITA_SFO "${CMAKE_BINARY_DIR}/NFSHP2_param.sfo")
+add_custom_command(OUTPUT "${HP2_VITA_SFO}"
+    COMMAND "${VITASDK}/bin/vita-mksfoex" -d PARENTAL_LEVEL=1 -d ATTRIBUTE2=12
+        -s APP_VER=${VITA_VERSION} -s TITLE_ID=${VITA_TITLEID} "${VITA_APP_NAME}" "${HP2_VITA_SFO}"
+    VERBATIM)
+set(HP2_VITA_LIVEAREA_FILES
+    "${HP2_VITA_LIVEAREA}/icon0.png" "${HP2_VITA_LIVEAREA}/pic0.png" "${HP2_VITA_LIVEAREA}/bg.png"
+    "${HP2_VITA_LIVEAREA}/startup.png" "${HP2_VITA_LIVEAREA}/template.xml")
+add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/NFSHP2.vpk"
+    COMMAND "${VITASDK}/bin/vita-pack-vpk"
+        -a "${HP2_VITA_LIVEAREA}/icon0.png=sce_sys/icon0.png"
+        -a "${HP2_VITA_LIVEAREA}/pic0.png=sce_sys/pic0.png"
+        -a "${HP2_VITA_LIVEAREA}/bg.png=sce_sys/livearea/contents/bg.png"
+        -a "${HP2_VITA_LIVEAREA}/startup.png=sce_sys/livearea/contents/startup.png"
+        -a "${HP2_VITA_LIVEAREA}/template.xml=sce_sys/livearea/contents/template.xml"
+        -s "${HP2_VITA_SFO}" -b "${CMAKE_BINARY_DIR}/eboot.bin" "${CMAKE_BINARY_DIR}/NFSHP2.vpk"
+    DEPENDS eboot.bin "${HP2_VITA_SFO}" ${HP2_VITA_LIVEAREA_FILES}
+    VERBATIM)
+add_custom_target(NFSHP2_vpk ALL DEPENDS "${CMAKE_BINARY_DIR}/NFSHP2.vpk")

@@ -1,114 +1,212 @@
 # Need for Speed: Hot Pursuit 2 — PS Vita Native Port
 
-A native PlayStation Vita port of Need for Speed: Hot Pursuit 2 (PS2 version).
-The game runs as native ARM code on the Vita with a vitaGL renderer, its own
-audio output and a multicore job system. No emulation and no recompiler are
-involved.
+A native PlayStation Vita port of **Need for Speed: Hot Pursuit 2**, built on a
+C++ reimplementation of the PS2 game's engine and running the PS2 disc's own
+data on the console. That covers the front end, cars, tracks, cops, HUD,
+movies, speech, sound effects and music.
 
-This branch is a fork of HDErick's
-[NFSHP2_Switch_Port](https://github.com/HDErick/NFSHP2_Switch_Port), a C++
-re-implementation of the PS2 PAL 1.00 engine. The engine code comes from there.
-This branch adds the Vita platform layer and the Vita-specific work.
+The goal is to play like the PS2 original. Gameplay, physics, AI and handling
+keep the retail behaviour; every Vita optimisation is checked against the
+reference code for identical results. There is no emulation and no
+recompiler: the game runs as native ARM code.
 
-> **Status: work in progress.** The game boots, runs menus, movies and races, and
-> plays audio. Frame rate depends on the track and scene. The main goal is a
-> steady 30 fps in heavy scenes, including with the rear-view mirror on.
+> **No game data is included.** This repository has no EA assets. You need
+> your own legally owned copy of the PS2 game. This project is not
+> affiliated with, authorized or endorsed by Electronic Arts.
 
-## Game data
+Disclosure: Whilst I know a bit of programming and coding, I used AI to help accelerate areas of this port that otherwise would have taken me forever. AI used was Claude Opus.
 
-**You need your own copy of the PS2 PAL version 1.00 (SLES-50731).** No game data
-is included and none will be provided.
+---
 
-Copy `ZDIR.BIN` and `ZZDATA.BIN` from the disc's `NFSHP2` directory to:
+## Contents
 
-```text
-ux0:data/NFSHP2N/
-  ZDIR.BIN
-  ZZDATA.BIN
+- [What's in the port](#whats-in-the-port)
+- [What you need](#what-you-need)
+- [Installation](#installation)
+- [Controls](#controls)
+- [Options](#options)
+- [Reporting problems](#reporting-problems)
+- [Building from source](#building-from-source)
+- [Repository layout](#repository-layout)
+- [Credits](#credits)
+- [License and legal](#license-and-legal)
+
+---
+
+## What's in the port
+
+- **The PS2 game.** The front end, race modes, Hot Pursuit with its cops
+  and pursuits, AI opponents and traffic, results screens and saving, all
+  from the PS2 PAL engine.
+- **30 FPS.** Locked to an even 30 FPS by default, with the rear-view
+  mirror on.
+- **Graphics.** A Vita renderer that draws straight to the GPU (GXM), at
+  960×544 in 16:9. The original world, car and particle effects are kept.
+  Smoke, dust and other screen-filling particles are drawn at half or
+  quarter resolution to hold the frame rate.
+- **Audio.** Engine, collision, cop, speech, music and ambient sounds from the
+  game's own banks. The voice mixer uses the PS2 sound chip's Gaussian
+  interpolation, and tunnels get the PS2's hardware reverb.
+- **Movies.** The game's MV3 movies are decoded on the Vita.
+- **Multicore.** Game logic, rendering, GPU submission, audio and helper
+  jobs (scenery, skinning, particles, collision queries) are spread across
+  the Vita's cores. Results are merged in order, so the output matches
+  single-threaded play.
+
+**Known issues:** very busy moments (big pileups, wide open views) can still
+dip briefly below 30 FPS.
+
+---
+
+## What you need
+
+- **Need for Speed: Hot Pursuit 2 for PS2, PAL version 1.00 (SLES-50731).**
+  Other regions and versions are not supported.
+- A **PS Vita or PS TV** with **HENkaku / Ensō** custom firmware.
+- **VitaShell**, to install the VPK and copy files.
+- **`libshacccg.suprx`** extracted to `ur0:data/libshacccg.suprx`. The
+  renderer compiles some shaders on the console and needs it. If you don't
+  have it yet, extract it with **ShaRKBR33D**.
+- About **3.2 GB** free on the memory card for the game data.
+
+No plugins are needed.
+
+---
+
+## Installation
+
+### 1. Install the VPK
+
+Copy `NFSHP2.vpk` from the [Releases](https://github.com/elmnt22/vita-nfshp2/releases)
+page to your Vita and install it with VitaShell. It shows up as
+**NFS Hot Pursuit 2** (title ID `NFSHP2002`).
+
+### 2. Copy the game data
+
+Copy `ZDIR.BIN` and `ZZDATA.BIN` from the disc's `NFSHP2` folder to
+**`ux0:data/NFSHP2/`** on the Vita:
+
+```
+ux0:data/NFSHP2/
+├── ZDIR.BIN
+└── ZZDATA.BIN       <- about 3 GB
 ```
 
-Saves and `NFSHP2_log.txt` are written to the same folder.
+Saves and the log file (`NFSHP2_log.txt`) are written to the same folder.
 
-## Install
+### 3. Play
 
-Install `NFSHP2.vpk` with VitaShell (title ID `NFSHP2002`), then launch it from
-the LiveArea. You don't need any plugins. If
-[kubridge](https://github.com/bythos14/kubridge) is installed, the port uses it
-to write `crash.txt` when it crashes. Without kubridge it runs normally.
+Start **NFS Hot Pursuit 2** from the LiveArea.
+
+---
 
 ## Controls
 
 The Vita buttons map directly to the PS2 pad: face buttons, D-pad,
 Start/Select, L → L1, R → R1, and both analog sticks.
 
-## What's Vita-specific
+---
 
-- **Renderer:** a vitaGL backend for the engine's shared native gather path. It
-  renders at 960×544 using the 16:9 layout. Rear-view mirror targets are drawn as
-  FBOs. Smoke, dust and other particles switch to half or quarter resolution when
-  they fill the screen.
-- **Threading:** game logic runs on core 0. Gather runs on a render thread and GL
-  submission on its own thread. Worker pools on cores 1–2 handle scenery emit,
-  skinning, particles and speculative collision queries. Results are merged in
-  order, so the output matches serial execution.
-- **Exact optimisations:** NEON paths for matrix and vector math, bounds
-  classification, skinning and MV3 movie decode (IDCT and YUV→RGBA). Draw
-  batching and strip runs for scenery and car models. Each was checked against
-  the reference path for bit-exact results, and gameplay and physics keep the
-  retail behaviour.
-- **Platform:** `sceIoPread` reads the 3 GB `ZZDATA.BIN`, because Vita newlib has
-  a 32-bit `off_t`. Audio is output through `sceAudioOut`. Movie, speech and
-  stream decodes run asynchronously.
+## Options
 
-## Building
+Empty marker files in `ux0:data/NFSHP2/` change settings at boot. Normal play
+needs none of them.
 
-Requirements: [VitaSDK](https://vitasdk.org/) with vitaGL, vitashark and
+| File | Effect |
+| --- | --- |
+| `fps_uncapped.txt` | Unlock the frame rate (up to 60, varies; experimental) |
+| `audio_dry.txt` | Turn the reverb off |
+| `audio_linear.txt` | Use plain linear voice interpolation instead of the PS2 Gaussian one |
+| `speedtrap_retail.txt` | Keep the PS2's original race-start behaviour for the parked speed-trap cop (costs a slow first second on some tracks) |
+
+The other `*_off.txt` and `*_serial.txt` files turn individual optimisations off
+for testing. See `src/vita/main.cpp`.
+
+---
+
+## Reporting problems
+
+Open an [issue](https://github.com/elmnt22/vita-nfshp2/issues). Attach
+`ux0:data/NFSHP2/NFSHP2_log.txt` from the run with the problem, plus a
+screenshot for a visual problem.
+
+If [kubridge](https://github.com/bythos14/kubridge) is installed, a crash also
+writes `crash.txt` to the same folder; please attach that too. Without kubridge
+the game runs normally.
+
+---
+
+## Building from source
+
+You only need this to build the port yourself. Players can use the
+release files.
+
+**Requirements:** [VitaSDK](https://vitasdk.org/) with vitaGL, vitashark and
 mathneon, plus CMake 3.24+ and Ninja.
 
 ```sh
 cmake -S . -B build-vita -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
   -DCMAKE_BUILD_TYPE=Release
-cmake --build build-vita
+cmake --build build-vita     # -> build-vita/NFSHP2.vpk (+ eboot.bin)
 ```
 
-The build writes `build-vita/NFSHP2.vpk` and `eboot.bin`. Build options are in
-`cmake/Vita.cmake`:
+Build options are in `cmake/Vita.cmake`:
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `HP2_VITA_GL` | `ON` | vitaGL renderer (`OFF` builds a CPU-only null renderer) |
+| `HP2_VITA_GL` | `ON` | Vita renderer (`OFF` builds a CPU-only null renderer) |
+| `HP2_OWN_VITAGL` | `ON` | Link a patched vitaGL from `../deps/vitaGL_hp2` when present, else the VitaSDK one |
 | `HP2_VITA_LTO` | `ON` | Link-time optimisation. Much faster on device, but the link is slow (~10 min) |
 | `HP2_VITA_LTO_JOBS` | `4` | Parallel LTO link jobs |
 
-## Debug and test toggles
+The LiveArea art is in `src/vita/livearea/`.
 
-Empty marker files in `ux0:data/NFSHP2N/` switch features at boot. They are for
-testing and A/B comparisons only. Normal play needs none of them. Examples:
+---
 
-| File | Effect |
+## Repository layout
+
+| Path | Contents |
 | --- | --- |
-| `noaudio.txt` | Disable audio output |
-| `nopipeline.txt` | Render synchronously (no render-thread pipelining) |
-| `halfres_off.txt` / `quarterres_off.txt` | Full-resolution particles |
-| `demo_bench.txt` | Contents `<track> [mirror]`: run the attract-mode pursuit on that track as a benchmark |
-| `quickrace_track.txt` | Contents `<track> [reverse]`: force Quick Race onto that track |
+| `src/vita/` | Vita platform layer: boot, input, audio mixer and reverb, crash handler, LiveArea assets |
+| `src/ecstasy/` | Renderer: the shared native gather and the Vita GXM / vitaGL backends |
+| `indep/` | Game code: race, cars, physics, AI, cops, front end, HUD, sound scape |
+| `bsound/`, `bware/` | Sound library and the engine's base library |
+| `inc/`, `cmn/` | Shared headers and common code |
+| `cmake/` | Build files for each platform (`Vita.cmake`) |
+| `docs/`, `tools/` | Notes and helper tools |
 
-The other `*_off.txt` and `*_serial.txt` files turn individual optimisations off
-for verification. See `src/vita/main.cpp`.
-
-## Other platforms
-
-The upstream Windows, Nintendo Switch and Switch 2 targets are still in the tree
-but aren't the focus of this branch. For those, see
-[docs/SWITCH.md](docs/SWITCH.md) and the
+The upstream Windows and Nintendo Switch targets are still in the tree but
+aren't the focus of this port. See [docs/SWITCH.md](docs/SWITCH.md) and the
 [upstream repository](https://github.com/HDErick/NFSHP2_Switch_Port).
 
-## Credits and licence
+---
 
-- Native engine: [HDErick/NFSHP2_Switch_Port](https://github.com/HDErick/NFSHP2_Switch_Port).
-- Vita graphics: [vitaGL](https://github.com/Rinnegatamante/vitaGL) by Rinnegatamante.
+## Credits
 
-Licensed under the GPL-3.0 (see [LICENSE](LICENSE)), the same as upstream.
-Need for Speed and Hot Pursuit 2 are trademarks of Electronic Arts. This project
-is not affiliated with or endorsed by Electronic Arts.
+- **[NFSHP2_Switch_Port](https://github.com/HDErick/NFSHP2_Switch_Port)** by
+  **HDErick**. It is the C++ reimplementation of the PS2 PAL 1.00 engine this
+  port is built on.
+- **[vitaGL](https://github.com/Rinnegatamante/vitaGL)** by Rinnegatamante,
+  and the **[VitaSDK](https://vitasdk.org/)** team.
+- **[VitaShell](https://github.com/TheOfficialFloW/VitaShell)** and
+  **HENkaku / Ensō** by TheFloW and contributors. Players need them to run
+  homebrew.
+- **ShaRKBR33D** / **SharkF00D** for extracting `libshacccg.suprx`.
+- **[vitacompanion](https://github.com/devnoname120/vitacompanion)** by
+  devnoname120, for FTP and remote launch during development.
+- **[kubridge](https://github.com/bythos14/kubridge)** by bythos14, for the
+  optional crash reports.
+- **[psx-spx](https://psx-spx.consoledev.net/)** by Martin Korth (nocash) and
+  contributors, for the documentation of the sound chip's reverb and
+  Gaussian interpolation.
+- **Electronic Arts / EA Black Box** for the original game.
+
+## License and legal
+
+Licensed under the **GPL-3.0** (see [LICENSE](LICENSE)), the same as the
+upstream engine. Third-party code keeps its own license.
+
+Need for Speed and Need for Speed: Hot Pursuit 2 are trademarks of Electronic
+Arts. All game content belongs to its owners. This project ships none of it:
+the port loads the data from your own copy at runtime.
