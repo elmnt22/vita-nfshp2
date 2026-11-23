@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <string>
 struct WeatherQuery;
+#include "indep/inc/ParticleQuad.hpp"
 namespace hp2 { class ResourceRegistry; class EcstasyFrame; struct TextureInfo; }
 typedef hp2::ResourceRegistry NativeResourceRegistry;
 typedef hp2::EcstasyFrame NativeEcstasyFrame;
@@ -761,12 +762,6 @@ void eGetScreenDisplayOffsets(const GameTime& clock,std::int32_t& x,std::int32_t
 // Native projected particle transport. One contiguous group retains the
 // original texture, average-depth ordering key and TL,TR,BL,BR primitive order.
 // Coordinates are clip-space X/Y and D32 depth, never GS words carried as float.
-struct EcstasyParticleQuad {
-    std::array<std::array<float,2>,4> clipXY{};
-    std::array<std::array<float,2>,4> uv{};
-    float depth{};
-    std::uint32_t color{};
-};
 // The same numeric depth interval is used by world draws and particles.
 // Captured projection values preserve the original foreground layer headroom.
 std::array<float,2> ecstasyNativeDepthRange(const float clipToScreen[16],std::int32_t format);

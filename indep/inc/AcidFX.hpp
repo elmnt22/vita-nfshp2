@@ -255,6 +255,7 @@ int32_t worldParticleHermiteBasis(float output[16], const float values[16], cons
 #include <memory>
 #include <string>
 #include <vector>
+#include "indep/inc/ParticleQuad.hpp"
 
 struct EditorMarkerTexture;
 
@@ -312,6 +313,30 @@ struct WorldParticleRenderSummary {
 // owner and copies its already-quantized draw arguments into this frame.
 WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& system,
     const ChopperEffectData& catalogue,const CarCinematicScreen& view,EcstasyFrame& frame);
+// Split form (exact): Prepare walks the groups and builds every quad (pure
+// reads; may run on a collision helper ahead of the owner), Commit attaches
+// the survivors to the frame in source order.
+struct WorldParticlePrepared {
+    struct GroupPlan {
+        const WorldParticleDefinition* definition;const EditorMarkerTexture* descriptor;
+        std::uint8_t widthPower;std::uint32_t width,height;float du,dv,inverseLifetime,maximum;
+        std::size_t first,count;
+    };
+    enum : std::uint8_t {Drawn};
+    struct ParticleSlot {EcstasyParticleQuad quad;float depth;std::uint8_t status;};
+    std::vector<GroupPlan> plans;
+    std::vector<const WorldParticle*> particles;
+    std::vector<std::uint32_t> owners;
+    std::vector<ParticleSlot> slots;
+    WorldParticleRenderSummary result;
+    const CarCinematicScreen* view{};
+    const WorldParticleSystem* system{};
+};
+void PrepareWorldParticles(const WorldParticleSystem& system,const ChopperEffectData& catalogue,
+    const CarCinematicScreen& view,WorldParticlePrepared& out,bool serialBuild);
+WorldParticleRenderSummary CommitWorldParticles(const WorldParticlePrepared& prepared,
+    const CarCinematicScreen& view,EcstasyFrame& frame);
+bool WorldParticlesPreparedEqual(const WorldParticlePrepared& a,const WorldParticlePrepared& b);
 
 /* Application-lifetime Windows storage for the three afxInit pools. The
  * authored catalog and live handlers borrow these owners; packed PS2 sizes

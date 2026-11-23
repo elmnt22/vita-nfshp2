@@ -1933,11 +1933,15 @@ void FlailerRenderManager::RenderFlailerBitmap(FlailerResources& resources,
     bitmap.SetScaleX(scaleX);bitmap.SetScaleY(scaleY);flailerTextRasterState.rasterBytes[0]=alphaByte;
 }
 
+// Vita hud_discard_full.txt: 0 (validate HUD polygons in discarded captures too).
+int flailerDiscardEarlyOut=1;
 // PAL145950 visits the next texture batch before this batch's polygons.
 void FlailerStrip::Render(const CarCinematicScreen& view,EcstasyFrame& frame,std::int32_t layer)
 {
     if (nextTexture)nextTexture->Render(view,frame,layer);
-    if (texture)for (const auto& polygon:polygons)
+    // A discarded catch-up capture drops every command: AddPolygon would
+    // only re-validate the texture and return (no state of its own).
+    if (texture && !(flailerDiscardEarlyOut && frame.DiscardsCommands()))for (const auto& polygon:polygons)
         frame.AddPolygon(polygon,*texture,view,layer,1.0f,uiPlacement);
     ++renderedFrames;
 }

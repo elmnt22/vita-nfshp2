@@ -1,4 +1,5 @@
 #include <atomic>
+#include <algorithm>
 #include "indep/inc/Collision.hpp"
 #include <array>
 #include "indep/inc/Contact.hpp"
@@ -72,7 +73,27 @@ int worldParallelCapture=[] {
 #endif
     return 1;
 }();
-uint64_t worldParallelCaptureStats[4]{}; // parallel loops, parallel movers, serial loops, terrain-full disables
+uint64_t worldParallelCaptureStats[5]{}; // parallel loops, parallel movers, serial loops, terrain-full disables, munition steps
+int worldParallelMunitionPrefix=1; // Vita munition_prefix_off.txt
+// Task claim order: 0 participant order, 1 largest last-step cost first
+// (default; needs the host clock). Order never changes results: each task
+// only touches its own car, and the commit pass below runs in participant
+// order. Vita parallel_order.txt "<mode>"; PC env HP2_PARALLEL_ORDER.
+int worldParallelOrder=[] {
+#if !defined(__vita__)
+    if (const char* text=std::getenv("HP2_PARALLEL_ORDER")) return std::atoi(text);
+#endif
+    return 1;
+}();
+extern uint32_t (*collisionWitnessClockMicros)();
+namespace {
+uint32_t parallelOrderClock()
+{
+    if (collisionWitnessClockMicros) return collisionWitnessClockMicros();
+    return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+}
 
 namespace {
 struct ParallelCaptureTask {
@@ -85,15 +106,23 @@ struct ParallelCaptureTask {
     std::exception_ptr failure;
 };
 struct ParallelCaptureBatch {
+    // Tasks persist across steps (recorder capacity is reused, no per-step
+    // allocation); only the first `used` are live.
     std::vector<ParallelCaptureTask> tasks;
+    size_t used=0;
     std::vector<int> slot; // participant index -> task index or -1
+    std::vector<unsigned> order; // claim index -> task index
+    uint32_t cost[COLLISION_ID_COUNT]{}; // last measured task microseconds, by shape id
+    bool timed=false;
 };
 // Bit pattern no substep writes (a quiet NaN payload): marks "not written".
 constexpr uint32_t parallelStepUnwritten=0x7fc0beefu;
 
 void runParallelCapture(void* context,unsigned index)
 {
-    auto& task=static_cast<ParallelCaptureBatch*>(context)->tasks[index];
+    auto& batch=*static_cast<ParallelCaptureBatch*>(context);
+    auto& task=batch.tasks[batch.order[index]];
+    const uint32_t started=batch.timed ? parallelOrderClock():0u;
     CarMovement* movement=task.participant->movement;
     PhysicsCarEnvironment* environment=movement->bindings.environment;
     PhysicsStepContext* shared=environment->stepContext;
@@ -106,6 +135,10 @@ void runParallelCapture(void* context,unsigned index)
     } catch (...) {task.failure=std::current_exception();}
     wheelTrailRecorder=nullptr;
     environment->stepContext=shared;
+    if (batch.timed) {
+        const int16_t id=task.participant->shape->id;
+        if (id>=0 && id<COLLISION_ID_COUNT) batch.cost[id]=parallelOrderClock()-started;
+    }
 }
 
 void hashParticipants(const CollisionSystem* system,CollisionParticipant* const* active,size_t count,float elapsed)
@@ -146,27 +179,45 @@ void hashParticipants(const CollisionSystem* system,CollisionParticipant* const*
 
 // Returns false (nothing run) when fewer than two movers qualify.
 bool advanceParticipantsParallel(CollisionSystem* system,CollisionParticipant* const* active,
-    size_t count,float elapsed)
+    size_t count,float elapsed,size_t parallelLimit)
 {
     static ParallelCaptureBatch batch;
-    batch.tasks.clear();batch.slot.assign(count,-1);
-    for (size_t index=0;index<count;++index) {
+    batch.used=0;batch.slot.assign(count,-1);
+    for (size_t index=0;index<parallelLimit;++index) {
         CollisionParticipant* participant=active[index];
         if (!participant->movement || !participant->shape->active) continue;
         if (!carMovementCaptureParallelEligible(participant->movement)) continue;
-        batch.slot[index]=static_cast<int>(batch.tasks.size());
-        batch.tasks.emplace_back();
-        auto& task=batch.tasks.back();
+        batch.slot[index]=static_cast<int>(batch.used);
+        if (batch.used==batch.tasks.size()) batch.tasks.emplace_back();
+        auto& task=batch.tasks[batch.used++];
         task.participant=participant;task.rewind=elapsed;task.advanced=0.0f;task.tail=0;
+        task.failure=nullptr;task.recorder.ops.clear();
     }
-    if (batch.tasks.size()<2) return false;
+    if (batch.used<2) return false;
+    batch.order.resize(batch.used);
+    for (size_t index=0;index<batch.used;++index) batch.order[index]=static_cast<unsigned>(index);
+    batch.timed=worldParallelOrder==1;
+    if (batch.timed) {
+        const auto costOf=[](unsigned task) {
+            const int16_t id=batch.tasks[task].participant->shape->id;
+            return id>=0 && id<COLLISION_ID_COUNT ? batch.cost[id]:0u;
+        };
+        // Stable insertion sort (no allocation; ~15 movers): equal costs
+        // keep participant order.
+        for (size_t i=1;i<batch.used;++i) {
+            const unsigned task=batch.order[i];const uint32_t cost=costOf(task);
+            size_t j=i;
+            while (j>0 && costOf(batch.order[j-1])<cost) {batch.order[j]=batch.order[j-1];--j;}
+            batch.order[j]=task;
+        }
+    }
     const uint32_t failuresBefore=terrainTopologyAcquireFailures.load(std::memory_order_relaxed);
-    collisionHelperRun(static_cast<unsigned>(batch.tasks.size()),runParallelCapture,&batch);
+    collisionHelperRun(static_cast<unsigned>(batch.used),runParallelCapture,&batch);
     if (terrainTopologyAcquireFailures.load(std::memory_order_relaxed)!=failuresBefore) {
         // A full terrain cache: from here on, serial order decides who misses.
         worldParallelCapture=0;++worldParallelCaptureStats[3];
     }
-    ++worldParallelCaptureStats[0];worldParallelCaptureStats[1]+=batch.tasks.size();
+    ++worldParallelCaptureStats[0];worldParallelCaptureStats[1]+=batch.used;
     for (size_t index=0;index<count;++index) {
         CollisionParticipant* participant=active[index];
         const int slot=batch.slot[index];
@@ -214,10 +265,19 @@ CollisionSystemResult worldServicesAdvanceParticipants(CollisionSystem* system, 
     }
     const bool hash=worldParallelCapture==2 || worldParallelCapture==3;
     bool parallel=(worldParallelCapture==1 || worldParallelCapture==2) && collisionHelperPoolSize()>0;
+    // A munition (rocket, spike strip...) reads other cars while it moves:
+    // only the movers before the first one in step order may run ahead (in
+    // the serial order they also move before it); it and everything after
+    // run serially in order (worldParallelMunitionPrefix=0: whole loop serial).
+    size_t parallelLimit=count;
     if (parallel)
         for (size_t index=0;index<count;++index)
-            if (active[index]->breakable && active[index]->breakable->munition) {parallel=false;break;}
-    if (parallel && advanceParticipantsParallel(system,active,count,elapsed)) {
+            if (active[index]->breakable && active[index]->breakable->munition) {
+                parallelLimit=index;++worldParallelCaptureStats[4];
+                if (!worldParallelMunitionPrefix) parallel=false;
+                break;
+            }
+    if (parallel && advanceParticipantsParallel(system,active,count,elapsed,parallelLimit)) {
         if (hash) hashParticipants(system,active,count,elapsed);
         return system->result;
     }

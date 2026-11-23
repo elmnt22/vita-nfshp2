@@ -112,6 +112,12 @@ uint32_t collisionSplitNow()
     return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
+// Priority a sleeping helper waits at (Vita). 185 (old default) is below the
+// render/GL/audio threads sharing its core, so a woken helper often does not
+// run until they block; a higher (lower number) wake priority lets it take
+// its task at once. It drops back to 185 after the batch as before.
+// helper_wake.txt "<priority>".
+int collisionHelperWakePriority=185;
 uint32_t collisionPoolHotMicros=60; // needs the host clock (Vita); pool_hot.txt: "<us>" (0 off)
 std::atomic<uint64_t> collisionPoolHelperTasks{0},collisionPoolHelperMicros{0};
 uint64_t collisionPoolMainMicros=0;
@@ -271,8 +277,11 @@ private:
     {
         for(;;) {
 #if defined(__vita__)
+            bool raised=collisionHelperWakePriority!=185;
+            if(raised)sceKernelChangeThreadPriority(0,collisionHelperWakePriority);
             sceKernelWaitSema(sema_,1,nullptr);
 #else
+            bool raised=false;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 wakeup_.wait(lock,[this] {return pending_>0;});
@@ -288,6 +297,13 @@ private:
                 // Cheap poll: only enter the claim protocol for an open batch.
                 const uint32_t peek=state_.load(std::memory_order_relaxed);
                 if((peek&0xffffu)==0xffffu || (peek&0xffffu)>=count_) {
+                    // Never poll (armed) at the raised wake priority.
+                    if(raised) {
+#if defined(__vita__)
+                        sceKernelChangeThreadPriority(0,185);
+#endif
+                        raised=false;
+                    }
                     if(hot && (++polls&31u)==0 && collisionWitnessClockMicros &&
                         collisionWitnessClockMicros()-hotSince>collisionPoolHotMicros) {
 #if defined(__vita__)
@@ -323,7 +339,7 @@ private:
                         if(diagFineTimers)collisionPoolHelperMicros.fetch_add(diagFineClock()-taskStart,std::memory_order_relaxed);
                     } while(Claim(generation,index));
                     WriteFloatingPoint(saved);
-                    inFlight_.fetch_sub(1);
+                    inFlight_.fetch_sub(1);raised=false;
                     if(collisionPoolHotMicros && collisionWitnessClockMicros) {hot=true;hotSince=collisionWitnessClockMicros();polls=0;}
                     else {
 #if defined(__vita__)

@@ -3700,6 +3700,19 @@ int ecstasyAsyncMirrorScenery=[] {
 }();
 // views, merged, state/matrix fallbacks, aborts, inline runs, wait us, job us, verify mismatches
 std::uint64_t ecstasyAsyncMirrorStats[12]{}; // [8..11] abort reasons
+// Particle walk + quad build for views 1 and 3 prepared on the mirror job's
+// idle second helper slot during view1's scenery; committed at the original
+// position after an exact view-state check (exact; Vita async_particles_off.txt;
+// PC HP2_ASYNC_PARTICLES=0 off, =2 also re-prepares serially and compares).
+int ecstasyAsyncParticles=[] {
+#if defined(__vita__) || defined(__SWITCH__)
+    return 1;
+#else
+    const char* value=std::getenv("HP2_ASYNC_PARTICLES");return value ? std::atoi(value):1;
+#endif
+}();
+// prepared sets, committed calls, fallback calls, verify mismatches, failures
+std::uint64_t ecstasyAsyncParticleStats[5]{};
 // Diagnostic phase (Vita watchdog): main 1 launched, 2 finishing, 3 closing,
 // 4 merged/done; job +10: 10 waiting for view1 zones, 11 rendering, 12 done.
 std::atomic<int> ecstasyAsyncMirrorPhase{0};
@@ -4807,6 +4820,11 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     };
     // Asynchronous rear-view scenery (exact). Launched before view1 so it
     // overlaps view1's scenery and world tail; merged at view3's position.
+    // Particle prepare (slot 1): [view slot 0/1 = views 1/3][list 0 Frame, 1 World].
+    static WorldParticlePrepared asyncParticlePrepared[2][2];
+    struct AsyncParticleView {
+        const CarCinematicScreen* view{};CarCinematicScreen screen{};CarCinematicViewFrame camera{};
+    };
     struct AsyncMirrorJob {
         SceneryResources* scenery{};const CarCinematicScreen* view{};EcstasyFrame* aux{};
         std::uint32_t mask{};std::int32_t worldFrames{};
@@ -4814,9 +4832,23 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         std::atomic<int> collectReady{0};
         std::exception_ptr failure;
         std::uint32_t micros{};
+        // Particles (index 1).
+        bool particles{};
+        const WorldParticleSystem* lists[2]{};const ChopperEffectData* catalogue{};
+        AsyncParticleView particleViews[2];
+        std::exception_ptr particleFailure;
         static void Run(void* context,unsigned index) {
-            if(index!=0)return;
             auto& job=*static_cast<AsyncMirrorJob*>(context);
+            if(index==1) {
+                if(!job.particles)return;
+                try {
+                    for(int v=0;v<2;++v)for(int l=0;l<2;++l)
+                        PrepareWorldParticles(*job.lists[l],*job.catalogue,*job.particleViews[v].view,
+                            asyncParticlePrepared[v][l],true);
+                } catch(...) {job.particleFailure=std::current_exception();}
+                return;
+            }
+            if(index!=0)return;
             const auto started=std::chrono::steady_clock::now();
             ecstasyAsyncMirrorPhase.fetch_add(10);
 #if !defined(__vita__) && !defined(__SWITCH__)
@@ -4867,6 +4899,22 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         asyncMirror.screen=view;asyncMirror.camera=view.view->current;
         job.capture.collectReady=&job.collectReady; // the job waits for view1's zone lookup
         scenery->SetCollectSignal(&job.collectReady);
+        // Particles for views 1 and 3 (the only active views here). View1's
+        // world matrices are recalculated now (the sky pass left its own);
+        // the world loop recalculates the same values again.
+        if(ecstasyAsyncParticles && scene.effects) {
+            auto& main=views.screens[1];
+            Require(ecstasyViewCalculateMatrices(&views,&main,0,0,0)==CAR_CINEMATIC_OK,
+                "Original world projection could not be calculated");
+            job.particles=true;job.catalogue=&resources->Effects();
+            job.lists[0]=&scene.effects->FrameParticles();job.lists[1]=&scene.effects->Particles();
+            const CarCinematicScreen* targets[2]={&main,&view};
+            for(int v=0;v<2;++v) {
+                auto& snapshot=job.particleViews[v];
+                snapshot.view=targets[v];snapshot.screen=*targets[v];snapshot.camera=targets[v]->view->current;
+            }
+            ++ecstasyAsyncParticleStats[0];
+        }
         asyncMirror.launched=true;
         ++ecstasyAsyncMirrorStats[0];
         ecstasyAsyncMirrorPhase.store(1);
@@ -5040,10 +5088,41 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     // allocation pools, not live particles. Both borrow the retained catalogue.
     if(scene.emitRaceGeometry && scene.effects) {
         auto& catalogue=resources->Effects();
+        auto& job=asyncMirror.job;
+        const bool prepared=asyncMirror.launched && asyncMirror.finished && job.particles;
+        if(prepared && job.particleFailure)++ecstasyAsyncParticleStats[4];
         for(std::size_t i=1;i<4;++i)if(active(views.screens[i])) {
-            ecstasyViewSetCurrent(&views,&views.screens[i]);
-            (void)RenderWorldParticles(scene.effects->FrameParticles(),catalogue,views.screens[i],frame);
-            (void)RenderWorldParticles(scene.effects->Particles(),catalogue,views.screens[i],frame);
+            auto& view=views.screens[i];
+            ecstasyViewSetCurrent(&views,&view);
+            const int slot=i==1 ? 0:i==3 ? 1:-1;
+            bool same=false;
+            if(prepared && slot>=0 && !job.particleFailure) {
+                // Exact only if nothing the prepare read changed since.
+                const auto& snapshot=job.particleViews[slot];
+                constexpr auto first=offsetof(CarCinematicScreen,pixelScale);
+                constexpr auto last=offsetof(CarCinematicScreen,matricesCalculated)+1;
+                same=snapshot.view==&view && view.view==snapshot.screen.view && view.id==snapshot.screen.id &&
+                    view.target==snapshot.screen.target &&
+                    std::memcmp(reinterpret_cast<const char*>(&view)+first,reinterpret_cast<const char*>(&snapshot.screen)+first,last-first)==0 &&
+                    std::memcmp(&view.view->current,&snapshot.camera,sizeof(snapshot.camera))==0;
+            }
+            const WorldParticleSystem* lists[2]={&scene.effects->FrameParticles(),&scene.effects->Particles()};
+            for(int l=0;l<2;++l) {
+                if(same) {
+                    auto& ready=asyncParticlePrepared[slot][l];
+#if !defined(__vita__) && !defined(__SWITCH__)
+                    if(ecstasyAsyncParticles==2) {
+                        static WorldParticlePrepared check;
+                        PrepareWorldParticles(*lists[l],catalogue,view,check,true);
+                        if(!WorldParticlesPreparedEqual(ready,check))++ecstasyAsyncParticleStats[3];
+                    }
+#endif
+                    (void)CommitWorldParticles(ready,view,frame);++ecstasyAsyncParticleStats[1];
+                } else {
+                    if(prepared && slot>=0)++ecstasyAsyncParticleStats[2];
+                    (void)RenderWorldParticles(*lists[l],catalogue,view,frame);
+                }
+            }
         }
     }
     captureCheckpoint(3);

@@ -1515,11 +1515,16 @@ static std::array<std::array<std::uint64_t,8>,2> particleSplitMicros{}; // +draw
 // scene pool on cores 1/2 even while other scene jobs run inline
 // (particles_jobs_serial.txt turns this off).
 int ecstasyParticleJobsPooled=1;
-WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& system,
-    const ChopperEffectData& catalogue,const CarCinematicScreen& view,EcstasyFrame& frame)
+// Walk + quad build (pure reads of the simulation and view) into `out`;
+// CommitWorldParticles attaches it. serialBuild: run the build inline (a
+// collision helper preparing ahead of the owner).
+void PrepareWorldParticles(const WorldParticleSystem& system,const ChopperEffectData& catalogue,
+    const CarCinematicScreen& view,WorldParticlePrepared& out,bool serialBuild)
 {
-    WorldParticleRenderSummary result;
-    if(!system.firstGroup)return result;
+    out.result={};out.plans.clear();out.particles.clear();out.owners.clear();
+    out.view=&view;out.system=&system;
+    auto& result=out.result;
+    if(!system.firstGroup)return;
     const bool splitTimed=diagFineTimers && collisionWitnessClockMicros!=nullptr;
     auto& split=particleSplitMicros[view.id==3 ? 1:0];
     std::uint32_t splitMark=splitTimed ? collisionWitnessClockMicros():0u;
@@ -1551,21 +1556,10 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
     // each particle's quad in its own slot (pure reads of the simulation);
     // the owner then counts, sums depth in source order and attaches each
     // group in source list order.
-    struct GroupPlan {
-        const WorldParticleDefinition* definition;const EditorMarkerTexture* descriptor;
-        std::uint8_t widthPower;std::uint32_t width,height;float du,dv,inverseLifetime,maximum;
-        std::size_t first,count;
-    };
-    enum : std::uint8_t {Drawn,CenterClipped,SizeClipped,DistanceClipped};
-    struct ParticleSlot {EcstasyParticleQuad quad;float depth;std::uint8_t status;};
-    // Per capture thread; workers must use the owner's storage through these
-    // references (a thread_local named inside the job would be their own).
-    static thread_local std::vector<GroupPlan> planStorage;
-    static thread_local std::vector<const WorldParticle*> particleStorage;
-    static thread_local std::vector<std::uint32_t> ownerStorage;
-    static thread_local std::vector<ParticleSlot> slotStorage;
-    auto& plans=planStorage;auto& particles=particleStorage;auto& owners=ownerStorage;auto& slots=slotStorage;
-    plans.clear();particles.clear();owners.clear();
+    using GroupPlan=WorldParticlePrepared::GroupPlan;
+    enum : std::uint8_t {Drawn=WorldParticlePrepared::Drawn,CenterClipped,SizeClipped,DistanceClipped};
+    // Workers use the owner's storage through these references.
+    auto& plans=out.plans;auto& particles=out.particles;auto& owners=out.owners;auto& slots=out.slots;
     for(const auto* group=system.firstGroup;group;group=group->next) {
         ++result.groups;
         Require(group->occupied && group->definition,"Particle list contains a retired definition/group");
@@ -1682,13 +1676,14 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
     RunNativeSceneJobs(chunkCount,[&](std::size_t chunk) {
         const auto first=chunk*particleChunk,last=std::min(first+particleChunk,particles.size());
         for(auto index=first;index<last;++index)buildQuad(index);
-    },ecstasyParallelParticles ? 3:std::numeric_limits<std::size_t>::max(),2,ecstasyParticleJobsPooled!=0);
+    },ecstasyParallelParticles && !serialBuild ? 3:std::numeric_limits<std::size_t>::max(),2,
+        ecstasyParticleJobsPooled!=0 && !serialBuild);
 #if !defined(__SWITCH__) && !defined(__vita__)
     // PC HP2_VERIFY_PARTICLES=1: rebuild every slot serially and compare.
     static const bool verifyParticles=[] {const char* value=std::getenv("HP2_VERIFY_PARTICLES");return value && *value=='1';}();
     if(verifyParticles && !particles.empty()) {
         static std::uint64_t checks=0,mismatches=0,calls=0;
-        const std::vector<ParticleSlot> parallel(slots.begin(),slots.begin()+particles.size());
+        const std::vector<WorldParticlePrepared::ParticleSlot> parallel(slots.begin(),slots.begin()+particles.size());
         for(std::size_t index=0;index<particles.size();++index) {
             buildQuad(index);++checks;
             const auto& a=parallel[index];const auto& b=slots[index];
@@ -1710,6 +1705,43 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
     }
 #endif
     splitAt(1);
+}
+
+bool WorldParticlesPreparedEqual(const WorldParticlePrepared& a,const WorldParticlePrepared& b)
+{
+    if(a.plans.size()!=b.plans.size() || a.particles!=b.particles || a.owners!=b.owners ||
+        std::memcmp(&a.result,&b.result,sizeof(a.result))!=0)return false;
+    const auto bits=[](float x) {std::uint32_t v;std::memcpy(&v,&x,4);return v;};
+    for(std::size_t i=0;i<a.plans.size();++i) {
+        const auto& x=a.plans[i];const auto& y=b.plans[i];
+        if(x.definition!=y.definition || x.descriptor!=y.descriptor || x.widthPower!=y.widthPower ||
+            x.width!=y.width || x.height!=y.height || bits(x.du)!=bits(y.du) || bits(x.dv)!=bits(y.dv) ||
+            bits(x.inverseLifetime)!=bits(y.inverseLifetime) || bits(x.maximum)!=bits(y.maximum) ||
+            x.first!=y.first || x.count!=y.count)return false;
+    }
+    for(std::size_t i=0;i<a.particles.size();++i) {
+        const auto& x=a.slots[i];const auto& y=b.slots[i];
+        if(x.status!=y.status)return false;
+        if(x.status==WorldParticlePrepared::Drawn && (std::memcmp(&x.quad,&y.quad,sizeof(x.quad))!=0 ||
+            std::memcmp(&x.depth,&y.depth,sizeof(x.depth))!=0))return false;
+    }
+    return true;
+}
+
+WorldParticleRenderSummary CommitWorldParticles(const WorldParticlePrepared& prepared,
+    const CarCinematicScreen& view,EcstasyFrame& frame)
+{
+    auto result=prepared.result;
+    if(!prepared.system || !prepared.system->firstGroup)return result;
+    const bool splitTimed=diagFineTimers && collisionWitnessClockMicros!=nullptr;
+    auto& split=particleSplitMicros[view.id==3 ? 1:0];
+    std::uint32_t splitMark=splitTimed ? collisionWitnessClockMicros():0u;
+    const auto splitAt=[&](std::size_t part) {
+        if(!splitTimed)return;
+        const auto now=collisionWitnessClockMicros();split[part]+=now-splitMark;splitMark=now;
+    };
+    enum : std::uint8_t {Drawn=WorldParticlePrepared::Drawn,CenterClipped,SizeClipped,DistanceClipped};
+    const auto& plans=prepared.plans;const auto& particles=prepared.particles;const auto& slots=prepared.slots;
     // Survivors go straight into the frame's next owned group (an empty
     // group is not committed and its storage is reused by the next one).
     for(const auto& plan:plans) {
@@ -1750,5 +1782,13 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
     // average-depth alpha key is sorted with scenery and cars by the later
     // AttachAlphaPolys flush, without reordering this packet's own quads.
     return result;
+}
+
+WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& system,
+    const ChopperEffectData& catalogue,const CarCinematicScreen& view,EcstasyFrame& frame)
+{
+    static thread_local WorldParticlePrepared prepared;
+    PrepareWorldParticles(system,catalogue,view,prepared,false);
+    return CommitWorldParticles(prepared,view,frame);
 }
 } // namespace hp2

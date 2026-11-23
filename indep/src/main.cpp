@@ -73,7 +73,7 @@ extern uint64_t collisionPipeZeroKind[6],collisionPipeRelayouts;
 extern uint64_t collisionPipeLong,collisionPipeZeroDraw,collisionPipeBehind[9];
 extern uint64_t collisionPipeMissPair,collisionPipeMissStart,collisionPipeShort,collisionPipeDrawDelta[4];
 extern uint64_t collisionPipeContacts,collisionPipeEntryMisses,collisionPipeBreaks,collisionPipeTasks,collisionPipeUsed,collisionPipePasses;
-namespace hp2 { extern std::uint64_t ecstasyAsyncMirrorStats[12]; }
+namespace hp2 { extern std::uint64_t ecstasyAsyncMirrorStats[12]; extern int ecstasyAsyncParticles; extern std::uint64_t ecstasyAsyncParticleStats[5]; }
 namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; extern std::array<std::uint64_t,7> ecstasyIndexCacheStats; extern std::array<double,4> ecstasyDiscardSetupSplitMs; extern int ecstasyDiscardSink; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
@@ -91,7 +91,7 @@ extern uint64_t collisionWitnessKindMicros[9],collisionWitnessKindSteps[9];
 static double soundUpdatePeakMs=0;
 extern std::array<double,8> carMoverModeMs;
 extern std::array<std::uint32_t,8> carMoverModeCalls;
-extern uint64_t worldParallelCaptureStats[4];
+extern uint64_t worldParallelCaptureStats[5];
 extern std::atomic<uint32_t> terrainTopologyAcquireFailures;
 extern int worldParallelCapture;
 extern std::atomic<uint64_t> collisionWitnessCacheChecks,collisionWitnessCacheMismatches;
@@ -1484,11 +1484,11 @@ bool ApplicationRuntime::Tick()
                     ms={};calls={};
                     {
                         auto& pc=::worldParallelCaptureStats;
-                        std::snprintf(detail,sizeof(detail),"mode=%d parallel_loops=%llu parallel_movers=%llu serial_loops=%llu terrain_full_disables=%llu terrain_acquire_failures=%u",
+                        std::snprintf(detail,sizeof(detail),"mode=%d parallel_loops=%llu parallel_movers=%llu serial_loops=%llu terrain_full_disables=%llu terrain_acquire_failures=%u munition_steps=%llu",
                             ::worldParallelCapture,static_cast<unsigned long long>(pc[0]),static_cast<unsigned long long>(pc[1]),
                             static_cast<unsigned long long>(pc[2]),static_cast<unsigned long long>(pc[3]),
-                            ::terrainTopologyAcquireFailures.load());
-                        s.host.RecordSessionEvent("render.parallel_capture",detail);pc[0]=pc[1]=pc[2]=0;
+                            ::terrainTopologyAcquireFailures.load(),static_cast<unsigned long long>(pc[4]));
+                        s.host.RecordSessionEvent("render.parallel_capture",detail);pc[0]=pc[1]=pc[2]=pc[4]=0;
                     }
                     if(auto& t=mellowSplitMicros;t[7]) {
                         const double n=static_cast<double>(t[7]);
@@ -1569,6 +1569,13 @@ bool ApplicationRuntime::Tick()
                         (unsigned long long)a[10],(unsigned long long)a[11]);
                     s.host.RecordSessionEvent("render.async_mirror",detail);
                     const auto mismatches=a[7];std::fill(std::begin(a),std::end(a),0);a[7]=mismatches;
+                }
+                if(auto& a=hp2::ecstasyAsyncParticleStats;a[0]) {
+                    std::snprintf(detail,sizeof(detail),"mode=%d prepared=%llu committed=%llu fallbacks=%llu verify_mismatches=%llu failures=%llu",
+                        hp2::ecstasyAsyncParticles,(unsigned long long)a[0],(unsigned long long)a[1],(unsigned long long)a[2],
+                        (unsigned long long)a[3],(unsigned long long)a[4]);
+                    s.host.RecordSessionEvent("render.async_particles",detail);
+                    const auto mismatches=a[3];std::fill(std::begin(a),std::end(a),0);a[3]=mismatches;
                 }
                 {
                     if(const auto checks=::collisionWitnessCacheChecks.load()) {
