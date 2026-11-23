@@ -1,6 +1,7 @@
 #ifndef NFSHP2_ECSTASY_HPP
 #define NFSHP2_ECSTASY_HPP
 
+#include "bware/inc/bSharedBytes.hpp"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -585,7 +586,7 @@ private:
  * same registry, independently of the eSolid/eAnimationTree catalogues. */
 class PositionMarkerResources final {
 public:
-    PositionMarkerResources(const std::vector<std::uint8_t>& bundle,
+    PositionMarkerResources(SharedBytes bundle,
         PositionMarkerRegistry& registry);
     ~PositionMarkerResources();
     PositionMarkerResources(const PositionMarkerResources&) = delete;
@@ -600,7 +601,7 @@ private:
         std::size_t count=0;
     };
     PositionMarkerRegistry& registry_;
-    std::vector<std::uint8_t> authored_;
+    SharedBytes authored_;
     std::vector<Block> blocks_;
 };
 
@@ -611,7 +612,7 @@ namespace hp2 {
  * marker handles. The CPU catalogue does not emulate a console renderer. */
 class TrackRouteEditorResources final {
 public:
-    explicit TrackRouteEditorResources(const std::vector<std::uint8_t>& ingame,
+    explicit TrackRouteEditorResources(SharedBytes ingame,
         EditorMarkerResources* registry=nullptr);
     ~TrackRouteEditorResources();
     TrackRouteEditorResources(const TrackRouteEditorResources&) = delete;
@@ -626,7 +627,7 @@ private:
         std::vector<float> matrices;
         std::vector<std::uint16_t> labels;
     };
-    std::vector<std::uint8_t> authored_;
+    SharedBytes authored_;
     std::vector<std::unique_ptr<RigidAnimationStorage>> rigidAnimations_;
     std::vector<EditorMarkerSolid> solids_;
     std::vector<std::unique_ptr<EditorMarkerVertexAnimation>> vertexAnimations_;
@@ -1670,7 +1671,7 @@ namespace hp2 {
  * resource adapter does not implement the renderer or skeletal playback. */
 class CarReplayAnimationResources final {
 public:
-    explicit CarReplayAnimationResources(const std::vector<std::uint8_t>& bundle,
+    explicit CarReplayAnimationResources(SharedBytes bundle,
         CarReplayAnimationRegistry* registry = nullptr,EditorMarkerResources* modelRoot = nullptr,
         bool ownModelCatalogue = true);
     ~CarReplayAnimationResources();
@@ -1683,7 +1684,7 @@ public:
     bool Register(CarReplayAnimationRegistry& registry) noexcept;
     void Unregister() noexcept;
 private:
-    std::vector<std::uint8_t> authored_;
+    SharedBytes authored_;
     std::unique_ptr<TrackRouteEditorResources> models_;
     EditorMarkerResources* modelView_{};
     /* These decoded buffers are the sole CPU pose streams. Retained authored

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bware/inc/bSharedBytes.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -328,7 +329,7 @@ class EventTreeResources final {
 public:
     explicit EventTreeResources(GameResources& resources);
     EventTreeResources(GameResources& resources,CarInfoAvailability availability);
-    explicit EventTreeResources(std::vector<std::uint8_t> authored,bool demoDisc=false);
+    explicit EventTreeResources(SharedBytes authored,bool demoDisc=false);
     EventTreeResources(const EventTreeResources&)=delete;
     EventTreeResources& operator=(const EventTreeResources&)=delete;
     EventTreeResources(EventTreeResources&&)=delete;
@@ -338,7 +339,7 @@ public:
     EventTree& TreeAt(std::size_t index) const;
     EventTree* PrimaryTree(std::size_t index) const;
 private:
-    std::vector<std::uint8_t> authored_;
+    SharedBytes authored_;
     std::vector<std::unique_ptr<EventTree>> trees_;
     std::array<EventTree*,2> primaryTrees_{};
 };

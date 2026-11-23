@@ -258,9 +258,10 @@ float coordinate(const std::uint8_t* bytes)
 }
 }
 
-TrackScenarioData::TrackScenarioData(const std::vector<std::uint8_t>& track)
-    : authored_(track)
+TrackScenarioData::TrackScenarioData(SharedBytes shared)
+    : authored_(std::move(shared))
 {
+    const std::vector<std::uint8_t>& track=authored_.get();
     bool scenariosFound = false;
     const auto visit = [&](const auto& self, std::size_t start, std::size_t length, unsigned depth) -> void {
         Require(depth <= 32, "Track scenario hierarchy is too deep");

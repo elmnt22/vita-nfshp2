@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include "bware/inc/bWare.hpp"
+#include "bware/inc/bSharedBytes.hpp"
 
 struct CarFrameLiveReplay;
 struct CarViewCameraResources;
@@ -32,6 +33,7 @@ struct Chunk {
     std::size_t endOffset = 0;
     bool IsContainer() const noexcept { return (id & 0x80000000u) != 0; }
 };
+
 
 inline std::vector<Chunk> ReadChunks(const std::vector<std::uint8_t>& data,
     std::size_t offset = 0, std::size_t length = static_cast<std::size_t>(-1))

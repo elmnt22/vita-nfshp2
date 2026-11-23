@@ -82,7 +82,7 @@ struct LoadedFrontendResources final {
     std::vector<frontend::FlailerScreenResource*> screens;
     std::uint64_t flailerBundle{};
     bool profilesBound{};
-    LoadedFrontendResources(const std::vector<std::uint8_t>& bytes,ResourceRegistry& shared,
+    LoadedFrontendResources(const SharedBytes& bytes,ResourceRegistry& shared,
         const ResourceFrontendBindings& bindings,ResourceFileKind kind)
         :registry(shared),profiles(bindings.profiles),renderer(bindings.renderer),
          events(kind==ResourceFileKind::Frontend ?
@@ -230,7 +230,7 @@ struct LoadedTrackResources final {
 
     // PAL1691FC..169210 publishes TrackPath reverse==1 before InitTrackRoutes.
     // The path and preprocessed road must consume that same direction.
-    LoadedTrackResources(const std::vector<std::uint8_t>& bytes,ResourceRegistry& registry,
+    LoadedTrackResources(const SharedBytes& bytes,ResourceRegistry& registry,
         const RaceParameters& parameters,CarSoundBindings& audio,WorldParticleSystem& particles)
         :track(bytes),terrain(track.Authored()),route(track.Authored(),parameters.reverse==1),
          recovery(track.Authored(),&route.Native(),parameters.reverse==1),
@@ -335,6 +335,8 @@ struct ResourceFile::Storage {
     std::uint32_t flags{};
     PhysicalResource physical;
     std::vector<std::uint8_t> data;
+    // After decoding, the published bytes every retained owner shares.
+    SharedBytes shared;
     std::int32_t transfersPending{};
     std::int32_t queuedId{};
     std::exception_ptr failure;
@@ -523,15 +525,16 @@ std::size_t ResourceLoader::ServiceResourceLoading()
             std::memcmp(file.data.data(),"COMP",4)==0)
             file.data=DecodeComp(file.data);
         decodedBytes=file.data.size();
+        file.shared=SharedBytes(std::move(file.data));
         bool animations=false,cameras=false;
         const bool trackVisual=file.bindings.kind==ResourceFileKind::TrackCommon || file.bindings.kind==ResourceFileKind::TrackAuxiliary;
         // Validate every top-level provider once before publication. Complete
         // bundle kinds do not need a second discarded ReadChunks vector.
-        if (trackVisual)animations=validateTrackVisualChunks(file.data);
-        else if (file.bindings.kind==ResourceFileKind::Track)validateTrackChunks(file.data);
-        else if (file.bindings.kind==ResourceFileKind::Global)validateGlobalChunks(file.data);
-        else if (file.bindings.kind==ResourceFileKind::Frontend)validateFrontendChunks(file.data);
-        else for (const auto& chunk:ReadChunks(file.data)) {
+        if (trackVisual)animations=validateTrackVisualChunks(file.shared);
+        else if (file.bindings.kind==ResourceFileKind::Track)validateTrackChunks(file.shared);
+        else if (file.bindings.kind==ResourceFileKind::Global)validateGlobalChunks(file.shared);
+        else if (file.bindings.kind==ResourceFileKind::Frontend)validateFrontendChunks(file.shared);
+        else for (const auto& chunk:ReadChunks(file.shared)) {
             if (file.bindings.kind==ResourceFileKind::Car) {
                 switch (chunk.id) {
                 case 0:case 0x34013u:case 0x80034020u:case 0x34026u:case 0x34030u:case 0x80034000u:break;
@@ -544,34 +547,34 @@ std::size_t ResourceLoader::ServiceResourceLoading()
             }
         }
         Require(!(animations && cameras),"NIS animation/camera publication has mixed file ownership");
-        if (file.bindings.kind==ResourceFileKind::Global && !file.data.empty()) {
+        if (file.bindings.kind==ResourceFileKind::Global && !file.shared.empty()) {
             for (const auto& other:service.ordered)
                 Require(!other->storage_->globalData,"One GLOBALB owner must serve all live consumers");
-            auto global=std::make_unique<LoadedGlobalResources>(service.files,file.data,service.registry,
+            auto global=std::make_unique<LoadedGlobalResources>(service.files,file.shared,service.registry,
                 *file.bindings.global);
             file.resources.models=&service.registry.Models();file.resources.cars=&global->cars;
             file.resources.track=&global->tracks;file.resources.characters=&global->characters;
             file.resources.driverBehavior=&global->behavior;file.resources.nis=&global->nis;
             file.resources.effects=&global->effects;file.globalData=std::move(global);
         }
-        if ((file.bindings.kind==ResourceFileKind::Frontend || trackVisual) && !file.data.empty()) {
-            auto frontend=std::make_unique<LoadedFrontendResources>(file.data,service.registry,
+        if ((file.bindings.kind==ResourceFileKind::Frontend || trackVisual) && !file.shared.empty()) {
+            auto frontend=std::make_unique<LoadedFrontendResources>(file.shared,service.registry,
                 *file.bindings.frontend,file.bindings.kind);
             file.resources.models=&service.registry.Models();file.resources.frontendEvents=frontend->events.get();
             file.frontendData=std::move(frontend);
         }
         if (animations) {
-            file.animationData=std::make_unique<CarReplayAnimationResources>(file.data,
+            file.animationData=std::make_unique<CarReplayAnimationResources>(file.shared,
                 &service.registry.Animations(),&service.registry.Models(),!trackVisual);
             file.resources.models=&file.animationData->Models();
             file.resources.animations=&file.animationData->Animations();
         }
-        if (trackVisual && !file.data.empty()) {
-            file.collisionObjects=std::make_unique<CollisionObjectData>(file.data,file.bindings.terrain);
+        if (trackVisual && !file.shared.empty()) {
+            file.collisionObjects=std::make_unique<CollisionObjectData>(file.shared,file.bindings.terrain);
             file.resources.collisionObjects=file.collisionObjects.get();
-            Require(carViewCameraResourcesLoadBundle(file.bindings.cameras,file.data.data(),file.data.size()),
+            Require(carViewCameraResourcesLoadBundle(file.bindings.cameras,file.shared.data(),file.shared.size()),
                 "Track common camera resources failed actual decoding");
-            for (const auto& chunk:ReadChunks(file.data)) {
+            for (const auto& chunk:ReadChunks(file.shared)) {
                 if (chunk.id==0x80034410u)file.trackCameraGroups|=4u;
                 if (chunk.id==0x80034415u)file.trackCameraGroups|=8u;
                 if (chunk.id==0x34492u)file.trackCameraGroups|=16u;
@@ -581,21 +584,21 @@ std::size_t ResourceLoader::ServiceResourceLoading()
         if (file.bindings.kind==ResourceFileKind::Car) {
             // CollisionObjectData owns the hulls as well as the34026
             // definitions. Do not build a second CollisionResource array.
-            auto models=std::make_unique<TrackRouteEditorResources>(file.data,&service.registry.Models());
-            auto objects=std::make_unique<CollisionObjectData>(file.data,file.bindings.terrain);
-            auto damage=std::make_unique<CarDamageData>(file.data);
-            auto markers=std::make_unique<PositionMarkerResources>(file.data,*file.bindings.positionMarkers);
+            auto models=std::make_unique<TrackRouteEditorResources>(file.shared,&service.registry.Models());
+            auto objects=std::make_unique<CollisionObjectData>(file.shared,file.bindings.terrain);
+            auto damage=std::make_unique<CarDamageData>(file.shared);
+            auto markers=std::make_unique<PositionMarkerResources>(file.shared,*file.bindings.positionMarkers);
             file.modelData=std::move(models);file.collisionObjects=std::move(objects);
             file.damage=std::move(damage);file.positionMarkers=std::move(markers);
             file.resources.models=&file.modelData->Native();
             file.resources.collisionObjects=file.collisionObjects.get();file.resources.damage=file.damage.get();
         }
         if (file.bindings.kind==ResourceFileKind::Track) {
-            auto track=std::make_unique<LoadedTrackResources>(file.data,service.registry,
+            auto track=std::make_unique<LoadedTrackResources>(file.shared,service.registry,
                 *file.bindings.parameters,*file.bindings.sound,*file.bindings.particles);
-            Require(carViewCameraResourcesLoadBundle(file.bindings.cameras,file.data.data(),file.data.size()),
+            Require(carViewCameraResourcesLoadBundle(file.bindings.cameras,file.shared.data(),file.shared.size()),
                 "Track camera resources failed actual decoding");
-            for (const auto& chunk:ReadChunks(file.data)) {
+            for (const auto& chunk:ReadChunks(file.shared)) {
                 if (chunk.id==0x80034405u)file.trackCameraGroups|=1u;
                 if (chunk.id==0x80034425u)file.trackCameraGroups|=2u;
                 if (chunk.id==0x80034410u)file.trackCameraGroups|=4u;
@@ -613,10 +616,10 @@ std::size_t ResourceLoader::ServiceResourceLoading()
             Require(file.filename.size()>4,"NIS camera filename is too short");
             file.cameraIdentity=file.filename.substr(0,file.filename.size()-4);
             Require(carViewCameraResourcesLoadReplayFile(file.bindings.cameras,&service.files,
-                file.cameraIdentity.c_str(),file.data.data(),file.data.size())!=0,"Recorded camera file publication failed");
+                file.cameraIdentity.c_str(),file.shared.data(),file.shared.size())!=0,"Recorded camera file publication failed");
             file.cameraData=true;
         }
-        if (file.flags&4u)std::vector<std::uint8_t>().swap(file.data);
+        if (file.flags&4u)file.shared={};
         // This is an actual CPU dependency, not a renderer-complete callback.
         // It must refresh the same model/animation/texture/Flailer owners.
         {
@@ -787,7 +790,7 @@ void ResourceLoader::RetireResourceFile(ResourceFile* file,bool terminal)
             data.cameraIdentity.c_str(),data.bindings.cameraGroup);
         data.cameraData=false;data.cameraIdentity.clear();
     }
-    std::vector<std::uint8_t>().swap(data.data);
+    std::vector<std::uint8_t>().swap(data.data);data.shared={};
     if(!terminal)service.registry.PostLoadFixup();
     if (!data.loaded) {
         Require(service.pendingFiles!=0,"Failed ResourceFile count underflow");

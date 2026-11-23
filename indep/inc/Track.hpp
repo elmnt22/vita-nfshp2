@@ -3,6 +3,7 @@
 
 /* Native topology/cache declarations for the individually identified
  * TrackPolygon, TopologyCoordinate and TopologyTree consumers. */
+#include "bware/inc/bSharedBytes.hpp"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -273,18 +274,18 @@ private:
 
 class TrackScenarioData final {
 public:
-    explicit TrackScenarioData(const std::vector<std::uint8_t>& track);
+    explicit TrackScenarioData(SharedBytes track);
     TrackScenarioData(const TrackScenarioData&) = delete;
     TrackScenarioData& operator=(const TrackScenarioData&) = delete;
     const TrackScenarioCatalog& Catalog() const noexcept { return catalog_; }
     const std::vector<TrackScenarioDefinition>& Records() const noexcept { return scenarios_; }
     std::vector<TrackScenarioDefinition>& MutableRecords() noexcept { return scenarios_; }
-    const std::vector<std::uint8_t>& Authored() const noexcept { return authored_; }
+    const SharedBytes& Authored() const noexcept { return authored_; }
     const TrackScenarioDefinition* Find(std::int32_t index) const noexcept { return trackScenarioFind(&catalog_, index); }
     const TrackResourceInfo* CurrentInfo() const noexcept {return hasCurrentInfo_ ? &currentInfo_ : nullptr;}
 
 private:
-    std::vector<std::uint8_t> authored_;
+    SharedBytes authored_;
     std::vector<TrackScenarioDefinition> scenarios_;
     std::vector<TrackLandmark> landmarks_;
     TrackScenarioCatalog catalog_{};

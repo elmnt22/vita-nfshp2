@@ -921,7 +921,7 @@ EventTreeResources::EventTreeResources(GameResources& resources,CarInfoAvailabil
 {
 }
 
-EventTreeResources::EventTreeResources(std::vector<std::uint8_t> authored,bool demoDisc)
+EventTreeResources::EventTreeResources(SharedBytes authored,bool demoDisc)
     : authored_(std::move(authored))
 {
     const auto visit=[&](const auto& self,std::size_t begin,std::size_t size,unsigned depth)->void {

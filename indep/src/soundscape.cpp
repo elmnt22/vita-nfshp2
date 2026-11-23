@@ -721,7 +721,7 @@ WorldAudioResult soundScapeLoadResources(const CarSoundBindings& bindings,
         return WORLD_AUDIO_INVALID_BINDING;
     const WorldAudioResult bind = soundScapeBindServices(bindings);
     if (bind != WORLD_AUDIO_OK) return bind;
-    const auto& bytes = track.Authored();
+    const auto& bytes = track.Authored().get();
     try {
         std::vector<ReverbArea> areas;
         std::vector<hp2::Chunk> loopingChunks, oneShotChunks;
@@ -778,7 +778,7 @@ WorldAudioResult soundScapeBindServices(const CarSoundBindings& bindings)
 
 WorldAudioResult soundScapeUnloadResources(const hp2::TrackScenarioData& track)
 {
-    if (soundScape.resource != &track.Authored() || !soundScape.bindings) return WORLD_AUDIO_INVALID_BINDING;
+    if (soundScape.resource != &track.Authored().get() || !soundScape.bindings) return WORLD_AUDIO_INVALID_BINDING;
     try {
         soundScape.currentReverbAreaIndex = -1;
         soundScape.reverbAreas.clear();
@@ -836,7 +836,7 @@ std::exception_ptr soundScapeShutdownResources(const hp2::TrackScenarioData& tra
     const auto attempt=[&](auto&& action) noexcept {
         try {action();}catch(...) {if(!first)first=std::current_exception();}
     };
-    if(soundScape.resource && soundScape.resource!=&track.Authored()) {
+    if(soundScape.resource && soundScape.resource!=&track.Authored().get()) {
         attempt([]{throw std::runtime_error("Soundscape retirement encountered a different track owner");});
         return first;
     }

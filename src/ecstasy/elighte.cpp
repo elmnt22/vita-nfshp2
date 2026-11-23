@@ -328,8 +328,8 @@ float lightScalar(const std::uint8_t* source)
 }
 }
 
-LightSceneResources::LightSceneResources(const std::vector<std::uint8_t>& bundle,LightSceneRegistry& registry)
-    :registry_(registry),authored_(bundle)
+LightSceneResources::LightSceneResources(SharedBytes bundle,LightSceneRegistry& registry)
+    :registry_(registry),authored_(std::move(bundle))
 {
     for (const auto& outer:ReadChunks(authored_)) {
         if (outer.id==0x80034015u) {
@@ -446,8 +446,8 @@ LightSceneResources::~LightSceneResources()
     }
 }
 
-LightMaterialResources::LightMaterialResources(const std::vector<std::uint8_t>& bundle,EditorMarkerResources& bank)
-    :authored_(bundle),catalogue_(std::make_unique<EditorMarkerLightMaterialCatalogue>())
+LightMaterialResources::LightMaterialResources(SharedBytes bundle,EditorMarkerResources& bank)
+    :authored_(std::move(bundle)),catalogue_(std::make_unique<EditorMarkerLightMaterialCatalogue>())
 {
     for (const auto& chunk:ReadChunks(authored_))if (chunk.id==0x3401eu) {
         const auto start=(chunk.payloadOffset+15u)&~std::size_t(15u);

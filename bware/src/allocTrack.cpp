@@ -169,7 +169,7 @@ void AllocTrackCheckpoint(const char* tag) noexcept
         }
         inside=false;return;
     }
-    if(std::strcmp(tag,"enter:GAMEFLOW_STATE_IN_FRONTEND") || !epoch.load())return;
+    if((std::strcmp(tag,"enter:GAMEFLOW_STATE_IN_FRONTEND") && std::strcmp(tag,"enter:GAMEFLOW_STATE_RACING")) || !epoch.load())return;
     inside=true;
     struct Group {std::size_t bytes=0,count=0;std::uint32_t firstEpoch=~0u,lastEpoch=0;void* stack[Depth]{};};
     std::vector<Group,RawAllocator<Group>> groups;

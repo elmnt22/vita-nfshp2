@@ -1753,9 +1753,9 @@ std::unique_ptr<EditorMarkerSolidGeometry> decodeSolidGeometry(const std::vector
 }
 } // namespace
 
-TrackRouteEditorResources::TrackRouteEditorResources(const std::vector<std::uint8_t>& ingame,
+TrackRouteEditorResources::TrackRouteEditorResources(SharedBytes ingame,
     EditorMarkerResources* registry)
-    : authored_(ingame)
+    : authored_(std::move(ingame))
 {
     std::map<std::uint32_t,std::uint32_t> inheritedAnimations;
     std::vector<std::pair<std::uint32_t,std::size_t>> textureChunks;

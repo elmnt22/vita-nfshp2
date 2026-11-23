@@ -137,7 +137,7 @@ int32_t carDriverAnimationReadAllRotations(const CarReplayAnimationClip* clip,
 namespace hp2 {
 
 CarReplayAnimationResources::CarReplayAnimationResources(
-    const std::vector<std::uint8_t>& bundle, CarReplayAnimationRegistry* registry,EditorMarkerResources* modelRoot,
+    SharedBytes bundle, CarReplayAnimationRegistry* registry,EditorMarkerResources* modelRoot,
     bool ownModelCatalogue)
     : authored_(bundle)
 {
@@ -145,7 +145,7 @@ CarReplayAnimationResources::CarReplayAnimationResources(
     // Flailer bundle already owns all eSolid/texture chunks, so animations
     // borrow that catalogue instead of publishing the same models twice.
     Require(ownModelCatalogue || modelRoot,"Borrowed animation models have no canonical catalogue");
-    if (ownModelCatalogue)models_=std::make_unique<TrackRouteEditorResources>(bundle,modelRoot);
+    if (ownModelCatalogue)models_=std::make_unique<TrackRouteEditorResources>(authored_,modelRoot);
     modelView_=models_ ? &models_->Native() : modelRoot;
     const auto visit = [&](const auto& self, std::size_t begin,
             std::size_t size, unsigned depth) -> void {

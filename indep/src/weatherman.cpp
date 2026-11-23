@@ -248,7 +248,7 @@ WeatherManResult weatherManQuery(WeatherQuery* query, const float position[4])
 WeatherManResult weatherManLoadResources(const hp2::TrackScenarioData& track)
 {
     if (weather.resource) return WEATHER_MAN_INVALID_BINDING;
-    const auto& bytes = track.Authored();
+    const auto& bytes = track.Authored().get();
     try {
         std::vector<size_t> records;
         const auto visit = [&](const auto& self, size_t offset, size_t extent) -> void {
@@ -292,7 +292,7 @@ WeatherManResult weatherManLoadResources(const hp2::TrackScenarioData& track)
 
 WeatherManResult weatherManUnloadResources(const hp2::TrackScenarioData& track)
 {
-    if (weather.resource != &track.Authored()) return WEATHER_MAN_INVALID_BINDING;
+    if (weather.resource != &track.Authored().get()) return WEATHER_MAN_INVALID_BINDING;
     for (size_t index = 0; index < weather.count; ++index) weatherRemoveRegion(weather.regions[index]);
     weather.regions.reset();
     weather.count = 0;

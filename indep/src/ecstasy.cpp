@@ -73,9 +73,9 @@ const PositionMarker* positionMarkerFind(const PositionMarkerRegistry* registry,
 
 namespace hp2 {
 
-PositionMarkerResources::PositionMarkerResources(const std::vector<std::uint8_t>& bundle,
+PositionMarkerResources::PositionMarkerResources(SharedBytes bundle,
     PositionMarkerRegistry& registry)
-    : registry_(registry),authored_(bundle)
+    : registry_(registry),authored_(std::move(bundle))
 {
     const auto visit=[&](const auto& self,std::size_t begin,std::size_t size,unsigned depth)->void {
         Require(depth<=32,"Position marker resource nesting exceeds32 levels");

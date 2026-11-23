@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bware/inc/bSharedBytes.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -156,25 +157,25 @@ std::size_t RenderWorldLightFlares(const LightSceneRegistry& lights,ResourceRegi
 // sole LightMaterialResources owner.
 class LightSceneResources final {
 public:
-    LightSceneResources(const std::vector<std::uint8_t>& bundle,LightSceneRegistry& registry);
+    LightSceneResources(SharedBytes bundle,LightSceneRegistry& registry);
     ~LightSceneResources();
     LightSceneResources(const LightSceneResources&)=delete;
     LightSceneResources& operator=(const LightSceneResources&)=delete;
 private:
     LightSceneRegistry& registry_;
-    std::vector<std::uint8_t> authored_;
+    SharedBytes authored_;
     std::vector<std::unique_ptr<LightGroup>> groups_;
     std::vector<std::unique_ptr<LightFlarePack>> flares_;
 };
 
 class LightMaterialResources final {
 public:
-    LightMaterialResources(const std::vector<std::uint8_t>& bundle,EditorMarkerResources& bank);
+    LightMaterialResources(SharedBytes bundle,EditorMarkerResources& bank);
     ~LightMaterialResources();
     LightMaterialResources(const LightMaterialResources&)=delete;
     LightMaterialResources& operator=(const LightMaterialResources&)=delete;
 private:
-    std::vector<std::uint8_t> authored_;
+    SharedBytes authored_;
     std::unique_ptr<EditorMarkerLightMaterialCatalogue> catalogue_;
 };
 
