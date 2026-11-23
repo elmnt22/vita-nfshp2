@@ -1,6 +1,15 @@
 #include "bware/inc/bWare.hpp"
 #include <chrono>
 #include <atomic>
+#include <cstdio>
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <malloc.h>
+#elif defined(__vita__)
+#include <malloc.h>
+#endif
 
 
 namespace hp2::platform {
@@ -9,6 +18,50 @@ void BindSessionSink(NativeSessionSink sink) noexcept
 {sessionSink.store(sink,std::memory_order_release);}
 void RecordSessionEvent(const char* event,const char* detail) noexcept
 {if(const auto sink=sessionSink.load(std::memory_order_acquire))sink(event,detail);}
+
+HeapUsage QueryHeapUsage() noexcept
+{
+    HeapUsage usage;
+#if defined(__vita__)
+    const auto info=mallinfo();
+    usage.used=info.uordblks;usage.arena=info.arena;usage.free=info.fordblks;
+    usage.largestFree=0;usage.valid=true;
+#elif defined(_WIN32)
+    const HANDLE heap=reinterpret_cast<HANDLE>(_get_heap_handle());
+    if(!HeapLock(heap))return usage;
+    PROCESS_HEAP_ENTRY entry{};
+    while(HeapWalk(heap,&entry)) {
+        if(entry.wFlags&PROCESS_HEAP_ENTRY_BUSY)usage.used+=entry.cbData;
+        else if(!(entry.wFlags&(PROCESS_HEAP_REGION|PROCESS_HEAP_UNCOMMITTED_RANGE))) {
+            usage.free+=entry.cbData;
+            if(entry.cbData>usage.largestFree)usage.largestFree=entry.cbData;
+        }
+        if(entry.wFlags&PROCESS_HEAP_REGION)usage.arena+=entry.Region.dwCommittedSize;
+    }
+    HeapUnlock(heap);usage.valid=true;
+#endif
+    return usage;
+}
+
+namespace {std::atomic<HeapCheckpointHook> heapHook{nullptr};}
+void BindHeapCheckpointHook(HeapCheckpointHook hook) noexcept {heapHook.store(hook,std::memory_order_release);}
+namespace {std::atomic<OutOfMemoryHook> outOfMemoryHook{nullptr};}
+void BindOutOfMemoryHook(OutOfMemoryHook hook) noexcept {outOfMemoryHook.store(hook,std::memory_order_release);}
+void ReportOutOfMemory(const char* what) noexcept
+{
+    if(const auto hook=outOfMemoryHook.load(std::memory_order_acquire))hook(what);
+}
+void RecordHeapCheckpoint(const char* tag) noexcept
+{
+    if(const auto hook=heapHook.load(std::memory_order_acquire))hook(tag);
+    const auto usage=QueryHeapUsage();
+    if(!usage.valid)return;
+    char detail[192];
+    std::snprintf(detail,sizeof(detail),"tag=%s used_kb=%llu arena_kb=%llu free_kb=%llu largest_free_kb=%llu",
+        tag?tag:"?",(unsigned long long)(usage.used/1024),(unsigned long long)(usage.arena/1024),
+        (unsigned long long)(usage.free/1024),(unsigned long long)(usage.largestFree/1024));
+    RecordSessionEvent("memory.checkpoint",detail);
+}
 
 std::uint32_t TicksFromNanoseconds(std::uint64_t ns) noexcept {
     constexpr std::uint64_t kBillion = 1000000000ull;

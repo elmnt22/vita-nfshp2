@@ -40,6 +40,13 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // BeginGather also identifies validation performed during overlap
     // preflight. The sealed frame cannot mutate between that check and here.
     nativeGatherResidentEvents={};
+    {
+        const auto reset=ecstasyResidentResetEpoch.load(std::memory_order_acquire);
+        if(reset!=residentResetSeen) {
+            residentResetSeen=reset;residentGeometry.Reset();residentIndexCache.Reset();
+            decltype(modelRunRecords)().swap(modelRunRecords);
+        }
+    }
     residentGeometry.Begin(gatherSerial);residentIndexCache.Begin(gatherSerial);
     residentFrameVertices=0;residentFrameIndices=0;gatheredResidentIndexSpans.clear();gatheredResidentSpanTokens.clear();
     nativeStripJobs.clear();nativeWorkRanges.clear();nativeFrameShading.Clear();

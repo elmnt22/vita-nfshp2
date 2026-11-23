@@ -36,6 +36,19 @@ std::uint32_t fixedTickerDifference(std::uint32_t from, std::uint32_t to) noexce
 using NativeSessionSink=void(*)(const char* event,const char* detail) noexcept;
 void BindSessionSink(NativeSessionSink sink) noexcept;
 void RecordSessionEvent(const char* event,const char* detail=nullptr) noexcept;
+// Process allocator totals (Vita: newlib mallinfo; Windows: CRT heap walk).
+struct HeapUsage {std::uint64_t used=0,arena=0,free=0,largestFree=0;bool valid=false;};
+HeapUsage QueryHeapUsage() noexcept;
+// Records "memory.checkpoint tag=<tag> used_kb=..." in the session journal.
+void RecordHeapCheckpoint(const char* tag) noexcept;
+// Diagnostic observer called with each checkpoint tag (allocation tracker).
+using HeapCheckpointHook=void(*)(const char* tag) noexcept;
+void BindHeapCheckpointHook(HeapCheckpointHook hook) noexcept;
+// Out of memory while loading: the platform may recover (the Vita relaunches
+// the app, which returns the whole heap) instead of letting the error escape.
+using OutOfMemoryHook=void(*)(const char* what) noexcept;
+void BindOutOfMemoryHook(OutOfMemoryHook hook) noexcept;
+void ReportOutOfMemory(const char* what) noexcept;
 }
 
 // Native checked-boundary and little-endian transport helpers.

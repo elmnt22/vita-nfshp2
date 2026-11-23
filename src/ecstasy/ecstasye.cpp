@@ -461,6 +461,7 @@ void EditorMarkerSolidGeometry::Strip::PrepareNativeTopology()
 }
 
 std::atomic<std::uint64_t> ecstasyNativeStripEpoch{1};
+std::atomic<std::uint64_t> ecstasyResidentResetEpoch{0};
 
 void EditorMarkerSolidGeometry::Strip::StampNativeVertexRevision() noexcept
 {
@@ -8077,14 +8078,7 @@ public:
         // prepare them while the GPU reads the separate native buffers; the
         // presenter still waits before any GPU allocation, upload or reuse.
         // No current-Gather slot is recycled, even under cache pressure.
-        if(gather<=gather_) {
-            sources_.clear();free_.clear();frameSources_.fill(nullptr);live_=0;
-            for(std::size_t at=entries_.size();at;--at) {
-                entries_[at-1].reset();free_.push_back(static_cast<std::uint32_t>(at-1));
-                slotSerial_[at-1]=0;slotLastGather_[at-1]=0;slotPrepared_[at-1]=0;
-                slotPinnedUntil_[at-1]=0;slotPrewarmed_[at-1]=0;
-            }
-        }
+        if(gather<=gather_)Reset();
         gather_=gather;active_.clear();frameEntries_.fill(nullptr);
         validations_.clear();validationsReady_=false;
         frameEpoch_=ecstasyNativeStripEpoch.load(std::memory_order_acquire);
@@ -8098,6 +8092,17 @@ public:
             const auto slot=static_cast<std::uint32_t>(ageHand_);ageHand_=(ageHand_+1)%entries_.size();
             if(entries_[slot] && gather_-slotLastGather_[slot]>600 && slotPinnedUntil_[slot]<=gather_)Evict(slot);
         }
+    }
+    // Releases every CPU shadow (track unload: the borrowed strips are gone
+    // and the cache must not hold a race's geometry into the frontend).
+    void Reset() {
+        decltype(sources_)().swap(sources_);free_.clear();frameSources_.fill(nullptr);live_=0;
+        for(std::size_t at=entries_.size();at;--at) {
+            entries_[at-1].reset();free_.push_back(static_cast<std::uint32_t>(at-1));
+            slotSerial_[at-1]=0;slotLastGather_[at-1]=0;slotPrepared_[at-1]=0;
+            slotPinnedUntil_[at-1]=0;slotPrewarmed_[at-1]=0;
+        }
+        active_.clear();frameEntries_.fill(nullptr);validations_.clear();validationsReady_=false;
     }
     std::uint64_t FrameEpoch() const noexcept {return frameEpoch_;}
     std::size_t PreparedValidationCount() const noexcept {return validationsReady_ ? validations_.size():0;}
@@ -8431,12 +8436,14 @@ public:
     std::size_t Size() const noexcept {return entries_.size();}
     const std::vector<VkResidentIndexEntry*>& Active() const noexcept {return active_;}
     void Begin(std::uint64_t gather) {
-        if(gather<=gather_) {
-            entries_.clear();lookup_.clear();free_.clear();front_.fill({});
-            if(capacity_)free_.emplace(0,capacity_);
-        }
+        if(gather<=gather_)Reset();
         gather_=gather;active_.clear();
         while(!entries_.empty() && gather_-entries_.front().lastGather>600)Evict(entries_.begin());
+    }
+    void Reset() {
+        entries_.clear();decltype(lookup_)().swap(lookup_);free_.clear();front_.fill({});
+        if(capacity_)free_.emplace(0,capacity_);
+        active_.clear();
     }
     // tokens[i]==spans[i]->indexToken and indexTotal is the batch's summed
     // span index count (recorded at gather time, so a hit reads no entry).
@@ -9064,6 +9071,7 @@ struct EcstasyVulkanDevice::Storage {
     VkNativeBuffer residentVertices,residentStaging;
     VkNativeBuffer residentIndices,residentIndexStaging;
     VkResidentGeometryCache residentGeometry;
+    std::uint64_t residentResetSeen{};
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> modelRunRecords;
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> sceneryRunRecords;
     std::vector<VkSceneryFirstRecord> sceneryFirstRecords;

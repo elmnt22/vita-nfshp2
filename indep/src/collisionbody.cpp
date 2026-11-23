@@ -935,8 +935,10 @@ void collisionSystemFindPairs(CollisionSystem* system, CollisionParticipant* par
     }
 }
 
+void collisionWitnessMemoRelease();
 void collisionSystemDispose(CollisionSystem* system)
 {
+    collisionWitnessMemoRelease();
     while (system->contactRoot.next!=&system->contactRoot) collisionSystemDetachContact(system->contactRoot.next);
     while (system->pairRoot.next!=&system->pairRoot) collisionPairDestroy(system,system->pairRoot.next);
     // All source impact destructors have run before their pool storage dies.

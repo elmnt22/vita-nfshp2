@@ -372,6 +372,7 @@ struct EcstasyVulkanDevice::Storage {
     EcstasyVulkanFrameStatistics statistics;
     std::map<std::int32_t,VkDrawTarget> renderedTargets;
     VkResidentGeometryCache residentGeometry;
+    std::uint64_t residentResetSeen{};
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> modelRunRecords;
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> sceneryRunRecords;
     std::vector<VkSceneryFirstRecord> sceneryFirstRecords;

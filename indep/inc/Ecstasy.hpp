@@ -644,6 +644,9 @@ private:
 // recomputed: an unchanged epoch proves every revisioned strip that was
 // exactly validated earlier still holds those bytes at that address.
 extern std::atomic<std::uint64_t> ecstasyNativeStripEpoch;
+// Bumped when track geometry is unloaded: the renderer releases its resident
+// geometry/index caches at its next Gather.
+extern std::atomic<std::uint64_t> ecstasyResidentResetEpoch;
 struct NativeStripRevision {
     std::uint64_t value{};
     NativeStripRevision() noexcept=default;

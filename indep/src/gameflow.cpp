@@ -4,6 +4,7 @@
 #include "Texture.hpp"
 #include "bware/inc/bChunk.hpp"
 #include "bware/inc/bWare.hpp"
+#include <cstdio>
 #include "indep/inc/FMenus.hpp"
 #include "indep/inc/DemoDisc.hpp"
 #include "indep/inc/Timer.hpp"
@@ -1121,6 +1122,10 @@ GameFlowServiceResult ServiceGameFlow(ApplicationFrontendFlow& flow,const GameFl
                     // dependent on an optional visual effect being bound.
                 }
             }
+            {
+                char tag[96];std::snprintf(tag,sizeof(tag),"leave:%s",flowRows[flow.currentState].name);
+                hp2::platform::RecordHeapCheckpoint(tag);
+            }
             if (ending==Op::EndExitDemo)EndGameFlowExitDemoDisc(bindings);
             else if (ending==Op::EndLoadingFrontend)EndGameFlowLoadingFrontEnd(flow,bindings);
             else if (ending==Op::EndLoadingTrackSpecific)EndGameFlowLoadingTrackSpecific(flow,bindings);
@@ -1135,6 +1140,16 @@ GameFlowServiceResult ServiceGameFlow(ApplicationFrontendFlow& flow,const GameFl
             else if (flowRows[flow.currentState].begin==Op::BeginUnloadingTrackCommon)BeginGameFlowUnloadingTrackCommon(flow,bindings);
             else if (flowRows[flow.currentState].begin==Op::BeginUnloadingTrackSpecific)BeginGameFlowUnloadingTrackSpecific(flow,bindings);
             // BeginGameFlowNone168650 is exactly JR RA/NOP, omitted.
+            // Unloaded track/frontend geometry: release the renderer's resident
+            // caches (they would otherwise hold the retired race into the frontend).
+            if (flowRows[flow.currentState].begin==Op::BeginUnloadingTrackSpecific ||
+                flowRows[flow.currentState].begin==Op::BeginUnloadingTrackCommon ||
+                flowRows[flow.currentState].begin==Op::BeginUnloadingFrontend)
+                ecstasyResidentResetEpoch.fetch_add(1,std::memory_order_acq_rel);
+            {
+                char tag[96];std::snprintf(tag,sizeof(tag),"enter:%s",flowRows[flow.currentState].name);
+                hp2::platform::RecordHeapCheckpoint(tag);
+            }
         }
         switch (flowRows[flow.currentState].tick) {
         case Op::LoadingFrontend:

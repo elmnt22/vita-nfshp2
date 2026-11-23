@@ -636,6 +636,10 @@ std::size_t ResourceLoader::ServiceResourceLoading()
                 logResourceEvent("resource.decode.failed",file.filename,file.bindings.kind,file.type,file.flags,
                     0,decodedBytes,service.pendingFiles,elapsed,"non-standard exception");
             }
+            hp2::platform::RecordHeapCheckpoint("decode.failed");
+            try {std::rethrow_exception(file.failure);}
+            catch (const std::bad_alloc&) {hp2::platform::ReportOutOfMemory(file.filename.c_str());}
+            catch (...) {}
             throw;
         }
         file.loaded=true;

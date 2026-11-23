@@ -9,6 +9,8 @@
 #include <psp2/power.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/io/stat.h>
+#include <psp2/io/fcntl.h>
+#include <psp2/appmgr.h>
 #ifdef HP2_ENABLE_VITAGL
 #include <vitaGL.h>
 #endif
@@ -33,6 +35,7 @@
 #include <pthread.h>
 #include "crash.hpp"
 #include "audio.hpp"
+#include "alloccensus.hpp"
 extern int bMatrixNeonEnabled;
 namespace vita_selftest { void Run(void (*log)(const char*, const char*)); }
 #include <atomic>
@@ -45,7 +48,12 @@ extern "C" {
 // kernel/GPU. Tunable once the real footprint is measured.
 // Peak newlib use on heavy tracks ~215 MB (renderer.vitagl.memory_use); the
 // rest of user RAM goes to vitaGL, which otherwise runs out of GPU memory.
-unsigned int _newlib_heap_size_user = 280u * 1024u * 1024u;
+// newlib serves blocks under 1 MB; bigger ones come from kernel memory blocks
+// (src/vita/alloccensus.cpp) so a fragmented arena can't refuse them. The
+// 120 MB moved out of newlib stays free for those blocks: vitaGL's RAM
+// threshold below grows by the same amount, so its pool is unchanged.
+constexpr unsigned kBigBlockBudget = 120u * 1024u * 1024u;
+unsigned int _newlib_heap_size_user = 280u * 1024u * 1024u - kBigBlockBudget;
 unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 }
 
@@ -514,6 +522,15 @@ int main(int, char**)
     const auto saves = base / "Saves";
     std::error_code ignored;
     std::filesystem::create_directories(saves, ignored);
+    {   // After an out-of-memory relaunch keep the previous session's log.
+        const std::string dir = kDataDirectory;
+        SceIoStat relaunched{};
+        if (sceIoGetstat((dir + "/relaunched.txt").c_str(), &relaunched) >= 0) {
+            sceIoRemove((dir + "/relaunched.txt").c_str());
+            sceIoRemove((dir + "/NFSHP2_log_prev.txt").c_str());
+            sceIoRename((dir + "/NFSHP2_log.txt").c_str(), (dir + "/NFSHP2_log_prev.txt").c_str());
+        }
+    }
     VitaLog log((base / "NFSHP2_log.txt").string());
     g_log = &log;
     // Faults and uncaught exceptions write crash.txt and exit (no popup).
@@ -537,6 +554,44 @@ int main(int, char**)
     }
     hp2::platform::BindSessionSink([](const char* event, const char* detail) noexcept {
         if (g_log && std::strcmp(event, "file.open") != 0) g_log->Line(event, detail);
+    });
+    {
+        SceIoStat census{};
+        if (sceIoGetstat((std::string(kDataDirectory) + "/alloc_census.txt").c_str(), &census) >= 0) {
+            vita_census::Enable();
+            log.Line("vita.diag", "alloc census on");
+        }
+    }
+    hp2::platform::BindHeapCheckpointHook([](const char* tag) noexcept {
+        if (!tag || std::strncmp(tag, "enter:", 6) && std::strcmp(tag, "decode.failed")) return;
+#ifdef HP2_ENABLE_VITAGL
+        if (g_log) {
+            char detail[160];
+            std::snprintf(detail, sizeof(detail), "tag=%s vram_free_kb=%u ram_free_kb=%u phycont_free_kb=%u budget_free_kb=%u",
+                tag, static_cast<unsigned>(vglMemFree(VGL_MEM_VRAM) / 1024), static_cast<unsigned>(vglMemFree(VGL_MEM_RAM) / 1024),
+                static_cast<unsigned>(vglMemFree(VGL_MEM_PHYCONT) / 1024), static_cast<unsigned>(vglMemFree(VGL_MEM_BUDGET) / 1024));
+            g_log->Line("vita.gpu_memory", detail);
+            char heap[192]; vita_heap::Stats(heap, sizeof(heap));
+            g_log->Line("vita.heap", heap);
+        }
+#endif
+        if (!std::strcmp(tag, "enter:GAMEFLOW_STATE_LOADING_TRACK_COMMON")) vita_census::NextEpoch();
+        if (!std::strcmp(tag, "enter:GAMEFLOW_STATE_LOADING_FRONTEND") || !std::strcmp(tag, "enter:GAMEFLOW_STATE_LOADING_TRACK_SPECIFIC") ||
+            !std::strcmp(tag, "decode.failed"))
+            vita_census::Dump(tag, [](const char* event, const char* detail) { if (g_log) g_log->Line(event, detail); });
+    });
+    // Out of memory while loading (heap fragmented after a long race): relaunch
+    // the app instead of crashing. A fresh process returns the whole heap; the
+    // game boots back to the menus. The log is kept as NFSHP2_log_prev.txt.
+    hp2::platform::BindOutOfMemoryHook([](const char* what) noexcept {
+        if (g_log) {
+            g_log->Line("vita.out_of_memory", what ? what : "");
+            g_log->Line("vita.out_of_memory", "relaunching the app to recover the heap");
+            g_log->Flush();
+        }
+        const SceUID marker = sceIoOpen((std::string(kDataDirectory) + "/relaunched.txt").c_str(), SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+        if (marker >= 0) sceIoClose(marker);
+        sceAppMgrLoadExec("app0:eboot.bin", nullptr, nullptr);
     });
     try {
         #ifdef HP2_ENABLE_VITAGL
@@ -563,7 +618,11 @@ int main(int, char**)
             vglSetParamBufferSize((small ? 16u : 32u) * 1024u * 1024u);
             log.Line("vita.gl", small ? "parameter buffer 16 MB" : "parameter buffer 32 MB");
         }
-        vglInitExtended(4 * 1024 * 1024, kWidth, kHeight, 12 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
+        vglInitExtended(4 * 1024 * 1024, kWidth, kHeight, 12 * 1024 * 1024 + static_cast<int>(kBigBlockBudget), SCE_GXM_MULTISAMPLE_NONE);
+        {
+            char heap[192]; vita_heap::Stats(heap, sizeof(heap));
+            log.Line("vita.heap", heap);
+        }
         vglWaitVblankStart(GL_FALSE);
         log.Line("vita.gl", "vitaGL initialized");
         hp2::EcstasyVulkanOptions graphicsOptions;

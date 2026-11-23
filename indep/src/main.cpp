@@ -50,6 +50,8 @@
 #include "indep/inc/CameraMover.hpp"
 #include "indep/inc/CarDriver.hpp"
 #include "indep/inc/AnimatedDriver.hpp"
+#include <chrono>
+#include <cstdlib>
 #include <array>
 #include <cstring>
 #include <cstdio>
@@ -440,6 +442,7 @@ struct ApplicationRuntime::Storage {
             std::snprintf(detail,sizeof(detail),"screen=%08x race_state=%d scenario=%d mode=%d drivers=%d player_model=%d skin=%d demo=%d",
                 static_cast<unsigned>(state[0]),state[1],state[2],state[3],state[4],state[5],state[6],demoReplay.active);
             host.RecordSessionEvent("application.state",detail);
+            hp2::platform::RecordHeapCheckpoint("application.state");
         }
         const auto ticks=static_cast<uint32_t>(clock.realTimer);
         if(!simulation || !simulation->world || ticks-journalSummaryTicks<20000u)return;
@@ -979,6 +982,42 @@ bool ApplicationRuntime::Tick()
                 raceStartDrainsLeft=s.flow.inGameFlag ? nativeRaceStartDrainFrames:0;
             }
             s.RecordLifecycle(simulation,session);
+            // Diagnostic: HP2_AUTO_CYCLE="<race_seconds> <kind> <argument> <count>"
+            // after that many seconds racing quits through the pause menu
+            // (kind 10) or enqueues the action (9 = reload track, Next Race).
+            {
+                static const auto autoCycle=[] {
+                    std::array<int,4> value{};
+                    if(const char* text=std::getenv("HP2_AUTO_CYCLE"))
+                        if(std::sscanf(text,"%d %d %d %d",&value[0],&value[1],&value[2],&value[3])!=4)value={};
+                    return value;
+                }();
+                static int cyclesDone=0,phase=0;
+                static std::chrono::steady_clock::time_point since{};
+                const auto now=std::chrono::steady_clock::now();
+                if(autoCycle[0]>0 && cyclesDone<autoCycle[3] && session) {
+                    // kind 10: pause (5) then the pause menu's Quit (6,3);
+                    // other kinds are enqueued while racing (9 = Next Race path).
+                    if(session->state==3) {
+                        if(phase!=1) {phase=1;since=now;}
+                        else if(now-since>std::chrono::seconds(autoCycle[0])) {
+                            const bool quit=autoCycle[1]==10;
+                            if(raceActionsEnqueue(&session->actions,quit?5:autoCycle[1],quit?0:autoCycle[2])) {
+                                phase=quit?2:0;if(!quit)++cyclesDone;since=now;
+                                char detail[96];std::snprintf(detail,sizeof(detail),"kind=%d argument=%d cycle=%d",
+                                    quit?5:autoCycle[1],quit?0:autoCycle[2],cyclesDone);
+                                s.host.RecordSessionEvent("debug.auto_cycle",detail);
+                            }
+                        }
+                    } else if(session->state==6 && phase==2 && now-since>std::chrono::milliseconds(300)) {
+                        if(raceActionsEnqueue(&session->actions,6,3)) {
+                            ++cyclesDone;phase=0;
+                            char detail[96];std::snprintf(detail,sizeof(detail),"kind=6 argument=3 cycle=%d",cyclesDone);
+                            s.host.RecordSessionEvent("debug.auto_cycle",detail);
+                        }
+                    }
+                }
+            }
             // PAL12F40C gates the application checksum on the live InGameFlag.
             // World owns the in-race checksum; do not duplicate it or consume a
             // second Joylog channel3 record during the same gameplay frame.

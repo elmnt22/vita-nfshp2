@@ -892,6 +892,17 @@ bool walkMemoEnsure()
     }
     return walkMemoReady.load(std::memory_order_relaxed)>0;
 }
+}
+// Track retirement: no collision query is running. The table borrows feature
+// pointers of the retired track and is ~20 MB; the next race allocates it again.
+void collisionWitnessMemoRelease()
+{
+    std::lock_guard<std::mutex> lock(walkMemoAllocate);
+    if (walkMemoReady.load(std::memory_order_acquire)<=0) {walkMemoReady.store(0,std::memory_order_release);return;}
+    delete[] walkMemoTable;delete[] walkPoseTable;walkMemoTable=nullptr;walkPoseTable=nullptr;
+    walkMemoReady.store(0,std::memory_order_release);
+}
+namespace {
 inline uint32_t hashWords(const void* data,size_t bytes,uint32_t hash)
 {
     const unsigned char* at=static_cast<const unsigned char*>(data);
