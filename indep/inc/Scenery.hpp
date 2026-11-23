@@ -185,12 +185,19 @@ private:
     // allocating them again for every camera on every frame. No emitted
     // Ecstasy command borrows these arrays after the Render() call.
     struct RenderDraw {
-        EditorMarkerModel* model{};
-        std::array<float,16> matrix{};
-        std::int32_t clip{};
-        bool identity{};
-        bool nativeExtended{};
-        std::uint8_t nativeLod{};
+        EditorMarkerModel* model;
+        std::array<float,16> matrix;
+        std::int32_t clip;
+        bool identity;
+        bool nativeExtended;
+        std::uint8_t nativeLod;
+        RenderDraw() noexcept:model{},matrix{},clip{},identity{},nativeExtended{},nativeLod{} {}
+        // In-place construction from a cached frame: no zero fill and no
+        // temporary (one matrix copy instead of memset + two memcpy calls).
+        RenderDraw(EditorMarkerModel* source,const std::array<float,16>& frame,std::int32_t classification,
+            bool identityFrame,bool extended=false,std::uint8_t lod=0) noexcept
+            :model(source),matrix(frame),clip(classification),identity(identityFrame),
+            nativeExtended(extended),nativeLod(lod) {}
     };
     struct RenderNode {std::size_t index{};std::int32_t clip{};};
     struct RenderSectionCapture {

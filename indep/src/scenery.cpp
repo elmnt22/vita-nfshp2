@@ -20,6 +20,9 @@ namespace { int32_t currentZoneNumber=-1; } // PAL3302B0.
 extern uint32_t (*collisionWitnessClockMicros)();
 // Diagnostic traversal counters (owner views): tested, clip pass, mask+facing pass, pixel pass, nodes.
 static std::array<std::uint64_t,5> sceneryWalkCounters{};
+// Diagnostic (diag_fine): owner walk split, node phase vs leaf phase (ms sums).
+static std::array<double,2> sceneryWalkPhaseMs{};
+extern int diagFineTimers;
 // Two-phase section walk: collect the tree's leaves in visit order, then
 // evaluate them with software prefetch ahead (same order and results; the
 // Cortex-A9 otherwise stalls on each instance/model/footprint/frame line).
@@ -31,6 +34,64 @@ int ecstasySceneryPrefetch=[] {
 #endif
     return 1;
 }();
+// Leaf fast path: per-view invariant checks hoisted, branch-free XY
+// distances, saturating hardware conversion, in-place draw records. Same
+// draws and near-detail state. Vita scenery_leaf_fast_off.txt = 0; PC
+// HP2_SCENERY_LEAF_FAST (verified by HP2_SCENERY_PREFETCH=2).
+int ecstasySceneryLeafFast=[] {
+#if !defined(__vita__)
+    if(const char* value=std::getenv("HP2_SCENERY_LEAF_FAST"))return std::atoi(value);
+#endif
+    return 1;
+}();
+// Device check of the fast leaf arithmetic against the source helpers
+// (Vita scenery_leaf_verify.txt): checks and mismatches.
+int ecstasySceneryLeafVerify=0;
+std::array<std::uint64_t,2> ecstasySceneryLeafChecks{};
+}
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+namespace {
+// convertFloatToInt32 semantics (NaN 0, saturating, truncation). ARM VFP
+// vcvt.s32.f32 (round toward zero) implements exactly that without compares.
+inline std::int32_t sceneryLeafToInt32(float value) noexcept
+{
+#if defined(__arm__) && defined(__ARM_NEON)
+    float converted;
+    __asm__("vcvt.s32.f32 %0, %1":"=t"(converted):"t"(value));
+    std::int32_t result;std::memcpy(&result,&converted,sizeof(result));
+    return result;
+#else
+    return convertFloatToInt32(value);
+#endif
+}
+// min(instance-bounds, cached-footprint) squared XY distance for a finite
+// eye; equal to std::min(sceneryNativeDistanceSquaredXY(...),
+// sceneryNativeDistanceSquaredFootprintXY(...)) there. Per axis the clamped
+// delta max(lo-e, e-hi, 0) equals the source's branch chain (lo<=hi).
+inline float sceneryLeafSquaredXY(const SceneryInstance& instance,const float footprint[4],bool footprintValid,
+    const float eye[3]) noexcept
+{
+    const bool instanceValid=instance.minimum[0]<=instance.maximum[0] && instance.minimum[1]<=instance.maximum[1];
+#if defined(__ARM_NEON)
+    const auto e=vld1_f32(eye);
+    const auto zero=vdup_n_f32(0.0f);
+    const auto instanceLow=vcvt_f32_s32(vget_low_s32(vmovl_s16(vld1_s16(instance.minimum))));
+    const auto instanceHigh=vcvt_f32_s32(vget_low_s32(vmovl_s16(vld1_s16(instance.maximum))));
+    const auto instanceDelta=vmax_f32(vmax_f32(vsub_f32(instanceLow,e),vsub_f32(e,instanceHigh)),zero);
+    const auto footprintDelta=vmax_f32(vmax_f32(vsub_f32(vld1_f32(footprint),e),vsub_f32(e,vld1_f32(footprint+2))),zero);
+    // [instance x^2+y^2, footprint x^2+y^2]; an invalid source is +inf.
+    auto sums=vpadd_f32(vmul_f32(instanceDelta,instanceDelta),vmul_f32(footprintDelta,footprintDelta));
+    const uint32x2_t valid={instanceValid ? ~0u:0u,footprintValid ? ~0u:0u};
+    sums=vbsl_f32(valid,sums,vdup_n_f32(std::numeric_limits<float>::infinity()));
+    return vget_lane_f32(vpmin_f32(sums,sums),0);
+#else
+    (void)instanceValid;(void)footprintValid;
+    return std::min(hp2::sceneryNativeDistanceSquaredXY(instance,eye),
+        hp2::sceneryNativeDistanceSquaredFootprintXY(footprint,eye));
+#endif
+}
 }
 #if defined(__GNUC__)
 #define HP2_PREFETCH(address) __builtin_prefetch(address)
@@ -192,6 +253,8 @@ struct SceneryResources::SectionStorage {
     // XY footprint of the actual level-0 model, cached at load time;
     // no borrowed geometry pointer survives a resource reload.
     std::vector<std::array<float,4>> staticFineFootprints;
+    // 1 when that footprint was produced (finite, ordered bounds).
+    std::vector<std::uint8_t> staticFineFootprintValid;
     // A per-instance near-field state is written by the main view only.
     // Secondary/mirror cameras read their own eye for the near test and
     // cannot alter the main view's choice or render model identities.
@@ -350,6 +413,7 @@ SceneryResources::SceneryResources(const std::vector<std::uint8_t>& bundle,
             // for a camera-facing billboard or a source view-only Z offset.
             storage->staticRenderFrames.resize(storage->instances.size());
             storage->staticFineFootprints.resize(storage->instances.size());
+            storage->staticFineFootprintValid.assign(storage->instances.size(),0);
             storage->nearDetailState.assign(storage->instances.size(),0);
             for(std::size_t index=0;index<storage->instances.size();++index) {
                 const auto& instance=storage->instances[index];
@@ -375,7 +439,8 @@ SceneryResources::SceneryResources(const std::vector<std::uint8_t>& bundle,
                     -std::numeric_limits<float>::infinity()};
                 const auto& model=storage->models[instance.modelIndex];
                 if(!(instance.flags&0x200u) && !model.facade[0])
-                    (void)sceneryNativeModelFootprintXY(model,matrix.data(),footprint.data());
+                    storage->staticFineFootprintValid[index]=
+                        sceneryNativeModelFootprintXY(model,matrix.data(),footprint.data()) ? 1u:0u;
             }
             sectionIndex_[section.number]=&section;
             sectionStorageByNumber_[section.number]=storage;
@@ -751,6 +816,15 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         }
     }
     const auto splitRooted=std::chrono::steady_clock::now();
+    // Leaf fast path inputs, invariant for this view. Non-finite eye or
+    // quality values keep the original per-leaf helper calls.
+    const auto& leafQuality=nativeSceneQuality();
+    const float leafReachEnter=leafQuality.nearDetailEnter*leafQuality.nearDetailEnter;
+    const float leafReachExit=leafQuality.nearDetailExit*leafQuality.nearDetailExit;
+    bool leafFast=hp2::ecstasySceneryLeafFast!=0 && std::isfinite(leafReachEnter) && std::isfinite(leafReachExit);
+    const bool leafEyeFinite=std::isfinite(camera.eye[0]) && std::isfinite(camera.eye[1]);
+    const bool leafLodScaled=std::isfinite(leafQuality.sceneryLod) && leafQuality.sceneryLod>1.0f;
+    const bool leafNearSurface=0.0f<=leafQuality.highDetailSurface;
     const auto prepareSection=[&](const SectionStorage& storage,std::size_t ordinal,std::int32_t rootClip,
         std::vector<RenderDraw>& output,std::vector<RenderNode>& stack,std::vector<RenderNode>& nodeLeaves,
         std::vector<std::uint8_t>& nearState,std::size_t& visited,
@@ -773,6 +847,62 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             const float facing=(delta[0]*camera.forward[0]+delta[1]*camera.forward[1])+delta[2]*camera.forward[2];
             if (facing < -radius)return;
             if(!async)++sceneryWalkCounters[2];
+            if(leafFast) {
+                const float distance=std::sqrt((delta[0]*delta[0]+delta[1]*delta[1])+delta[2]*delta[2])-radius;
+                const float scale=radius<distance ? radius*sourcePixelScale/distance:sourcePixelScale;
+                const auto pixels=sceneryLeafToInt32(scale);
+                const auto visibilityPixels=distanceScale==1.0f ? pixels:sceneryLeafToInt32(scale*distanceScale);
+                if (visibilityPixels<2)return;
+                if(!async)++sceneryWalkCounters[3];
+                // View3 and a non-finite eye: +inf distance, never near.
+                bool near=false;
+                if(viewId!=3 && leafEyeFinite) {
+                    const float squaredXY=sceneryLeafSquaredXY(instance,storage.staticFineFootprints[index].data(),
+                        storage.staticFineFootprintValid[index]!=0,camera.eye);
+                    const bool wasNear=viewId==1 && nearState[index]!=0;
+                    near=squaredXY<=(wasNear ? leafReachExit:leafReachEnter);
+                }
+                if(hp2::ecstasySceneryLeafVerify && !async) {
+                    const float referenceSquared=viewId==3 ? std::numeric_limits<float>::infinity():std::min(
+                        hp2::sceneryNativeDistanceSquaredXY(instance,camera.eye),
+                        hp2::sceneryNativeDistanceSquaredFootprintXY(storage.staticFineFootprints[index].data(),camera.eye));
+                    const bool referenceNear=sceneryNativeNearDetailState(referenceSquared,viewId==1 && nearState[index]!=0);
+                    const auto referencePixels=convertFloatToInt32(scale);
+                    const auto referenceVisibility=distanceScale==1.0f ? referencePixels:convertFloatToInt32(scale*distanceScale);
+                    ++hp2::ecstasySceneryLeafChecks[0];
+                    if(referenceNear!=near || referencePixels!=pixels || referenceVisibility!=visibilityPixels)
+                        ++hp2::ecstasySceneryLeafChecks[1];
+                }
+                if(viewId==1)nearState[index]=static_cast<std::uint8_t>(near);
+                if(!emitGeometry)return;
+                // sceneryNativeSelectDetailLod with this view's quality.
+                std::size_t lod=0;
+                for(;lod<3;++lod)if(pixels>=model.minimumPixels[lod] && model.levels[lod].solid)break;
+                if(lod<3) {
+                    const auto visibleLod=lod;
+                    const auto detailPixels=leafLodScaled ? nativeDetailLodPixels(pixels,leafQuality.sceneryLod):pixels;
+                    for(lod=0;lod<visibleLod;++lod)
+                        if(detailPixels>=model.minimumPixels[lod] && model.levels[lod].solid)break;
+                    if(lod>0 && model.levels[0].solid && near && leafNearSurface)lod=0;
+                }
+                const bool originalAdmission=pixels>=2 && lod<3;
+                if(lod==3 && distanceScale>1.0f) {
+                    for(std::size_t level=3;level>0;--level)
+                        if(model.levels[level-1].solid && model.minimumPixels[level-1]<=visibilityPixels) {
+                            lod=level-1;break;
+                        }
+                }
+                if (lod==3)return;
+                const bool identity=(instance.flags&0x200u)!=0;
+                auto& draw=output.emplace_back(&model.levels[lod],storage.staticRenderFrames[index],clip,identity,
+                    extendedSection || !originalAdmission,static_cast<std::uint8_t>(lod));
+                if(!identity) {
+                    if (model.facade[lod])hp2::sceneryNativeBillboardFacing(draw.matrix.data(),delta,instance.position);
+                    if (instance.flags&viewMask&0x100u)draw.matrix[14]+=2.0f;
+                }
+                if(journalSample)++lods[lod];
+                return;
+            }
             const float distance=std::sqrt((delta[0]*delta[0]+delta[1]*delta[1])+delta[2]*delta[2])-radius;
             // PAL150E04..150E14 copies eView+8 into CullInfo+C0; the thresholds
             // consume that source focal input, before native output enlargement.
@@ -835,6 +965,8 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             // the single-phase walk would evaluate them (drawInstance never
             // touches the node stack, so deferring it keeps that order).
             auto& leaves=nodeLeaves;leaves.clear();
+            const bool timeWalk=diagFineTimers && !async;
+            const auto walkStarted=timeWalk ? std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
             while(!stack.empty()) {
                 const auto item=stack.back();stack.pop_back();
                 Require(item.index<section.record34104Count && ++visited<=section.record34104Count,
@@ -869,10 +1001,16 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 HP2_PREFETCH(storage.staticRenderFrames.data()+index);
                 HP2_PREFETCH(reinterpret_cast<const char*>(storage.staticRenderFrames.data()+index)+60);
             };
+            const auto leavesStarted=timeWalk ? std::chrono::steady_clock::now():walkStarted;
             for(std::size_t at=0;at<leaves.size() && at<ahead;++at)prefetchDependents(leaves[at].index);
             for(std::size_t at=0;at<leaves.size();++at) {
                 if(at+ahead<leaves.size())prefetchDependents(leaves[at+ahead].index);
                 drawInstance(leaves[at].index,leaves[at].clip);
+            }
+            if(timeWalk) {
+                const auto done=std::chrono::steady_clock::now();
+                sceneryWalkPhaseMs[0]+=std::chrono::duration<double,std::milli>(leavesStarted-walkStarted).count();
+                sceneryWalkPhaseMs[1]+=std::chrono::duration<double,std::milli>(done-leavesStarted).count();
             }
             return;
         }
@@ -901,13 +1039,14 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         // PC HP2_SCENERY_PREFETCH=2: run the single-phase walk first, restore
         // the hysteresis it wrote, then compare the two-phase walk's draws.
         std::vector<RenderDraw> referenceDraws;
-        std::vector<std::vector<std::uint8_t>> savedNear;
+        std::vector<std::vector<std::uint8_t>> savedNear,referenceNear;
         const bool verifyWalk=hp2::ecstasySceneryPrefetch==2;
         if(verifyWalk) {
             for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal)
                 savedNear.push_back(sectionStorageByNumber_[S.sectionScratch_[ordinal]] ?
                     sectionStorageByNumber_[S.sectionScratch_[ordinal]]->nearDetailState:std::vector<std::uint8_t>{});
             hp2::ecstasySceneryPrefetch=0;
+            const bool checkedLeafFast=leafFast;leafFast=false;
             const auto before=draws.size();
             for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal) {
                 const auto number=S.sectionScratch_[ordinal];
@@ -918,6 +1057,11 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 prepareSection(storage,ordinal,rootClips[ordinal],draws,S.nodeScratch_,S.leafScratch_,storage.nearDetailState,visited,lods);
             }
             referenceDraws.assign(draws.begin()+before,draws.end());draws.resize(before);
+            leafFast=checkedLeafFast;
+            referenceNear.clear();
+            for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal)
+                referenceNear.push_back(sectionStorageByNumber_[S.sectionScratch_[ordinal]] ?
+                    sectionStorageByNumber_[S.sectionScratch_[ordinal]]->nearDetailState:std::vector<std::uint8_t>{});
             for(std::size_t ordinal=S.sectionScratch_.size();ordinal-->0;)
                 if(auto* storage=sectionStorageByNumber_[S.sectionScratch_[ordinal]])storage->nearDetailState=savedNear[ordinal];
             hp2::ecstasySceneryPrefetch=2;
@@ -941,6 +1085,10 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 same=a.model==b.model && a.matrix==b.matrix && a.clip==b.clip && a.identity==b.identity &&
                     a.nativeExtended==b.nativeExtended && a.nativeLod==b.nativeLod;
             }
+            // Repeated PVS sections end with the last walk's state in both.
+            for(std::size_t ordinal=0;same && ordinal<referenceNear.size();++ordinal)
+                if(auto* storage=sectionStorageByNumber_[S.sectionScratch_[ordinal]])
+                    same=storage->nearDetailState==referenceNear[ordinal];
             ++checks;if(!same)++mismatches;
             if((checks&1023u)==0 || (!same && mismatches<=4)) {
                 char text[96];std::snprintf(text,sizeof(text),"checks=%llu mismatches=%llu",
@@ -1435,11 +1583,13 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 split[0]/300,split[1]/300,split[2]/300,split[3]/300,split[4]/300,counts[0]/300,counts[1]/300,counts[2]/300,counts[3]/300,
                 counts[4]/300,counts[5]/300,counts[6]/300,counts[7]/300,counts[8]/300);
             platform::RecordSessionEvent("render.scenery_split",text);
-            std::snprintf(text,sizeof(text),"collect_ms=%.3f roots_ms=%.3f traverse_ms=%.3f dedupe_ms=%.3f parallel_emit=%.2f candidates=%.2f tested=%.1f clip_pass=%.1f facing_pass=%.1f pixel_pass=%.1f nodes=%.1f",
+            std::snprintf(text,sizeof(text),"collect_ms=%.3f roots_ms=%.3f traverse_ms=%.3f dedupe_ms=%.3f parallel_emit=%.2f candidates=%.2f tested=%.1f clip_pass=%.1f facing_pass=%.1f pixel_pass=%.1f nodes=%.1f node_walk_ms=%.3f leaf_ms=%.3f leaf_fast=%d leaf_checks=%llu leaf_mismatches=%llu",
                 stages[0]/300,stages[1]/300,stages[2]/300,stages[3]/300,parallelViews/300,candidateViews/300,
                 sceneryWalkCounters[0]/300.0,sceneryWalkCounters[1]/300.0,sceneryWalkCounters[2]/300.0,
-                sceneryWalkCounters[3]/300.0,sceneryWalkCounters[4]/300.0);
-            sceneryWalkCounters={};
+                sceneryWalkCounters[3]/300.0,sceneryWalkCounters[4]/300.0,sceneryWalkPhaseMs[0]/300,sceneryWalkPhaseMs[1]/300,
+                hp2::ecstasySceneryLeafFast,static_cast<unsigned long long>(hp2::ecstasySceneryLeafChecks[0]),
+                static_cast<unsigned long long>(hp2::ecstasySceneryLeafChecks[1]));
+            sceneryWalkCounters={};sceneryWalkPhaseMs={};
             platform::RecordSessionEvent("render.scenery_prepare",text);
             {
                 std::size_t length=0;text[0]=0;
