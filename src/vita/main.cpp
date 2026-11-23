@@ -59,7 +59,7 @@ unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 }
 
 namespace hp2 { extern int nativeRaceStartDrainFrames; extern int nativeSpeedTrapSettle; }
-namespace hp2 { extern int ecstasyHalfCompositeBounds; extern int ecstasyHalfDepthPolicy; extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern int debugBenchSeed; extern std::atomic<int> debugDemoStarted; extern int debugBenchMirror; }
+namespace hp2 { extern int ecstasyHalfCompositeBounds; extern int ecstasyHalfDepthPolicy; extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern int debugBenchSeed; extern std::atomic<int> debugDemoStarted; extern int debugRaceInputStep; extern int debugBenchMirror; }
 extern int collisionWitnessWarmProbe;
 extern int collisionQueuePrediction;
 extern uint32_t (*collisionWitnessProbeClock)();
@@ -207,6 +207,28 @@ public:
             }
             std::fclose(file);
         }
+        // Race pad record/replay bench (with autopad.txt "<p> <h> <until> <track>"
+        // for the menus and the fixed seed; autopad stops at the race): padrec.txt
+        // records the raw pad per race input step to padrec.bin, padplay.txt
+        // replays padrec.bin instead of the physical pad.
+        {
+            SceIoStat probe{};
+            if (sceIoGetstat((std::string(kDataDirectory) + "/padplay.txt").c_str(), &probe) >= 0) {
+                if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/padrec.bin").c_str(), "rb")) {
+                    PadRecord record{};
+                    while (std::fread(&record, sizeof(record), 1, file) == 1) padTrack_.push_back(record);
+                    std::fclose(file);
+                }
+                padMode_ = 2;
+                char detail[64];
+                std::snprintf(detail, sizeof(detail), "replay steps=%u", static_cast<unsigned>(padTrack_.size()));
+                log_.Line("vita.padrec", detail);
+            } else if (sceIoGetstat((std::string(kDataDirectory) + "/padrec.txt").c_str(), &probe) >= 0) {
+                padMode_ = 1;
+                if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/padrec.bin").c_str(), "wb")) std::fclose(file);
+                log_.Line("vita.padrec", "record");
+            }
+        }
         // Testing: quickrace_track.txt "<track> [reverse]" forces Quick Race
         // onto that track (normal menus and input; no autopad taps).
         if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/quickrace_track.txt").c_str(), "r")) {
@@ -276,6 +298,19 @@ public:
     {
         SceCtrlData pad{};
         if (sceCtrlPeekBufferPositive(0, &pad, 1) < 0) { state_ = {}; return; }
+        const int raceStep = ::hp2::debugRaceInputStep;
+        if (padMode_ && raceStep >= 0) {
+            autoPeriod_ = 0; // the menus are behind; the race is recorded/replayed input only
+            if (padMode_ == 2) {
+                const auto at = static_cast<std::size_t>(raceStep);
+                const PadRecord record = at < padTrack_.size() ? padTrack_[at] : PadRecord{0, {128, 128, 128, 128}};
+                pad.buttons = record.buttons;
+                pad.lx = record.sticks[0]; pad.ly = record.sticks[1]; pad.rx = record.sticks[2]; pad.ry = record.sticks[3];
+            } else {
+                padTrack_.push_back({pad.buttons, {pad.lx, pad.ly, pad.rx, pad.ry}});
+                if (padTrack_.size() >= 600) FlushPadRecording();
+            }
+        }
         state_ = {};
         state_.connected = true;
         for (const auto& [physical, logical] : kButtons)
@@ -294,7 +329,7 @@ public:
     }
     void SetRumble(int32_t, uint8_t, uint8_t) override {}
 #ifdef HP2_ENABLE_VITAGL
-    ~VitaApplicationHost() override { StopRenderThread(); }
+    ~VitaApplicationHost() override { FlushPadRecording(); StopRenderThread(); }
     void AttachGraphics(hp2::EcstasyVulkanDevice& graphics, bool pipeline)
     {
         graphics_ = &graphics;
@@ -510,6 +545,18 @@ public:
     std::uint32_t polls_{};
     std::uint64_t inputSteps_{};
     unsigned autoPeriod_{}, autoHold_{}, autoUntil_{};
+    struct PadRecord { std::uint32_t buttons; std::uint8_t sticks[4]; };
+    int padMode_{}; // 1 record, 2 replay
+    std::vector<PadRecord> padTrack_;
+    void FlushPadRecording()
+    {
+        if (padMode_ != 1 || padTrack_.empty()) return;
+        if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/padrec.bin").c_str(), "ab")) {
+            std::fwrite(padTrack_.data(), sizeof(PadRecord), padTrack_.size(), file);
+            std::fclose(file);
+        }
+        padTrack_.clear();
+    }
     bool demoBench_{};
 #ifdef HP2_ENABLE_VITAGL
     hp2::EcstasyVulkanDevice* graphics_{};

@@ -1,12 +1,52 @@
 #ifdef HP2_APPLICATION_ENTRY
+#define _CRT_SECURE_NO_WARNINGS
 #include "indep/inc/Flags.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include <cstdio>
+#include <cstdlib>
+#include <unordered_map>
+#pragma comment(lib,"winmm.lib")
+// PC diagnostic: HP2_SAMPLE_PROFILE="<delay s> <duration s>" samples this
+// (game) thread's instruction pointer at ~1 kHz; writes sample_profile.txt
+// (image-relative RVA, count) for lookup in the linker map.
+static DWORD WINAPI SampleProfileThread(void* argument)
+{
+    const HANDLE target=static_cast<HANDLE>(argument);
+    float delay=40,duration=60;
+    std::sscanf(std::getenv("HP2_SAMPLE_PROFILE"),"%f %f",&delay,&duration);
+    Sleep(static_cast<DWORD>(delay*1000));
+    timeBeginPeriod(1);
+    std::unordered_map<unsigned long long,unsigned> counts;
+    const auto base=reinterpret_cast<unsigned long long>(GetModuleHandleW(nullptr));
+    const auto until=GetTickCount64()+static_cast<unsigned long long>(duration*1000);
+    unsigned total=0;
+    while(GetTickCount64()<until) {
+        Sleep(1);
+        if(SuspendThread(target)==static_cast<DWORD>(-1))break;
+        CONTEXT context{};context.ContextFlags=CONTEXT_CONTROL;
+        if(GetThreadContext(target,&context))++counts[context.Rip-base],++total;
+        ResumeThread(target);
+    }
+    timeEndPeriod(1);
+    if(FILE* file=std::fopen("sample_profile.txt","w")) {
+        std::fprintf(file,"total %u\n",total);
+        for(const auto& [rva,count]:counts)std::fprintf(file,"%llx %u\n",rva,count);
+        std::fclose(file);
+    }
+    return 0;
+}
 int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int)
 {
+    if(std::getenv("HP2_SAMPLE_PROFILE")) {
+        HANDLE self{};
+        DuplicateHandle(GetCurrentProcess(),GetCurrentThread(),GetCurrentProcess(),&self,
+            THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,0);
+        CloseHandle(CreateThread(nullptr,0,SampleProfileThread,self,0,nullptr));
+    }
     int argc{};auto** argv=CommandLineToArgvW(GetCommandLineW(),&argc);
     if(!argv) {MessageBoxW(nullptr,L"Could not read the command line.",L"NFSHP2",MB_OK|MB_ICONERROR);return 1;}
     const auto result=hp2::runNativeWindowsApplication(argc,argv);

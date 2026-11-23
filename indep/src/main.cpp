@@ -123,7 +123,11 @@ namespace hp2 {int debugBenchSeed=[] {
     if(const char* value=std::getenv("HP2_BENCH_SEED"))return std::atoi(value)!=0 ? 1:0;
 #endif
     return 0;
-}();int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};int debugBenchMirror=[] {
+}();int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};
+// Logical input steps since the live race session left RC_STATE_NONE
+// (-1 outside one): the index for host pad record/replay benches.
+int debugRaceInputStep=-1;
+int debugBenchMirror=[] {
 #if !defined(__vita__)
     if(const char* value=std::getenv("HP2_BENCH_MIRROR"))return std::atoi(value)!=0 ? 1:0;
 #endif
@@ -705,6 +709,11 @@ struct ApplicationRuntime::Storage {
 #ifdef __SWITCH__
         UpdateSwitchControls();
 #endif
+        {
+            const auto* session=Session();
+            const bool race=session && session->state!=RC_STATE_NONE;
+            debugRaceInputStep=race ? debugRaceInputStep+1:-1;
+        }
         host.BeginInputStep(simulationClock.Deadline());
         const auto result=joystickGenerateEvents(input,samples,joylog,replay,clock,demo);
         if(result!=GAME_INPUT_OK && frontendInput.dispatchFailure) {
