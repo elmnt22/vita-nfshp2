@@ -62,6 +62,7 @@
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 extern std::array<std::uint64_t,16> mellowSplitMicros;
 extern uint32_t diagClockReads;
+extern void (*diagClockCensusDump)(char*,std::size_t);
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
 extern uint64_t collisionSplitMicros[8],collisionSplitCounts[8];
 extern uint64_t collisionKindStats[20];
@@ -73,7 +74,7 @@ extern uint64_t collisionPipeLong,collisionPipeZeroDraw,collisionPipeBehind[9];
 extern uint64_t collisionPipeMissPair,collisionPipeMissStart,collisionPipeShort,collisionPipeDrawDelta[4];
 extern uint64_t collisionPipeContacts,collisionPipeEntryMisses,collisionPipeBreaks,collisionPipeTasks,collisionPipeUsed,collisionPipePasses;
 namespace hp2 { extern std::uint64_t ecstasyAsyncMirrorStats[12]; }
-namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; }
+namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; extern std::array<std::uint64_t,7> ecstasyIndexCacheStats; extern std::array<double,4> ecstasyDiscardSetupSplitMs; extern int ecstasyDiscardSink; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
 extern uint64_t collisionWitnessWarmMismatches;
@@ -111,7 +112,7 @@ float applicationPreviousCpuFrameRate=0.0f;
 float applicationPreviousGpuFrameRate=0.0f;
 bool applicationGpuTimingAvailable=false;
 
-namespace hp2 {int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};int debugBenchMirror=[] {
+namespace hp2 {int debugBenchSeed=0;int debugDemoTrack=-1;std::atomic<int> debugDemoStarted{0};int debugBenchMirror=[] {
 #if !defined(__vita__)
     if(const char* value=std::getenv("HP2_BENCH_MIRROR"))return std::atoi(value)!=0 ? 1:0;
 #endif
@@ -128,7 +129,7 @@ void applicationSeedRandomNumber(ReplayIntegerLog& log)
     else {
         seed=hp2NativeTickerSource()+UINT32_C(0x12345678);
         // Benchmark hosts only (demo bench): repeatable runs.
-        bool bench=hp2::debugDemoTrack>=0;
+        bool bench=hp2::debugDemoTrack>=0 || hp2::debugBenchSeed;
 #if !defined(__vita__) && !defined(__SWITCH__)
         if (const char* text=std::getenv("HP2_DEMO_BENCH"))bench=bench || std::atoi(text)>0;
 #endif
@@ -1483,6 +1484,7 @@ bool ApplicationRuntime::Tick()
                     }
                     std::snprintf(detail,sizeof(detail),"reads=%u",diagClockReads);diagClockReads=0;
                     s.host.RecordSessionEvent("render.clock_reads",detail);
+                    if(diagClockCensusDump) {diagClockCensusDump(detail,sizeof(detail));s.host.RecordSessionEvent("render.clock_sites",detail);}
                 }
                 auto& solve=worldCollisionSolveMs;
                 std::snprintf(detail,sizeof(detail),"find_ms=%.3f queue_ms=%.3f resolve_ms=%.3f tail_ms=%.3f "
@@ -1664,6 +1666,12 @@ bool ApplicationRuntime::Tick()
                 std::snprintf(detail,sizeof(detail),"setup=%.3f background=%.3f world=%.3f particles=%.3f solids=%.3f alpha=%.3f effects=%.3f hud=%.3f",
                     d[0]/count,d[1]/count,d[2]/count,d[3]/count,d[4]/count,d[5]/count,d[6]/count,d[7]/count);
                 s.host.RecordSessionEvent("render.discarded_phases",detail);
+                {
+                    auto& u=hp2::ecstasyDiscardSetupSplitMs;
+                    std::snprintf(detail,sizeof(detail),"environment=%.3f matrices=%.3f begin=%.3f models=%.3f sink=%d",
+                        u[0]/count,u[1]/count,u[2]/count,u[3]/count,hp2::ecstasyDiscardSink);
+                    s.host.RecordSessionEvent("render.discarded_setup",detail);u={};
+                }
                 for(int pass=0;pass<2;++pass) {
                     auto& w=pass ? hp2::ecstasyDiscardWorldSplitMs:hp2::ecstasyWorldSplitMs;
                     std::snprintf(detail,sizeof(detail),"matrices=%.3f scenery=%.3f nis=%.3f sun=%.3f skids=%.3f movers=%.3f players=%.3f objects=%.3f",
@@ -1730,6 +1738,13 @@ bool ApplicationRuntime::Tick()
                 cpu.gatherVertexJobsMilliseconds/count,cpu.gatherIndicesMilliseconds/count,
                 cpu.coldVertexJobs/count,cpu.coldVertices/count);
             s.host.RecordSessionEvent("render.gather_detail",detail);
+            if(auto& e=hp2::ecstasyIndexCacheStats;e[0]) {
+                std::snprintf(detail,sizeof(detail),
+                    "batches=%.1f front_hits=%.1f map_hits=%.1f misses=%.1f tokens=%.1f copied_indices=%.1f fallbacks=%.1f",
+                    e[0]/count,e[1]/count,e[2]/count,e[3]/count,e[4]/count,e[5]/count,e[6]/count);
+                s.host.RecordSessionEvent("render.index_cache",detail);
+                e={};
+            }
             if(cpu.historyFrames) {
                 std::snprintf(detail,sizeof(detail),
                     "frames=%llu clean_copies=%llu seeds=%llu frames_without_tick=%llu source=pre_blur_scene",

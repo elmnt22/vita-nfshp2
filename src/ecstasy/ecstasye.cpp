@@ -98,6 +98,10 @@ extern int diagFineTimers;
 // Diagnostic: serial skinned strips copy/skin/capture us, [3] strips, [4] vertices.
 #include "bware/inc/bMathNeon.hpp"
 extern int bMatrixNeonEnabled;
+// Resident index cache counters, summed per log window (render thread only):
+// batches, front hits, map hits, misses, tokens hashed, indices copied,
+// capacity fallbacks.
+namespace hp2 {std::array<std::uint64_t,7> ecstasyIndexCacheStats{};}
 namespace hp2 {std::array<std::uint64_t,5> ecstasySkinSplitMicros{};
 // RenderModel parallel strip capture threshold (exact either way; PC
 // HP2_PARALLEL_MODEL_STRIPS, Vita model_par<N>.txt).
@@ -212,9 +216,13 @@ unsigned NativeSceneEffectiveHardwareConcurrency() noexcept
 // they may preempt the long-running gather/GL threads on cores 1-2.
 int ecstasySceneWorkerPriority=0; // 0 keeps the default priority
 int ecstasySceneClaimPool=1;
+// Vita scene worker cores per lane (bits: 1 = core 1, 2 = core 2).
+std::array<int,2> ecstasySceneWorkerCores{{3,3}};
 void ConfigureNativeSceneWorker() noexcept
 {
-    (void)sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_1|SCE_KERNEL_CPU_MASK_USER_2);
+    const auto cores=ecstasySceneWorkerCores[ecstasySceneJobsLane&1u];
+    const int mask=((cores&1) ? SCE_KERNEL_CPU_MASK_USER_1:0)|((cores&2) ? SCE_KERNEL_CPU_MASK_USER_2:0);
+    (void)sceKernelChangeThreadCpuAffinityMask(0,mask ? mask:SCE_KERNEL_CPU_MASK_USER_1|SCE_KERNEL_CPU_MASK_USER_2);
     if(ecstasySceneWorkerPriority)(void)sceKernelChangeThreadPriority(0,ecstasySceneWorkerPriority);
 }
 #endif
@@ -1472,7 +1480,7 @@ void classifyStrips(std::vector<EcstasyVisibleStrip>& output,const EditorMarkerM
     // The final loop never assigns its previous-class register after
     // resetting it to-1. Preserve every original one-strip run and its
     // index order; only the independent bound/cone calculations run apart.
-    if(strips.size()<512 || hp2::NativeSceneEffectiveHardwareConcurrency()<2 || hp2::ecstasySceneJobsSerial) {
+    if(strips.size()<512 || hp2::NativeSceneEffectiveHardwareConcurrency()<2 || hp2::NativeSceneJobsSerialHere()) {
         for(std::size_t index=0;index<strips.size();++index) {
 #if defined(__GNUC__)
             // Strip headers are ~200 bytes apart: request the bounds/cone
@@ -2222,6 +2230,7 @@ void EcstasyFrame::AddPolygon(const frontend::FlailerPoly& polygon,
     // even for Flailer polygons. It suppresses that list in opaque-only
     // targets and stores layerDepth-MaxZ (or direct Z) as its sort key.
     if(texture->requiresDepthSort && view.target->opaqueOnly)return;
+    if(discardCommands_)return;
     EcstasyDrawCommand command;command.zWriteEnabled=neutralTextureOperand ? false:zWriteEnabled_;
     command.uiPlacement=placement;
     command.polygon=&polygon;command.texture=texture;command.view=&view;command.target=view.target;
@@ -3642,6 +3651,16 @@ int ecstasyParallelSceneryEmit=[] {
     return 1;
 }();
 std::array<double,8> ecstasyWorldSplitMs{},ecstasyDiscardWorldSplitMs{};
+// Diagnostic: discarded-capture setup split (environment, matrices, begin, models).
+std::array<double,4> ecstasyDiscardSetupSplitMs{};
+// Discarded catch-up captures append no UI polygon commands (Vita
+// discard_sink_off.txt / PC HP2_DISCARD_SINK=0).
+int ecstasyDiscardSink=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    if(const char* value=std::getenv("HP2_DISCARD_SINK"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 1;
+}();
 #if defined(__vita__) || defined(__SWITCH__)
 int ecstasySceneJobsSerial=0; // Vita default 1 (main.cpp)
 #else
@@ -4244,7 +4263,7 @@ std::size_t EcstasyFrame::RenderModel(EditorMarkerModel& model,const float local
     const bool parallel=(skinParallel || count>=static_cast<std::size_t>(ecstasyParallelModelStrips)) &&
         NativeSceneEffectiveHardwareConcurrency()>1 &&
         // Serial jobs (Vita default): chunk capture is only extra copies.
-        !ecstasySceneJobsSerial;
+        !NativeSceneJobsSerialHere();
     auto& preposed=preposedScratch_;
     if(parallel) {
         // LookupDescriptor can rebuild a lazy resource index. Resolve every
@@ -4659,6 +4678,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         else ++scene.captureProfile->discardedCaptures;
     }
     frame.SetPresentationAdvance(scene.advancePresentation);
+    frame.SetDiscardCommands(ecstasyDiscardSink && !scene.emitRaceGeometry);
     frame.CaptureDisplayOffsets(*scene.clock); // original ePutDisplayEnvironment reads both source offsets
     auto& views=scene.views;auto& render=*scene.ui.render;
     // PAL11293C..1129C8 writes the physical screen Z format before
@@ -4672,6 +4692,14 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         if(view.auxiliaryTarget)view.auxiliaryTarget->format=screenDepthFormat;
     }
     if(views.screens[3].target)views.screens[3].target->format=0x3a;
+    const bool splitSetup=scene.captureProfile && !scene.emitRaceGeometry;
+    auto setupMark=splitSetup ? CaptureClock::now():CaptureClock::time_point{};
+    const auto setupAt=[&](std::size_t part) {
+        if(!splitSetup)return;
+        const auto now=CaptureClock::now();
+        ecstasyDiscardSetupSplitMs[part]+=std::chrono::duration<double,std::milli>(now-setupMark).count();
+        setupMark=now;
+    };
     auto* resources=scene.ui.resources->Models().resourceRegistry;
     Require(resources,"Display frame has no canonical resource owner");
     auto* simulation=scene.track ? scene.track->Simulation():nullptr;
@@ -4681,6 +4709,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             scene.track ? scene.track->Players():nullptr,applicationState,scene.clock->realTimeElapsed);
     frame.CaptureEnvironment(scene.environmentMap,*resources,applicationState,views.renderFrameCounter,
         scene.flow && scene.flow->inGameFlag!=0);
+    setupAt(0);
     ecstasyViewsUpdateMode(&views);
     ecstasyViewsApplyMode(&views);
     const auto active=[](const CarCinematicScreen& view) {
@@ -4689,6 +4718,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     for(auto& view:views.screens)if(active(view))
         Require(ecstasyViewCalculateMatrices(&views,&view,0,0,0)==CAR_CINEMATIC_OK,
             "Original view projection could not be calculated");
+    setupAt(1);
     if(scene.screens) {
         Require(scene.frontendFrame,"Screen model callbacks have no actual frontend frame owner");
         // Clear the previous frame before BeginFrame enqueues current UI.
@@ -4697,6 +4727,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     }
     render.BeginFrame(*scene.ui.resources,scene.ui.language,
         static_cast<float>(scene.clock->realTimer)*0.0002500000118743628f);
+    setupAt(2);
     if(scene.screens)scene.screens->RenderModels(scene.advancePresentation);
     // PAL112C1C: opaque frontend cars precede the sky/background. Their
     // owner targets player view1/2; view0 remains the Flailer camera.
@@ -4707,6 +4738,7 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
                 views.presentationLayout,true,false,true,false);
         }
     frame.AttachAlphaPolys();
+    setupAt(3);
     auto& frontend=views.screens[0];
     const auto renderFlailerLayer=[&](std::int32_t layer) {
         // PAL112F78/113B58/113B98/113BE0: each nonempty UI layer
@@ -5486,7 +5518,9 @@ void EcstasyFrame::FinalizeOrder()
 }
 void EcstasyFrame::MarkSubmitted()
 {
-    Require(phase_==Phase::Ready,"Graphics frame is not ready for submission");phase_=Phase::Submitted;
+    Require(phase_==Phase::Ready,"Graphics frame is not ready for submission");
+    Require(!discardCommands_,"A discarded catch-up capture cannot be submitted");
+    phase_=Phase::Submitted;
 }
 void EcstasyFrame::Complete()
 {
@@ -5515,7 +5549,7 @@ void EcstasyFrame::BeginNextFrame()
     zWriteEnabled_=true;dashboardProjection_=false;inGameMaterials_=false;pendingAlphaBegin_=0;nextAlphaGroup_=0;nextFeedbackGroup_=0;
     displayTranslation_={};sourceDisplayExtent_={};textureTime_=0;
     environment_=nullptr;frontendEnvironmentTexture_=nullptr;specularFalloffTexture_=nullptr;
-    environmentApplicationState_=0;renderFrameCounter_=0;environmentUpdated_=false;advancesPresentation_=true;
+    environmentApplicationState_=0;renderFrameCounter_=0;environmentUpdated_=false;advancesPresentation_=true;discardCommands_=false;
     textureAnimationWorldFrames_=0;textureAnimationRealFrames_=0;
     phase_=Phase::Building;
 }
@@ -8452,6 +8486,7 @@ public:
     {
         Require(first<=spans.size() && count<=spans.size()-first,"Resident index spans exceed their frame owner");
         std::uint64_t hash=1469598103934665603ull;const std::uint64_t indices=indexTotal;
+        auto& stats=ecstasyIndexCacheStats;++stats[0];stats[4]+=count;
         for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at)
             hash=(hash^tokens[at])*1099511628211ull;
 #if !defined(__vita__)
@@ -8477,7 +8512,7 @@ public:
                 for(std::size_t at=0;at<count;++at)
                     if(entryTokens[at]!=tokens[first+at]) {equal=false;break;}
             }
-            if(equal) {Touch(slot.entry);return &*slot.entry;}
+            if(equal) {++stats[1];Touch(slot.entry);return &*slot.entry;}
         }
         const auto candidates=lookup_.equal_range(hash);
         for(auto found=candidates.first;found!=candidates.second;++found) {
@@ -8487,8 +8522,9 @@ public:
             for(std::size_t at=0;at<count;++at)
                 if(entry->tokens[at]!=tokens[first+at]) {equal=false;break;}
             if(!equal)continue;
-            SetFront(entry);Touch(entry);return &*entry;
+            ++stats[2];SetFront(entry);Touch(entry);return &*entry;
         }
+        ++stats[3];stats[5]+=indices;
         const auto needed=(static_cast<std::uint32_t>(indices)+63u)&~std::uint32_t(63);
         auto range=Find(needed);
         while(range==free_.end()) {
@@ -8989,6 +9025,7 @@ void ResolveNativeResidentIndices(VkResidentIndexCache& cache,
         } else {
             // Capacity pressure changes only transport; preserve one indexed
             // draw and the exact same triangle order in the frame buffer.
+            ++ecstasyIndexCacheStats[6];
             Require(indices.size()+batch.count<=std::numeric_limits<std::uint32_t>::max(),
                 "Native streamed frame index count exceeds32-bit draw range");
             batch.first=static_cast<std::uint32_t>(indices.size());

@@ -1228,7 +1228,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         draws.size()>=2*emitChunkDraws && NativeSceneEffectiveHardwareConcurrency()>1 &&
         // Serial jobs (Vita default): chunk buffers + merge are only extra
         // command copies; the direct serial path is the reference.
-        !hp2::ecstasySceneJobsSerial;
+        !hp2::NativeSceneJobsSerialHere();
     const bool parallelDone=parallelCandidate && !verifyParallelEmit && parallelEmit(true);
     if(parallelDone) {
         ++S.parallelEmitViews_;

@@ -36,6 +36,7 @@
 #include "crash.hpp"
 #include "audio.hpp"
 #include "alloccensus.hpp"
+namespace vita_clock { extern bool census; void Note(const void*) noexcept; void Dump(char*, std::size_t) noexcept; }
 extern int bMatrixNeonEnabled;
 namespace vita_selftest { void Run(void (*log)(const char*, const char*)); }
 #include <atomic>
@@ -58,12 +59,13 @@ unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 }
 
 namespace hp2 { extern int nativeRaceStartDrainFrames; extern int nativeSpeedTrapSettle; }
-namespace hp2 { extern int ecstasyHalfCompositeBounds; extern int ecstasyHalfDepthPolicy; extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern std::atomic<int> debugDemoStarted; extern int debugBenchMirror; }
+namespace hp2 { extern int ecstasyHalfCompositeBounds; extern int ecstasyHalfDepthPolicy; extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern int debugBenchSeed; extern std::atomic<int> debugDemoStarted; extern int debugBenchMirror; }
 extern int collisionWitnessWarmProbe;
 extern int collisionQueuePrediction;
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint32_t (*collisionWitnessClockMicros)();
 namespace hp2 { extern int ecstasySceneryPrefetch; extern int ecstasySceneryFirstFast; extern int ecstasyReplayFast; extern int ecstasySceneryRunReplay; extern int ecstasyGatherDetail; extern double ecstasyGatherDetailMs; extern float ecstasyParticleNearFadeStart, ecstasyParticleNearFadeEnd; extern int ecstasyParticleMirrorCull; extern int ecstasySceneryReuseCensus; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasyVsyncInterval; extern std::uint32_t ecstasyGeometryPrewarmMax; extern int ecstasyGpuDiag; extern int ecstasyModelRunCache; extern int ecstasyTexturePrewarm; extern int ecstasyGeometryPrewarm; extern int ecstasyScissorElide; extern int ecstasySunQuery; extern int ecstasyInstancing; extern int ecstasyGxmDirect; extern int ecstasyGxmParity; extern int ecstasyGxmFlushDraws; extern int ecstasyGxmProf; extern int ecstasyDeferOrder; extern int ecstasyGpuTimeline; extern int ecstasyGpuHeavyShots; extern int ecstasyResidentVram; extern int ecstasyAlphaElide; extern int ecstasyAlphaCheck; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
+namespace hp2 { extern std::array<int,2> ecstasySceneWorkerCores; extern int ecstasyDiscardSink; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
 
@@ -193,7 +195,10 @@ public:
                 int track = -1, reverse = 0;
                 if (std::fscanf(file, "%d %d", &track, &reverse) >= 1 && track >= 0) {
                     ::hp2::debugQuickRaceTrack = track; ::hp2::debugQuickRaceReverse = reverse;
-                    std::snprintf(detail, sizeof(detail), "track=%d reverse=%d", track, reverse);
+                    // Autopad race bench: the demo bench's fixed seed, so
+                    // the same inputs replay the same race (A/B timing).
+                    ::hp2::debugBenchSeed = 1;
+                    std::snprintf(detail, sizeof(detail), "track=%d reverse=%d fixed_seed=1", track, reverse);
                     log_.Line("vita.autopad_track", detail);
                 }
             }
@@ -454,6 +459,7 @@ public:
     {
         // Core 1: the application thread owns core 0.
         sceKernelChangeThreadCpuAffinityMask(0, SCE_KERNEL_CPU_MASK_USER_1);
+        hp2::ecstasySceneJobsLane = 1;
         {
             std::uint32_t fpscr = 0;
             asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
@@ -648,7 +654,17 @@ int main(int, char**)
             log.Line("vita.audio", "disabled by noaudio.txt");
         }
         SceIoStat probe{};
-        collisionWitnessClockMicros = []{ extern uint32_t diagClockReads; ++diagClockReads; return (uint32_t)sceKernelGetProcessTimeLow(); };
+        collisionWitnessClockMicros = []{ extern uint32_t diagClockReads; ++diagClockReads;
+            if (vita_clock::census) vita_clock::Note(__builtin_return_address(0));
+            return (uint32_t)sceKernelGetProcessTimeLow(); };
+        if (sceIoGetstat((std::string(kDataDirectory) + "/clock_census.txt").c_str(), &probe) >= 0) {
+            vita_clock::census = true;
+            extern void (*diagClockCensusDump)(char*, std::size_t);
+            diagClockCensusDump = vita_clock::Dump;
+            char base[96];
+            std::snprintf(base, sizeof(base), "clock census on note_addr=%p", reinterpret_cast<const void*>(&vita_clock::Note));
+            log.Line("vita.diag", base);
+        }
         {
             // Diagnostic: cost of one timer read (the split timers are hot).
             const uint64_t started = sceKernelGetProcessTimeWide();
@@ -825,6 +841,10 @@ int main(int, char**)
             hp2::ecstasyParallelParticles = 0;
             log.Line("vita.diag", "particle parallel build off");
         }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/discard_sink_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyDiscardSink = 0;
+            log.Line("vita.diag", "discarded capture sink off");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/emit_serial.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyParallelSceneryEmit = 0;
             log.Line("vita.diag", "scenery parallel emit off");
@@ -964,7 +984,7 @@ int main(int, char**)
         // Scene worker jobs share cores 1/2 with the gather and GL threads;
         // inline jobs measured faster on heavy tracks (track 64 traverse
         // 5.5 -> 1.4 ms/view). scene_jobs_parallel.txt restores the pool.
-        hp2::ecstasySceneJobsSerial = 1;
+        hp2::ecstasySceneJobsSerial = 3;
         if (sceIoGetstat((std::string(kDataDirectory) + "/scene_claim_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneClaimPool = 0;
             log.Line("vita.diag", "scene claim pool off");
@@ -972,6 +992,21 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/scene_jobs_parallel.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneJobsSerial = 0;
             log.Line("vita.diag", "scene jobs parallel");
+        }
+        // scene_jobs.txt "<serial mask> <app worker cores> <render worker cores>":
+        // mask bit0 application thread, bit1 render thread inline; cores
+        // bit0 core 1, bit1 core 2 (A/B of per-thread scene job pools).
+        if (FILE* jobs = std::fopen((std::string(kDataDirectory) + "/scene_jobs.txt").c_str(), "r")) {
+            int mask = 3, app = 3, render = 3;
+            const int read = std::fscanf(jobs, "%d %d %d", &mask, &app, &render);
+            std::fclose(jobs);
+            if (read >= 1) hp2::ecstasySceneJobsSerial = mask & 3;
+            if (read >= 2) hp2::ecstasySceneWorkerCores[0] = app & 3;
+            if (read >= 3) hp2::ecstasySceneWorkerCores[1] = render & 3;
+            char text[96];
+            std::snprintf(text, sizeof(text), "scene jobs serial_mask=%d app_cores=%d render_cores=%d",
+                hp2::ecstasySceneJobsSerial, hp2::ecstasySceneWorkerCores[0], hp2::ecstasySceneWorkerCores[1]);
+            log.Line("vita.diag", text);
         }
         // Hardware-depth half pass: no measured gain over the depth-texture
         // discard (track 64 smoke 17.6 vs 17.8 fps); opt-in only.

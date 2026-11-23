@@ -697,6 +697,8 @@ uint32_t (*collisionWitnessProbeClock)()=nullptr;
 uint32_t (*collisionWitnessClockMicros)()=nullptr;
 // Diagnostic: timer reads (approximate, racy), counted by the Vita clocks.
 uint32_t diagClockReads=0;
+// Diagnostic: per-call-site timer census line (Vita clock_census.txt).
+void (*diagClockCensusDump)(char*,std::size_t)=nullptr;
 // Fine diagnostic timers (per query, task, substep, model). Each read is a
 // kernel call on Vita (~0.4 us, ~1900 per frame with all on), so Vita
 // turns them off unless diag_fine.txt exists; coarse per-frame timers stay.

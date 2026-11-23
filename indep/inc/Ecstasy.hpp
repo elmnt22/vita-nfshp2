@@ -1025,6 +1025,11 @@ public:
     // later calibration changes cannot change a frame already queued.
     void CaptureDisplayOffsets(const GameTime& clock);
     void SetPresentationAdvance(bool advance) noexcept {advancesPresentation_=advance;}
+    // A catch-up capture that is cancelled, never submitted: UI polygons
+    // keep every check and owner update but append no command (exact; the
+    // frame is released unread). MarkSubmitted refuses such a frame.
+    void SetDiscardCommands(bool discard) noexcept {discardCommands_=discard;}
+    bool DiscardsCommands() const noexcept {return discardCommands_;}
     bool AdvancesPresentation() const noexcept {return advancesPresentation_;}
     std::uint32_t CapturedEnvironmentFaces() const noexcept {return environmentCameraFaces_;}
     const std::array<double,2>& DisplayTranslation() const noexcept {return displayTranslation_;}
@@ -1305,6 +1310,7 @@ private:
     std::uint32_t renderFrameCounter_{};
     bool environmentUpdated_{};
     bool advancesPresentation_{true};
+    bool discardCommands_{};
     ResourceRegistry* textureAnimationResources_{};
     std::int32_t textureAnimationWorldFrames_{},textureAnimationRealFrames_{};
 };
@@ -1802,6 +1808,14 @@ void ConfigureNativeSceneWorker() noexcept;
 inline void ConfigureNativeSceneWorker() noexcept {}
 #endif
 
+// Scene-job lane of the calling thread: 0 application thread, 1 render
+// thread (set at its start). ecstasySceneJobsSerial is a per-lane bit mask
+// (bit0 application, bit1 render); pool workers inherit their owner's lane.
+inline thread_local unsigned ecstasySceneJobsLane=0;
+extern int ecstasySceneJobsSerial;
+inline bool NativeSceneJobsSerialHere() noexcept {
+    return ((static_cast<unsigned>(ecstasySceneJobsSerial)>>ecstasySceneJobsLane)&1u)!=0;
+}
 inline bool& NativeSceneExecutingJobs() noexcept {
     static thread_local bool active=false;
     return active;
@@ -1894,7 +1908,7 @@ public:
         // throws, this already-constructed owner still joins every thread.
         while(workers_.size()+1<workers) {
             const auto slot=static_cast<unsigned>(workers_.size());
-            workers_.emplace_back([this,slot] { Worker(slot); });
+            workers_.emplace_back([this,slot,lane=ecstasySceneJobsLane] {ecstasySceneJobsLane=lane;Worker(slot);});
         }
 #if defined(__vita__)
         if(ecstasySceneClaimPool && count<kClaimClosed) {
@@ -2150,7 +2164,7 @@ void RunNativeSceneJobs(std::size_t count,Task&& task,
     std::size_t minimumParallelJobs=512,unsigned requestedWorkers=0,bool ignoreSerial=false)
 {
     if(!count)return;
-    if(ecstasySceneJobsSerial && !ignoreSerial) {for(std::size_t index=0;index<count;++index)task(index);return;}
+    if(NativeSceneJobsSerialHere() && !ignoreSerial) {for(std::size_t index=0;index<count;++index)task(index);return;}
     const unsigned effective=NativeSceneEffectiveHardwareConcurrency();
     const unsigned budget=requestedWorkers ? std::min(effective,requestedWorkers):effective;
     const unsigned workers=static_cast<unsigned>(std::min<std::size_t>(count,std::max(1u,budget)));
