@@ -249,6 +249,28 @@ bool advanceParticipantsParallel(CollisionSystem* system,CollisionParticipant* c
 }
 }
 
+// Contact resolve tail: the two participants' re-captures (serially first
+// then second) run their moves on the helpers together, then commit in that
+// order (exact by the same per-car isolation; Vita resolve_parallel_off.txt,
+// PC HP2_PARALLEL_RESOLVE=0). Returns false (nothing run) if not eligible.
+int worldParallelResolve=[] {
+#if !defined(__vita__)
+    if (const char* text=std::getenv("HP2_PARALLEL_RESOLVE")) return std::atoi(text);
+#endif
+    return 1;
+}();
+uint64_t worldParallelResolveStats[2]{}; // parallel pairs, serial pairs
+bool worldCaptureParticipantPair(CollisionSystem* system,CollisionParticipant* first,
+    CollisionParticipant* second,float rewind)
+{
+    if (!worldParallelResolve || (worldParallelCapture!=1 && worldParallelCapture!=2) || collisionHelperPoolSize()==0 ||
+        !first->movement || !second->movement) return false;
+    CollisionParticipant* pair[2]={first,second};
+    if (advanceParticipantsParallel(system,pair,2,rewind,2)) {++worldParallelResolveStats[0];return true;}
+    ++worldParallelResolveStats[1];
+    return false;
+}
+
 // Original World::DoTimestepMove PAL14D898..14D940. Freeze the active
 // traversal before running any concrete mover/lifetime owner.
 CollisionSystemResult worldServicesAdvanceParticipants(CollisionSystem* system, float elapsed)

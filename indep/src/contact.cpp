@@ -1542,6 +1542,8 @@ void collisionContactSolve(CollisionSystem* system, CollisionQueuedContact* cont
     }
 }
 
+bool worldCaptureParticipantPair(CollisionSystem* system,CollisionParticipant* first,
+    CollisionParticipant* second,float rewind);
 void collisionContactResolve(CollisionSystem* system, CollisionQueuedContact* contact)
 {
     CollisionParticipant* first=contact->pair->first;
@@ -1566,6 +1568,7 @@ void collisionContactResolve(CollisionSystem* system, CollisionQueuedContact* co
     if (system->result!=COLLISION_SYSTEM_OK) return;
     collisionParticipantPrepare(first);
     collisionParticipantPrepare(second);
+    if (worldCaptureParticipantPair(system,first,second,contact->view.time)) return;
     collisionParticipantCapture(system,first,contact->view.time);
     collisionParticipantCapture(system,second,contact->view.time);
 }

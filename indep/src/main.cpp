@@ -73,6 +73,7 @@ extern uint64_t collisionPipeZeroKind[6],collisionPipeRelayouts;
 extern uint64_t collisionPipeLong,collisionPipeZeroDraw,collisionPipeBehind[9];
 extern uint64_t collisionPipeMissPair,collisionPipeMissStart,collisionPipeShort,collisionPipeDrawDelta[4];
 extern uint64_t collisionPipeContacts,collisionPipeEntryMisses,collisionPipeBreaks,collisionPipeTasks,collisionPipeUsed,collisionPipePasses;
+extern uint64_t worldParallelResolveStats[2];
 namespace hp2 { extern int ecstasyPrepareCache; extern std::uint64_t ecstasyPrepareCacheStats[3]; extern std::uint64_t ecstasyAsyncMirrorStats[12]; extern int ecstasyAsyncParticles; extern std::uint64_t ecstasyAsyncParticleStats[5]; }
 namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; extern std::array<std::uint64_t,7> ecstasyIndexCacheStats; extern std::array<double,4> ecstasyDiscardSetupSplitMs; extern int ecstasyDiscardSink; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
@@ -89,6 +90,8 @@ extern uint64_t collisionQueuePredicted,collisionQueueFallbacks,collisionQueueCh
 extern uint32_t (*collisionWitnessProbeClock)();
 extern uint64_t collisionWitnessKindMicros[9],collisionWitnessKindSteps[9];
 static double soundUpdatePeakMs=0;
+extern double soundUpdateSplitMs[12];
+static std::uint64_t soundUpdateCalls=0;static double soundUpdateTotalMs=0,audioPumpTotalMs=0;
 extern std::array<double,8> carMoverModeMs;
 extern std::array<std::uint32_t,8> carMoverModeCalls;
 extern uint64_t worldParallelCaptureStats[5];
@@ -1210,8 +1213,13 @@ bool ApplicationRuntime::Tick()
                 platform::ScopedNativeDuration measure(s.audioTiming,&s.slowFrame.audio);
                 const auto soundStarted=std::chrono::steady_clock::now();
                 s.AudioResult(soundUpdate(s.soundBindings,s.trackPhase->Simulation(),s.speechStream,s.profilesOwner,s.parameters,s.flow,&s.joylog),"Original sound frame");
-                soundUpdatePeakMs=std::max(soundUpdatePeakMs,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-soundStarted).count());
+                ++soundUpdateCalls;
+                const auto soundEnded=std::chrono::steady_clock::now();
+                const double soundMs=std::chrono::duration<double,std::milli>(soundEnded-soundStarted).count();
+                soundUpdateTotalMs+=soundMs;
+                soundUpdatePeakMs=std::max(soundUpdatePeakMs,soundMs);
                 if(s.audioOpened)s.AudioResult(s.host.PumpAudio(s.sound),"Physical audio frame");
+                audioPumpTotalMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-soundEnded).count();
             }
             joystickUpdatePortRumblers(s.input,s.clock);
             for(int32_t port=0;port<2;++port)if(s.input.pendingMotorDirty[port]) {
@@ -1465,7 +1473,15 @@ bool ApplicationRuntime::Tick()
                 s.longestPresentIntervalMs,static_cast<unsigned long long>(s.presentsOver33ms),
                 static_cast<unsigned long long>(s.presentsOver50ms));
             s.host.RecordSessionEvent("render.phase_window",detail);
-            std::snprintf(detail,sizeof(detail),"sound_update_peak_ms=%.3f",soundUpdatePeakMs);
+            {
+                auto& t=soundUpdateSplitMs;const double n=t[11]>0 ? t[11]:1.0;
+                const double calls=soundUpdateCalls ? static_cast<double>(soundUpdateCalls):1.0;
+                std::snprintf(detail,sizeof(detail),"sound_update_peak_ms=%.3f calls=%llu sound_ms=%.3f pump_ms=%.3f sampled=%.0f per_update_ms speech=%.3f stream=%.3f "
+                    "jukebox=%.3f cars=%.3f collision=%.3f positional=%.3f soundscape=%.3f noise=%.3f chopper=%.3f library=%.3f muffler=%.3f",
+                    soundUpdatePeakMs,(unsigned long long)soundUpdateCalls,soundUpdateTotalMs/calls,audioPumpTotalMs/calls,t[11],t[0]/n,t[1]/n,t[2]/n,t[3]/n,t[4]/n,t[5]/n,t[6]/n,t[7]/n,t[8]/n,t[9]/n,t[10]/n);
+                for(auto& v:t)v=0;
+                soundUpdateCalls=0;soundUpdateTotalMs=audioPumpTotalMs=0;
+            }
             s.host.RecordSessionEvent("render.sound_update",detail);
             soundUpdatePeakMs=0;
             {
@@ -1569,6 +1585,12 @@ bool ApplicationRuntime::Tick()
                         (unsigned long long)a[10],(unsigned long long)a[11]);
                     s.host.RecordSessionEvent("render.async_mirror",detail);
                     const auto mismatches=a[7];std::fill(std::begin(a),std::end(a),0);a[7]=mismatches;
+                }
+                if(auto& a=worldParallelResolveStats;a[0]+a[1]) {
+                    std::snprintf(detail,sizeof(detail),"parallel_pairs=%llu serial_pairs=%llu",
+                        (unsigned long long)a[0],(unsigned long long)a[1]);
+                    s.host.RecordSessionEvent("render.parallel_resolve",detail);
+                    a[0]=a[1]=0;
                 }
                 if(auto& a=hp2::ecstasyPrepareCacheStats;a[0]+a[1]) {
                     std::snprintf(detail,sizeof(detail),"mode=%d hits=%llu misses=%llu verify_mismatches=%llu",

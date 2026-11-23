@@ -668,6 +668,19 @@ WorldAudioResult soundServiceRegionLoading(const CarSoundBindings& bindings,
 // their actual owners; the only new native field is the SDK ticker's host
 // steady-clock representation. No phase silently succeeds for a missing
 // dependency, and no device state is inferred from submitting an update.
+// Sampled split (1 update in 8): speech, stream, jukebox, cars, collision,
+// positional, soundscape, noise, chopper, library, muffler; [11] samples.
+double soundUpdateSplitMs[12]{};
+namespace {
+struct SoundSplit {
+    bool on;std::chrono::steady_clock::time_point mark;
+    void At(int index) {
+        if(!on)return;
+        const auto now=std::chrono::steady_clock::now();
+        soundUpdateSplitMs[index]+=std::chrono::duration<double,std::milli>(now-mark).count();mark=now;
+    }
+};
+}
 WorldAudioResult soundUpdate(const CarSoundBindings& bindings,
     const WorldSimulation* simulation,WorldStreamAudio& stream,
     const hp2::frontend::FrontendPlayerManager& frontend,const RaceParameters& parameters,
@@ -683,6 +696,9 @@ WorldAudioResult soundUpdate(const CarSoundBindings& bindings,
         now-soundDriverState.lastUpdate).count();
     if (!(8.0f<elapsedMilliseconds))return WORLD_AUDIO_OK;
     soundDriverState.lastUpdate=std::chrono::steady_clock::now();
+    static unsigned splitTick=0;
+    SoundSplit split{(++splitTick&7u)==0,soundDriverState.lastUpdate};
+    if(split.on)soundUpdateSplitMs[11]+=1.0;
     if (!bindings.audio || !bindings.audio->library || !bindings.clock)
         return WORLD_AUDIO_INVALID_BINDING;
     auto* speech=worldSpeechGetInstance();
@@ -692,10 +708,13 @@ WorldAudioResult soundUpdate(const CarSoundBindings& bindings,
     const auto spoken=worldSpeechUpdate(speech);
     if (spoken!=WORLD_SPEECH_OK && spoken!=WORLD_SPEECH_SUPPRESSED)
         return spoken==WORLD_SPEECH_ALLOCATION_FAILURE ? WORLD_AUDIO_CAPACITY:WORLD_AUDIO_BACKEND_FAILURE;
+    split.At(0);
     const auto sentence=worldStreamAudioUpdate(&stream);
     if (sentence!=WORLD_STREAM_AUDIO_OK)return WORLD_AUDIO_BACKEND_FAILURE;
+    split.At(1);
     result=soundJukeboxPlayer.Update();
     if (result!=WORLD_AUDIO_OK)return result;
+    split.At(2);
     if (!hp2::frontend::IsGameFlowPaused(bindings.session) && flow.currentState!=3 &&
         !soundDriverState.suppressWorldAudio) {
         if (!simulation || simulation->clock!=bindings.clock || !bindings.audio->positionalSamples)
@@ -707,6 +726,7 @@ WorldAudioResult soundUpdate(const CarSoundBindings& bindings,
             return WORLD_AUDIO_INVALID_BINDING;
         result=carSoundUpdateAll(simulation);
         if (result!=WORLD_AUDIO_OK)return result;
+        split.At(3);
         if (0.0f<soundDriverState.delayedJukeboxSeconds)
             soundDriverState.delayedJukeboxSeconds-=bindings.clock->worldTimeElapsed;
         if (soundDriverState.delayedJukeboxSeconds<0.0f) {
@@ -718,19 +738,26 @@ WorldAudioResult soundUpdate(const CarSoundBindings& bindings,
             result=collisionAudioUpdate(simulation->collisions->contactAudio);
             if (result!=WORLD_AUDIO_OK)return result;
         }
+        split.At(4);
         result=bindings.audio->positionalSamples->Update();
         if (result!=WORLD_AUDIO_OK)return result;
+        split.At(5);
         result=soundScapeUpdate();
         if (result!=WORLD_AUDIO_OK)return result;
+        split.At(6);
         result=SpeechNoise::getInstance()->Update();
         if (result!=WORLD_AUDIO_OK)return result;
+        split.At(7);
         if (simulation->chopper && !chopperUpdateSound(simulation->chopper))
             return WORLD_AUDIO_BACKEND_FAILURE;
+        split.At(8);
     }
     result=bindings.audio->library->Update();
     if (result!=WORLD_AUDIO_OK)return result;
+    split.At(9);
     result=soundUpdateVolumeMuffler(bindings,flow);
     if (result!=WORLD_AUDIO_OK)return result;
+    split.At(10);
 
     if (soundDriverState.printVoicesRequested) {
         if (!observedDevice)return WORLD_AUDIO_INVALID_BINDING;
