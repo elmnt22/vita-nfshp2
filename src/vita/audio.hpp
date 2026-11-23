@@ -11,6 +11,9 @@ struct AudioStatistics {
     double decodeMilliseconds{},commandMilliseconds{},mixMilliseconds{},outputMilliseconds{};
     std::uint64_t buffers{},voiceBuffers{};
     std::uint32_t voicesPeak{};
+    // Reverb: wet buffers processed, voices sending, last preset/depth per core.
+    std::uint64_t reverbBuffers{},wetVoiceBuffers{};
+    int reverbPreset[2]{-1,-1};int reverbVolume[2]{};
     double applyPeakMilliseconds{};
     int applyPeakKind{-1};
     // Slowest pump in the window: its request count and phase split.

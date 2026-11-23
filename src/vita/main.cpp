@@ -388,15 +388,17 @@ public:
         if (result != WORLD_AUDIO_OK) log_.Line("audio.failure", audio_.Error().c_str());
         if (++audioPumps_ % 300u == 0) {
             const auto audio = audio_.TakeStatistics();
-            char detail[384];
+            char detail[512];
             std::snprintf(detail, sizeof(detail),
                 "pumps=300 decode_ms=%.3f commands_ms=%.3f pump_peak_ms=%.3f apply_peak_ms=%.3f apply_peak_kind=%d "
                 "inner_peak_ms=%.3f inner_peak_music_ms=%.3f inner_peak_install_ms=%.3f inner_peak_commands_ms=%.3f inner_peak_requests=%u inner_peak_lock_ms=%.3f inner_peak_apply_ms=%.3f "
-                "mix_ms_total=%.1f buffers=%llu voices_peak=%u",
+                "mix_ms_total=%.1f buffers=%llu voices_peak=%u reverb_buffers=%llu wet_voice_buffers=%llu reverb_mode=%d/%d reverb_depth=%d/%d",
                 audio.decodeMilliseconds / 300.0, audio.commandMilliseconds / 300.0, pumpPeakUs_ / 1000.0,
                 audio.applyPeakMilliseconds, audio.applyPeakKind,
                 audio.pumpPeakMilliseconds, audio.pumpPeakMusicMs, audio.pumpPeakInstallMs, audio.pumpPeakCommandsMs, audio.pumpPeakRequests,audio.pumpPeakLockWaitMs,audio.pumpPeakApplyMs,
-                audio.mixMilliseconds, static_cast<unsigned long long>(audio.buffers), audio.voicesPeak);
+                audio.mixMilliseconds, static_cast<unsigned long long>(audio.buffers), audio.voicesPeak,
+                static_cast<unsigned long long>(audio.reverbBuffers), static_cast<unsigned long long>(audio.wetVoiceBuffers),
+                audio.reverbPreset[0], audio.reverbPreset[1], audio.reverbVolume[0], audio.reverbVolume[1]);
             pumpPeakUs_ = 0;
             log_.Line("audio.backend_window", detail);
             {

@@ -6,6 +6,9 @@
 #include <psp2/kernel/threadmgr.h>
 
 #include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <vector>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -42,6 +45,178 @@ void check(WorldAudioResult result,const char* detail)
 {
     if(result!=WORLD_AUDIO_OK)throw AudioFailure{result,detail};
 }
+
+// SPU2 4-point Gaussian interpolation (the PS2 voice resampler). Weights are
+// the hardware table scaled to float; four weights sum to ~0x7F80/0x8000.
+constexpr int16_t gaussTable[512]={
+#include "spu2_gauss.inc"
+};
+struct GaussWeights {
+    alignas(16) float w[256][4];
+    GaussWeights()
+    {
+        for(int i=0;i<256;++i) {
+            w[i][0]=gaussTable[0xFF-i]/32768.0f;w[i][1]=gaussTable[0x1FF-i]/32768.0f;
+            w[i][2]=gaussTable[0x100+i]/32768.0f;w[i][3]=gaussTable[i]/32768.0f;
+        }
+    }
+};
+const GaussWeights gaussWeights;
+bool linearInterpolation=false; // audio_linear.txt restores the 2-point blend
+bool reverbDisabled=false;      // audio_dry.txt mixes dry only (previous behaviour)
+bool reverbForced=false;        // audio_reverb_force.txt: diagnostic, 0.85 depth everywhere
+
+// SPU2 reverb, one per core. The PS2 runs it at half the 48 kHz output rate
+// with the 39-tap half-band FIR on both sides. Formula and presets are the
+// documented SPU ones: register offsets in 8-byte units, work area in
+// halfwords, products divided by 0x8000, stores saturated to int16.
+constexpr int16_t reverbFir[39]={-1,0,2,0,-10,0,35,0,-103,0,266,0,-616,0,1332,0,-2960,0,10246,16384,
+    10246,0,-2960,0,1332,0,-616,0,266,0,-103,0,35,0,-10,0,2,0,-1};
+// The FIR taps the filters below actually use, as floats (no per-tap
+// conversion): the 20 even taps and the centre tap.
+struct ReverbFirTaps {
+    float even[20];float centre;
+    constexpr ReverbFirTaps():even{},centre(reverbFir[19]) {for(int t=0;t<20;++t)even[t]=reverbFir[2*t];}
+};
+constexpr ReverbFirTaps reverbTaps{};
+struct ReverbPreset {uint32_t bytes;uint16_t r[32];};
+// Order: dAPF1 dAPF2 vIIR vCOMB1-4 vWALL vAPF1 vAPF2 mLSAME mRSAME mLCOMB1 mRCOMB1
+// mLCOMB2 mRCOMB2 dLSAME dRSAME mLDIFF mRDIFF mLCOMB3 mRCOMB3 mLCOMB4 mRCOMB4
+// dLDIFF dRDIFF mLAPF1 mRAPF1 mLAPF2 mRAPF2 vLIN vRIN.
+constexpr ReverbPreset reverbHall{0xADE0,{0x01A5,0x0139,0x6000,0x5000,0x4C00,0xB800,0xBC00,0xC000,0x6000,0x5C00,
+    0x15BA,0x11BB,0x14C2,0x10BD,0x11BC,0x0DC1,0x11C0,0x0DC3,0x0DC0,0x09C1,0x0BC4,0x07C1,0x0A00,0x06CD,
+    0x09C2,0x05C1,0x05C0,0x041A,0x0274,0x013A,0x8000,0x8000}};
+constexpr ReverbPreset reverbSpace{0xF6C0,{0x033D,0x0231,0x7E00,0x5000,0xB400,0xB000,0x4C00,0xB000,0x6000,0x5400,
+    0x1ED6,0x1A31,0x1D14,0x183B,0x1BC2,0x16B2,0x1A32,0x15EF,0x15EE,0x1055,0x1334,0x0F2D,0x11F6,0x0C5D,
+    0x1056,0x0AE1,0x0AE0,0x07A2,0x0464,0x0232,0x8000,0x8000}};
+const ReverbPreset* FindReverbPreset(int mode) noexcept
+{
+    // libsd SD_REV_MODE: 5 HALL, 6 SPACE (the mode this game emits).
+    return mode==6 ? &reverbSpace:mode==5 ? &reverbHall:nullptr;
+}
+
+struct Spu2Reverb {
+    const ReverbPreset* preset{};
+    std::vector<int16_t> work;
+    uint32_t pos{};
+    int32_t v[10]{};      // dAPF1 dAPF2 (halfwords), vIIR vCOMB1-4 vWALL vAPF1 vAPF2
+    uint32_t m[20]{};     // address registers in halfwords
+    uint32_t b[8]{};      // same/diff previous samples and APF delayed taps
+    bool idle{true};      // skipped while the return depth is zero
+    int32_t vLIN{},vRIN{};
+    static constexpr std::size_t H=38,UH=19;
+    std::array<float,H+framesPerBuffer> inL{},inR{};      // 48 kHz send, FIR history first
+    std::array<float,UH+framesPerBuffer/2> outL{},outR{}; // 24 kHz wet, FIR history first
+
+    void Configure(const ReverbPreset* next)
+    {
+        if(next==preset)return;
+        preset=next;
+        if(!preset) {work.clear();return;}
+        const auto& r=preset->r;
+        v[0]=r[0]*4;v[1]=r[1]*4;
+        for(int i=2;i<10;++i)v[i]=static_cast<int16_t>(r[i]);
+        for(int i=0;i<20;++i)m[i]=r[10+i]*4u;
+        vLIN=static_cast<int16_t>(r[30]);vRIN=static_cast<int16_t>(r[31]);
+        work.assign(preset->bytes/2,0);pos=0;
+        // Offsets wrap once here: the per-sample path then needs no division
+        // (the Cortex-A9 has no hardware divide).
+        const auto size=static_cast<uint32_t>(work.size());
+        for(auto& offset:m)offset%=size;
+        const auto back=[size](uint32_t offset,uint32_t by){return (offset+size-by%size)%size;};
+        enum {mLSAME,mRSAME,mLDIFF=8,mRDIFF,mLAPF1=16,mRAPF1,mLAPF2,mRAPF2};
+        b[0]=back(m[mLSAME],1);b[1]=back(m[mRSAME],1);b[2]=back(m[mLDIFF],1);b[3]=back(m[mRDIFF],1);
+        b[4]=back(m[mLAPF1],v[0]);b[5]=back(m[mRAPF1],v[0]);b[6]=back(m[mLAPF2],v[1]);b[7]=back(m[mRAPF2],v[1]);
+        Clear();
+    }
+    void Clear()
+    {
+        std::fill(work.begin(),work.end(),int16_t{0});
+        inL.fill(0);inR.fill(0);outL.fill(0);outR.fill(0);
+    }
+    static int32_t Mul(int32_t a,int32_t b) noexcept {return (a*b)>>15;}
+    static int32_t Sat(int32_t a) noexcept {return std::clamp<int32_t>(a,-32768,32767);}
+    uint32_t Index(uint32_t offset) const noexcept
+    {
+        const auto size=static_cast<uint32_t>(work.size());
+        const auto index=pos+offset; // offset < size
+        return index>=size ? index-size:index;
+    }
+    int32_t Read(uint32_t offset) const noexcept {return work[Index(offset)];}
+    void Write(uint32_t offset,int32_t value) noexcept {work[Index(offset)]=static_cast<int16_t>(Sat(value));}
+    void Step(int32_t inputL,int32_t inputR,int32_t& outputL,int32_t& outputR) noexcept
+    {
+        enum {mLSAME,mRSAME,mLCOMB1,mRCOMB1,mLCOMB2,mRCOMB2,dLSAME,dRSAME,mLDIFF,mRDIFF,
+            mLCOMB3,mRCOMB3,mLCOMB4,mRCOMB4,dLDIFF,dRDIFF,mLAPF1,mRAPF1,mLAPF2,mRAPF2};
+        const int32_t dAPF1=v[0],dAPF2=v[1],vIIR=v[2],vC1=v[3],vC2=v[4],vC3=v[5],vC4=v[6],
+            vWALL=v[7],vAPF1=v[8],vAPF2=v[9];
+        const int32_t Lin=Mul(vLIN,inputL),Rin=Mul(vRIN,inputR);
+        {
+            // Same-side and different-side reflections (IIR through the walls).
+            const int32_t prevL=Read(b[0]),prevR=Read(b[1]);
+            const int32_t sameL=Mul(Lin+Mul(Read(m[dLSAME]),vWALL)-prevL,vIIR)+prevL;
+            const int32_t sameR=Mul(Rin+Mul(Read(m[dRSAME]),vWALL)-prevR,vIIR)+prevR;
+            const int32_t dprevL=Read(b[2]),dprevR=Read(b[3]);
+            const int32_t diffL=Mul(Lin+Mul(Read(m[dRDIFF]),vWALL)-dprevL,vIIR)+dprevL;
+            const int32_t diffR=Mul(Rin+Mul(Read(m[dLDIFF]),vWALL)-dprevR,vIIR)+dprevR;
+            Write(m[mLSAME],sameL);Write(m[mRSAME],sameR);
+            Write(m[mLDIFF],diffL);Write(m[mRDIFF],diffR);
+        }
+        // Early echo: four combs.
+        int32_t l=Mul(vC1,Read(m[mLCOMB1]))+Mul(vC2,Read(m[mLCOMB2]))+Mul(vC3,Read(m[mLCOMB3]))+Mul(vC4,Read(m[mLCOMB4]));
+        int32_t r=Mul(vC1,Read(m[mRCOMB1]))+Mul(vC2,Read(m[mRCOMB2]))+Mul(vC3,Read(m[mRCOMB3]))+Mul(vC4,Read(m[mRCOMB4]));
+        // Late reverb: two all-pass stages.
+        {
+            const int32_t al=Read(b[4]),ar=Read(b[5]);
+            l=Sat(l-Mul(vAPF1,al));r=Sat(r-Mul(vAPF1,ar));
+            Write(m[mLAPF1],l);Write(m[mRAPF1],r);
+            l=Mul(l,vAPF1)+al;r=Mul(r,vAPF1)+ar;
+        }
+        {
+            const int32_t al=Read(b[6]),ar=Read(b[7]);
+            l=Sat(l-Mul(vAPF2,al));r=Sat(r-Mul(vAPF2,ar));
+            Write(m[mLAPF2],l);Write(m[mRAPF2],r);
+            l=Mul(l,vAPF2)+al;r=Mul(r,vAPF2)+ar;
+        }
+        outputL=Sat(l);outputR=Sat(r);
+        pos=pos+1>=work.size() ? 0:pos+1;
+    }
+    // wet: interleaved 48 kHz send mix (int16 scale). Adds gain * reverb return.
+    void Process(const float* wet,float gainL,float gainR,std::array<float,framesPerBuffer*2>& output) noexcept
+    {
+        if(!preset || work.empty())return;
+        constexpr std::size_t N=framesPerBuffer;
+        for(std::size_t i=0;i<N;++i) {inL[H+i]=wet[2*i];inR[H+i]=wet[2*i+1];}
+        // Decimate by 2: y[k] = sum c[t]*x[2k+1-t]; x[i] lives at in[H+i].
+        for(std::size_t k=0;k<N/2;++k) {
+            float sl=0,sr=0;
+            const std::size_t newest=H+2*k+1;
+            for(std::size_t t=0;t<20;++t) {sl+=reverbTaps.even[t]*inL[newest-2*t];sr+=reverbTaps.even[t]*inR[newest-2*t];}
+            sl+=reverbTaps.centre*inL[newest-19];sr+=reverbTaps.centre*inR[newest-19];
+            int32_t ol,orr;
+            Step(Sat(static_cast<int32_t>(sl*(1.0f/32768.0f))),Sat(static_cast<int32_t>(sr*(1.0f/32768.0f))),ol,orr);
+            outL[UH+k]=static_cast<float>(ol);outR[UH+k]=static_cast<float>(orr);
+        }
+        // Interpolate by 2: zero-stuffed z[2u]=out[u], y[n] = 2*sum c[t]*z[n-t].
+        const float scaleL=gainL*(2.0f/32768.0f),scaleR=gainR*(2.0f/32768.0f);
+        for(std::size_t n=0;n<N;++n) {
+            float sl=0,sr=0;
+            if(n&1) {
+                // Only the centre tap meets an even z index.
+                const auto u=static_cast<std::size_t>(static_cast<long>(UH)+(static_cast<long>(n)-19)/2); // n-19 even, >= -18
+                sl=reverbTaps.centre*outL[u];sr=reverbTaps.centre*outR[u];
+            } else {
+                for(std::size_t t=0;t<20;++t) {
+                    const std::size_t u=UH+n/2-t; // (n-2t)/2 + UH, >= 0
+                    sl+=reverbTaps.even[t]*outL[u];sr+=reverbTaps.even[t]*outR[u];
+                }
+            }
+            output[2*n]+=sl*scaleL;output[2*n+1]+=sr*scaleR;
+        }
+        std::copy(inL.end()-H,inL.end(),inL.begin());std::copy(inR.end()-H,inR.end(),inR.begin());
+        std::copy(outL.end()-UH,outL.end(),outL.begin());std::copy(outR.end()-UH,outR.end(),outR.begin());
+    }
+};
 
 
 // Result of one background music job (file reads + ADPCM decode).
@@ -140,6 +315,7 @@ struct Voice {
     Ps2AdpcmHistory movieHistory{};
     double cursor{};
     uint32_t pitch{};
+    int effectCore{-1}; // reverb bus this voice sends to (authored MSH flag), -1 dry only
     bool opened{},playing{},paused{},loop{};
 
     void Append(PcmWave pcm)
@@ -162,7 +338,7 @@ struct Voice {
         }
     }
 
-    void Mix(std::array<float,framesPerBuffer*2>& output)
+    void Mix(std::array<float,framesPerBuffer*2>& output,float* wet)
     {
         if(!playing || paused)return;
         const bool constantEnvelope=envelope.State()==NativeEnvelope::Phase::Sustain || envelope.Silent();
@@ -183,7 +359,7 @@ struct Voice {
             // Keep interpolation and gain arithmetic identical to the scalar
             // mixer while removing invariant divisions/branches per sample.
             const double step=static_cast<double>(pitch?pitch:pcm.sampleRate)/sampleRate;
-            const auto render=[&](auto channels) {
+            const auto render=[&](auto channels,auto gauss,auto send) {
                 constexpr std::size_t channelCount=decltype(channels)::value;
                 while(frame<framesPerBuffer && cursor<end) {
                     const auto index=static_cast<std::size_t>(cursor);
@@ -191,22 +367,52 @@ struct Voice {
                     const auto fraction=static_cast<float>(cursor-index);
                     if(!constantEnvelope)envelope.AdvanceFrames(1);
                     const auto gain=constantEnvelope ? constantGain:envelope.Gain();
+                    float left=0,right=0;
                     for(std::size_t channel=0;channel<channelCount;++channel) {
-                        const float a=pcm.samples[index*channelCount+channel];
-                        const float b=pcm.samples[next*channelCount+channel];
-                        const auto value=(a+(b-a)*fraction)*gain;
-                        output[2*frame]+=value*mix.output[channel][0];
-                        output[2*frame+1]+=value*mix.output[channel][1];
+                        float value;
+                        if constexpr(decltype(gauss)::value) {
+                            // SPU2 order: oldest, older, old, new around the cursor.
+                            const auto& w=gaussWeights.w[static_cast<int>(fraction*256.0f)&255];
+                            const auto previous=index ? index-1:0;
+                            const auto after=std::min(index+2,end-1);
+                            value=w[0]*pcm.samples[previous*channelCount+channel]+
+                                w[1]*pcm.samples[index*channelCount+channel]+
+                                w[2]*pcm.samples[next*channelCount+channel]+
+                                w[3]*pcm.samples[after*channelCount+channel];
+                        } else {
+                            const float a=pcm.samples[index*channelCount+channel];
+                            const float b=pcm.samples[next*channelCount+channel];
+                            value=a+(b-a)*fraction;
+                        }
+                        value*=gain;
+                        left+=value*mix.output[channel][0];
+                        right+=value*mix.output[channel][1];
                     }
+                    output[2*frame]+=left;output[2*frame+1]+=right;
+                    if constexpr(decltype(send)::value) {wet[2*frame]+=left;wet[2*frame+1]+=right;}
                     cursor+=step;++frame;
                 }
             };
-            if(pcm.channels==1)render(std::integral_constant<std::size_t,1>{});
-            else render(std::integral_constant<std::size_t,2>{});
+            using One=std::integral_constant<std::size_t,1>;using Two=std::integral_constant<std::size_t,2>;
+            using Yes=std::true_type;using No=std::false_type;
+            const bool gauss=!linearInterpolation;
+            if(pcm.channels==1) {
+                if(wet) {if(gauss)render(One{},Yes{},Yes{});else render(One{},No{},Yes{});}
+                else {if(gauss)render(One{},Yes{},No{});else render(One{},No{},No{});}
+            } else {
+                if(wet) {if(gauss)render(Two{},Yes{},Yes{});else render(Two{},No{},Yes{});}
+                else {if(gauss)render(Two{},Yes{},No{});else render(Two{},No{},No{});}
+            }
         }
         if(constantEnvelope)envelope.AdvanceFrames(frame);
     }
 };
+
+// Reverb control is written by commands under the voice lock; the output
+// thread copies it per buffer and owns the reverb work areas.
+// The game never submits a preset (SoundScape starts on its current one):
+// like the PC device, each core starts in the only mode it selects, SPACE.
+struct EffectControl {int preset{6};uint16_t volume{};int8_t pan{};uint8_t mode{2};bool enabled{true};uint32_t clears{};};
 
 struct OutputBuffer {
     alignas(64) std::array<int16_t,framesPerBuffer*2> samples{};
@@ -222,6 +428,10 @@ struct AudioDevice::State {
     // so a slow game frame does not starve the hardware queue.
     void StartOutput()
     {
+        const auto exists=[](const char* path) {if(auto* f=std::fopen(path,"rb")) {std::fclose(f);return true;} return false;};
+        linearInterpolation=exists("ux0:data/NFSHP2/audio_linear.txt");
+        reverbDisabled=exists("ux0:data/NFSHP2/audio_dry.txt");
+        reverbForced=exists("ux0:data/NFSHP2/audio_reverb_force.txt");
         port=sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM,framesPerBuffer,sampleRate,SCE_AUDIO_OUT_MODE_STEREO);
         if(port<0)throw AudioFailure{WORLD_AUDIO_BACKEND_FAILURE,"sceAudioOutOpenPort ("+std::to_string(port)+")"};
         int volume[2]={SCE_AUDIO_VOLUME_0DB,SCE_AUDIO_VOLUME_0DB};
@@ -260,12 +470,53 @@ struct AudioDevice::State {
                 // Voices are a fixed array; commands replace entries only
                 // under this same lock, so each voice mixes consistently.
                 mixBuffer.fill(0.0f);
-                std::uint32_t active=0;
+                std::array<EffectControl,2> control;
+                {std::lock_guard<std::mutex> lock(mutex);control=effects;}
+                if(reverbForced)for(auto& effect:control)effect.volume=std::max<uint16_t>(effect.volume,13926);
+                // A core returns sound only at nonzero depth (the game sets it
+                // only in tunnels / enclosed spots); at zero depth both the
+                // sends and the reverb are skipped. Its work area restarts
+                // empty when depth returns, under the game's 0.333/update ramp.
+                bool live[2]{};
+                for(std::size_t core=0;core<2;++core) {
+                    auto& bus=reverbs[core];
+                    const auto& effect=control[core];
+                    bus.Configure(reverbDisabled ? nullptr:FindReverbPreset(effect.preset));
+                    if(effect.clears!=reverbClears[core]) {reverbClears[core]=effect.clears;bus.Clear();}
+                    live[core]=bus.preset && effect.enabled && effect.volume;
+                    if(live[core] && bus.idle)bus.Clear();
+                    bus.idle=!live[core];
+                    if(live[core])wetBuffers[core].fill(0.0f);
+                }
+                std::uint32_t active=0,sending=0;
                 for(auto& voice:voices) {
                     std::lock_guard<std::mutex> lock(mutex);
-                    if(voice.playing && !voice.paused && !voice.chunks.empty()) {++active;voice.Mix(mixBuffer);}
+                    if(voice.playing && !voice.paused && !voice.chunks.empty()) {
+                        ++active;
+                        float* wet=nullptr;
+                        if(voice.effectCore>=0 && voice.effectCore<2 && live[voice.effectCore]) {
+                            wet=wetBuffers[static_cast<std::size_t>(voice.effectCore)].data();++sending;
+                        }
+                        voice.Mix(mixBuffer,wet);
+                    }
+                }
+                std::uint32_t processed=0;
+                for(std::size_t core=0;core<2;++core) {
+                    auto& bus=reverbs[core];
+                    const auto& effect=control[core];
+                    if(!live[core])continue;
+                    // PAL267270 effect return: linear +/-129 pan on the 14-bit depth.
+                    const int pan=effect.mode<2 ? 0:std::max(-127,static_cast<int>(effect.pan));
+                    const int left=pan>0 ? std::max(0,static_cast<int>(double(pan)*-129.0+effect.volume)):effect.volume;
+                    const int right=pan<0 ? std::max(0,static_cast<int>(double(pan)*129.0+effect.volume)):effect.volume;
+                    bus.Process(wetBuffers[core].data(),left/16383.0f,right/16383.0f,mixBuffer);
+                    ++processed;
                 }
                 std::lock_guard<std::mutex> lock(mutex);
+                statistics.reverbBuffers+=processed;statistics.wetVoiceBuffers+=sending;
+                for(std::size_t core=0;core<2;++core) {
+                    statistics.reverbPreset[core]=control[core].preset;statistics.reverbVolume[core]=control[core].volume;
+                }
                 statistics.voicesPeak=std::max(statistics.voicesPeak,active);
                 statistics.voiceBuffers+=active;++statistics.buffers;
                 statistics.mixMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-mixStarted).count();
@@ -275,6 +526,13 @@ struct AudioDevice::State {
             sceAudioOutOutput(port,buffer.samples.data());
         }
         sceAudioOutOutput(port,nullptr); // drain the queued buffer before release
+    }
+
+    EffectControl& EffectCore(const WorldAudioRequest& operation)
+    {
+        if(operation.effectCore<0 || operation.effectCore>=static_cast<int32_t>(effects.size()))
+            throw AudioFailure{WORLD_AUDIO_INVALID_BINDING,"Effect command has no Vita core"};
+        return effects[static_cast<std::size_t>(operation.effectCore)];
     }
 
     Voice* Find(const WorldAudioRequest& operation)
@@ -314,6 +572,12 @@ struct AudioDevice::State {
         voice.bank=operation.bank;
         voice.envelope=NativeEnvelope(CaptureVoiceEnvelope(operation));
         voice.mix.Initialize(channels,!operation.instance->sampleType,0x3FFF,0,mode);
+        // VoicePlay 2625B8..2625F4: the authored MSH+26 halfword enables the
+        // core's reverb send; PlayChain (speech, sampleType 1) never does.
+        const auto* cue=operation.cue;
+        if(operation.instance->sampleType!=1 && cue && cue->metadata && cue->metadataSize==52 &&
+            (cue->metadata[0x26] || cue->metadata[0x27]))
+            voice.effectCore=static_cast<int>(id/24);
         return voice;
     }
 
@@ -579,6 +843,7 @@ struct AudioDevice::State {
                 throw AudioFailure{WORLD_AUDIO_INVALID_BINDING,"Invalid Vita audio mode"};
             mode=static_cast<uint8_t>(operation.audioMode+1);
             for(auto& voice:voices)if(voice.sample.instance)voice.mix.SetMode(mode);
+            for(auto& effect:effects)effect.mode=mode;
             break;
         case WORLD_AUDIO_SET_REGION_PATH:
         case WORLD_AUDIO_SET_CHANNEL_VOLUME:
@@ -586,12 +851,32 @@ struct AudioDevice::State {
             // The engine owns these publications and emits actual per-voice changes.
             break;
         case WORLD_AUDIO_SET_CORE_EFFECT_VOLUME:
+            EffectCore(operation).volume=operation.effectCoreVolume;break;
         case WORLD_AUDIO_SET_CORE_EFFECT_PAN:
-        case WORLD_AUDIO_SET_CORE_EFFECT_ATTRIBUTE:
-        case WORLD_AUDIO_SET_CORE_EFFECT_ENABLED:
-            // This first backend mixes the dry outputs. The reverb buses
-            // do not affect the retained dry voice gain or sample timing.
+            EffectCore(operation).pan=operation.effectCorePan;break;
+        case WORLD_AUDIO_SET_CORE_EFFECT_ATTRIBUTE: {
+            auto& effect=EffectCore(operation);
+            switch(operation.effectParameter) {
+            case 1:effect.preset=operation.effectPreset;effect.enabled=false;break; // mode; STREAM re-enables
+            case 2:effect.volume=static_cast<uint16_t>(operation.effectPreset);break; // PAL265518 depth
+            case 3: {
+                // PAL26553C subtracts 127 from the low byte, then stores a byte.
+                const auto bits=static_cast<uint8_t>(static_cast<uint8_t>(operation.effectPreset)-127u);
+                std::memcpy(&effect.pan,&bits,sizeof(bits));break;
+            }
+            case 4:case 5:break; // delay/feedback only shape ECHO/DELAY modes
+            default:throw AudioFailure{WORLD_AUDIO_INVALID_BINDING,"Unknown Vita effect attribute"};
+            }
             break;
+        }
+        case WORLD_AUDIO_SET_CORE_EFFECT_ENABLED: {
+            if(operation.effectPreset!=0 && operation.effectPreset!=1)
+                throw AudioFailure{WORLD_AUDIO_INVALID_BINDING,"Invalid Vita effect enable value"};
+            auto& effect=EffectCore(operation);
+            // STREAM EnableEffects clears the core's work area before enabling.
+            if(operation.effectPreset)++effect.clears;
+            effect.enabled=operation.effectPreset!=0;break;
+        }
         default:
             throw AudioFailure{WORLD_AUDIO_BACKEND_FAILURE,"Unsupported Vita audio request"};
         }
@@ -666,6 +951,12 @@ struct AudioDevice::State {
     bool threadStarted{};
     int port{-1};
     std::array<float,framesPerBuffer*2> mixBuffer{};
+    // Reverb control is written by commands under `mutex`; the output thread
+    // copies it per buffer and owns the reverb work areas.
+    std::array<EffectControl,2> effects{};
+    std::array<Spu2Reverb,2> reverbs{};
+    std::array<uint32_t,2> reverbClears{};
+    std::array<std::array<float,framesPerBuffer*2>,2> wetBuffers{};
     uint8_t mode{2};
     bool initialized{};
 };
