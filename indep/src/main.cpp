@@ -73,7 +73,7 @@ extern uint64_t collisionPipeZeroKind[6],collisionPipeRelayouts;
 extern uint64_t collisionPipeLong,collisionPipeZeroDraw,collisionPipeBehind[9];
 extern uint64_t collisionPipeMissPair,collisionPipeMissStart,collisionPipeShort,collisionPipeDrawDelta[4];
 extern uint64_t collisionPipeContacts,collisionPipeEntryMisses,collisionPipeBreaks,collisionPipeTasks,collisionPipeUsed,collisionPipePasses;
-namespace hp2 { extern std::uint64_t ecstasyAsyncMirrorStats[12]; extern int ecstasyAsyncParticles; extern std::uint64_t ecstasyAsyncParticleStats[5]; }
+namespace hp2 { extern int ecstasyPrepareCache; extern std::uint64_t ecstasyPrepareCacheStats[3]; extern std::uint64_t ecstasyAsyncMirrorStats[12]; extern int ecstasyAsyncParticles; extern std::uint64_t ecstasyAsyncParticleStats[5]; }
 namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; extern std::array<std::uint64_t,7> ecstasyIndexCacheStats; extern std::array<double,4> ecstasyDiscardSetupSplitMs; extern int ecstasyDiscardSink; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
@@ -1569,6 +1569,12 @@ bool ApplicationRuntime::Tick()
                         (unsigned long long)a[10],(unsigned long long)a[11]);
                     s.host.RecordSessionEvent("render.async_mirror",detail);
                     const auto mismatches=a[7];std::fill(std::begin(a),std::end(a),0);a[7]=mismatches;
+                }
+                if(auto& a=hp2::ecstasyPrepareCacheStats;a[0]+a[1]) {
+                    std::snprintf(detail,sizeof(detail),"mode=%d hits=%llu misses=%llu verify_mismatches=%llu",
+                        hp2::ecstasyPrepareCache,(unsigned long long)a[0],(unsigned long long)a[1],(unsigned long long)a[2]);
+                    s.host.RecordSessionEvent("render.prepare_cache",detail);
+                    a[0]=a[1]=0;
                 }
                 if(auto& a=hp2::ecstasyAsyncParticleStats;a[0]) {
                     std::snprintf(detail,sizeof(detail),"mode=%d prepared=%llu committed=%llu fallbacks=%llu verify_mismatches=%llu failures=%llu",

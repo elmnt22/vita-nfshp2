@@ -1408,6 +1408,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     const unsigned ablation=emitTwice ? (twiceViewCounter++)%5u:0u;
     const EcstasyDrawProjection* viewProjection=nullptr;
     const bool fastSceneryCapture=hp2::ecstasyFastSceneryCapture!=0;
+    const std::uint64_t preparePass=++S.preparePass_;
     for(int twicePass=emitTwice ? 0:1;twicePass<2;++twicePass) {
     const std::uint32_t twiceStart=emitTwice ? collisionWitnessClockMicros():0u;
     if(emitTwice && twicePass==0) {
@@ -1479,7 +1480,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             if(!viewProjection)viewProjection=&frame.SceneryProjection(view);
             if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context,stripCull,
                 fastSceneryCapture ? viewProjection:nullptr,
-                fastSceneryCapture && worldContext && context==&*worldContext ? worldContextKey:0)) {
+                fastSceneryCapture && worldContext && context==&*worldContext ? worldContextKey:0,preparePass)) {
                 if(verifying)serialRanges[drawIndex]={commandsBefore,frame.Commands().size()};
                 ++splitBatched;continue;
             }

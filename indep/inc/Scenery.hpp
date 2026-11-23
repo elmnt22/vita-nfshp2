@@ -243,7 +243,7 @@ private:
         std::vector<std::optional<SceneLightContext>> lightContextScratch_;
         std::vector<EmitPlan> emitPlanScratch_;
         std::vector<EmitChunk> emitChunkScratch_;
-        std::uint64_t emitPass_{},parallelEmitViews_{},verifyParallelEmitViews_{};
+        std::uint64_t emitPass_{},parallelEmitViews_{},verifyParallelEmitViews_{},preparePass_{};
         std::vector<std::int16_t> sectionScratch_;
         std::vector<RenderIdentityBucket> renderIdentityScratch_;
         std::uint32_t renderGeneration_{};

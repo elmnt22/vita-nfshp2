@@ -3768,12 +3768,42 @@ int ecstasySceneryReuseCensus=[] {
 #endif
     return 0;
 }();
-bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,bool lit)
+// Scenery prepare cache within one view pass (exact; Vita prepare_cache_off.txt,
+// PC HP2_PREPARE_CACHE=0 off, =2 also runs the full prepare and compares).
+int ecstasyPrepareCache=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    if(const char* value=std::getenv("HP2_PREPARE_CACHE"))return std::atoi(value);
+#endif
+    return 1;
+}();
+std::uint64_t ecstasyPrepareCacheStats[3]{}; // hits, misses, verify mismatches
+bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,bool lit,
+    std::uint64_t preparePass)
 {
     const auto* solid=model.solid;
     if(!solid || !solid->geometry || model.replacement || solid->rigidAnimation ||
         solid->vertexAnimation || (solid->renderFlags&0x1000u) ||
         dashboardProjection_ || !zWriteEnabled_)return false;
+    if(preparePass && ecstasyPrepareCache) {
+        if(batch.preparedPass==preparePass && batch.preparedLit==lit &&
+            batch.preparedResources==model.resources && batch.preparedGeometry==solid->geometry) {
+            ++ecstasyPrepareCacheStats[0];
+#if !defined(__vita__) && !defined(__SWITCH__)
+            if(ecstasyPrepareCache==2) {
+                const bool cached=batch.preparedOk;
+                if(PrepareOpaqueSceneryBatch(batch,model,lit,0)!=cached)++ecstasyPrepareCacheStats[2];
+                return cached;
+            }
+#endif
+            if(batch.preparedOk)reusedOpaqueSceneryStrips_+=batch.strips.size();
+            return batch.preparedOk;
+        }
+        ++ecstasyPrepareCacheStats[1];
+        const bool ok=PrepareOpaqueSceneryBatch(batch,model,lit,0);
+        batch.preparedPass=preparePass;batch.preparedLit=lit;batch.preparedResources=model.resources;
+        batch.preparedGeometry=solid->geometry;batch.preparedOk=ok;
+        return ok;
+    }
 
     const auto& geometry=*solid->geometry;
     const auto revision=texturePackRegistry.BindingRevision();
@@ -4156,7 +4186,7 @@ void EcstasyFrame::EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const E
 
 bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
     const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
-    bool cullStrips,const EcstasyDrawProjection* viewProjection,std::uint64_t lightKey)
+    bool cullStrips,const EcstasyDrawProjection* viewProjection,std::uint64_t lightKey,std::uint64_t preparePass)
 {
     using SampleClock=std::chrono::steady_clock;
     const bool sampling=ecstasyEmitSampling;
@@ -4168,7 +4198,7 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
         mark=now;
     };
     sample(3);
-    if(!PrepareOpaqueSceneryBatch(batch,model,lightContext!=nullptr)) {sample(0);return false;}
+    if(!PrepareOpaqueSceneryBatch(batch,model,lightContext!=nullptr,preparePass)) {sample(0);return false;}
     sample(0);
     Require(phase_==Phase::Building && view.target && view.target->enabled && view.matricesCalculated,
         "Opaque scenery batch lost its live view");

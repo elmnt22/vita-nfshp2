@@ -975,6 +975,10 @@ struct OpaqueSceneryBatch {
     // Parallel scenery emit: the render pass that last prepared this batch
     // and its lit state (one batch state must serve every draw of a pass).
     std::uint64_t emitPass{};bool emitPassLit{};
+    // Serial emit: result of the first prepare in one view pass (the batch,
+    // texture tables and pixel residency cannot change inside one pass).
+    std::uint64_t preparedPass{};const void* preparedResources{};const void* preparedGeometry{};
+    bool preparedLit{},preparedOk{};
         std::vector<std::array<float,6>> runBounds; // union of each run's strip boxes (min xyz, max xyz)
         std::vector<const TextureInfo*> uniqueTextures; // distinct strips[].texture (pixel residency check)
     // Packed per-run emit record (one cache-friendly array instead of six
@@ -1115,7 +1119,8 @@ public:
     // lightContext's immutable contents (see CaptureInstance).
     bool RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
         const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
-        bool cullStrips=false,const EcstasyDrawProjection* projection=nullptr,std::uint64_t lightKey=0);
+        bool cullStrips=false,const EcstasyDrawProjection* projection=nullptr,std::uint64_t lightKey=0,
+        std::uint64_t preparePass=0);
     // A fresh nonzero light key for a caller-owned context that stays
     // unchanged while the key is used in this frame.
     std::uint64_t NewLightKey() noexcept {return ++lightKeyCounter_;}
@@ -1123,7 +1128,10 @@ public:
     // thread) refreshes the batch cache and tests eligibility; Emit reads
     // only the prepared batch, the view and its inputs (any thread) and
     // writes commands whose sceneryRunFirst indexes the given runStrips.
-    bool PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,bool lit);
+    // preparePass (nonzero, one per view pass and batch owner): reuse the
+    // first result of this pass for the same batch/resources/lit state.
+    bool PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,bool lit,
+        std::uint64_t preparePass=0);
     void EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
         const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
         const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,
