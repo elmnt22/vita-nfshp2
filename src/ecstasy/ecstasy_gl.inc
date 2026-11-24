@@ -1538,6 +1538,7 @@ void EcstasyVulkanDevice::Storage::GlThread()
 // starvation (waiting for the submit) can be separated without draining.
 int ecstasyGpuTimeline=0;
 int ecstasyHalfFirstRun=0;
+int ecstasyGpuProbe=0;
 // resident_vram.txt: resident geometry in CDRAM (tested 2026-11-21: no GPU gain, -30 MB VRAM).
 int ecstasyResidentVram=0;
 // gpu_timeline.txt "1 N": screenshot (id 200000000+n) the frame after a GPU
@@ -1606,9 +1607,11 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     }
     const auto milliseconds=[](Clock::duration duration) {return std::chrono::duration<double,std::milli>(duration).count();};
     // G0 GPU probe: one frame in 16 drains the GPU first, so the finish
-    // after its swap measures that frame's GPU work alone.
+    // after its swap measures that frame's GPU work alone. That drain breaks
+    // CPU/GPU overlap and cost a missed frame every ~0.5 s under the 30 fps
+    // lock (2026-11-24), so it is opt-in (Vita gpu_probe.txt).
     static unsigned gpuProbePhase=0;
-    const bool gpuProbeFrame=!ecstasyGpuTimeline && platform::nativeDiagnosticsEnabled && (gpuProbePhase++%16u)==0;
+    const bool gpuProbeFrame=ecstasyGpuProbe && !ecstasyGpuTimeline && platform::nativeDiagnosticsEnabled && (gpuProbePhase++%16u)==0;
     if(gpuProbeFrame)sceGxmFinish(gxm_context);
     const auto renderBegin=Clock::now();
     struct GpuFrameCounts {unsigned draws,blended,passes,scissorUpdates,alphaTested;double textureBytes;std::vector<GLuint> seen;};
