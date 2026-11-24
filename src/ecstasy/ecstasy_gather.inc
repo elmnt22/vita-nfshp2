@@ -43,11 +43,21 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     {
         const auto reset=ecstasyResidentResetEpoch.load(std::memory_order_acquire);
         if(reset!=residentResetSeen) {
+#if defined(HP2_GATHER_GL)
+            // The GL thread may still resolve the previous packet against
+            // these entries: let it finish before releasing them.
+            if(deferResolve)WaitOtherPacketsIdle();
+#endif
             residentResetSeen=reset;residentGeometry.Reset();residentIndexCache.Reset();
             decltype(modelRunRecords)().swap(modelRunRecords);
         }
     }
-    residentGeometry.Begin(gatherSerial);residentIndexCache.Begin(gatherSerial);
+#if defined(HP2_GATHER_GL)
+    const bool deferIndices=deferResolve;
+#else
+    const bool deferIndices=false;
+#endif
+    residentGeometry.Begin(gatherSerial);if(!deferIndices)residentIndexCache.Begin(gatherSerial);
     residentFrameVertices=0;residentFrameIndices=0;gatheredResidentIndexSpans.clear();gatheredResidentSpanTokens.clear();
     nativeStripJobs.clear();nativeWorkRanges.clear();nativeFrameShading.Clear();
     using Clock=std::chrono::steady_clock;
@@ -1650,7 +1660,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     nativeGatherFrameMs[1]=std::chrono::duration<double,std::milli>(finishStarted-loopStarted).count();
     nativeGatherFrameMs[2]=std::chrono::duration<double,std::milli>(indicesStarted-finishStarted).count();
     profile.gatherVertexJobsMilliseconds+=nativeGatherFrameMs[2];
-    ResolveNativeResidentIndices(residentIndexCache,gatheredResidentIndexSpans,gatheredResidentSpanTokens,elementIndices,batches);
+    if(!deferIndices)ResolveNativeResidentIndices(residentIndexCache,gatheredResidentIndexSpans,gatheredResidentSpanTokens,elementIndices,batches);
     HP2_GATHER_PHASE((5u<<8)|(3u<<5));
     nativeGatherFrameMs[3]=std::chrono::duration<double,std::milli>(Clock::now()-indicesStarted).count();
     profile.gatherIndicesMilliseconds+=nativeGatherFrameMs[3];

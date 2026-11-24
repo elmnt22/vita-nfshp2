@@ -4,6 +4,7 @@
 // (logic + capture) on the Cortex-A9 before any GPU backend exists.
 #include <psp2/ctrl.h>
 #include <psp2/gxm.h>
+#include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
@@ -67,7 +68,7 @@ extern uint32_t (*collisionWitnessClockMicros)();
 extern int worldParallelCapture;
 extern int worldParallelResolve;
 namespace hp2::frontend { extern int flailerDiscardEarlyOut; }
-namespace hp2 { extern int ecstasyAttachPrefetch; extern int ecstasySceneryLeafFast; extern int ecstasySceneryLeafVerify; extern int ecstasySceneryPrefetch; extern int ecstasySceneryFirstFast; extern int ecstasyReplayFast; extern int ecstasySceneryRunReplay; extern int ecstasyGatherDetail; extern double ecstasyGatherDetailMs; extern float ecstasyParticleNearFadeStart, ecstasyParticleNearFadeEnd; extern int ecstasyParticleMirrorCull; extern int ecstasySceneryReuseCensus; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasyVsyncInterval; extern std::uint32_t ecstasyGeometryPrewarmMax; extern std::uint32_t ecstasyGeometryPrewarmBurst; extern std::uint32_t ecstasyGeometryPrewarmWindow; extern std::uint32_t ecstasyGeometryPrewarmLookahead; extern int ecstasyGpuDiag; extern int ecstasyModelRunCache; extern int ecstasyTexturePrewarm; extern int ecstasyGeometryPrewarm; extern int ecstasyScissorElide; extern int ecstasySunQuery; extern int ecstasyInstancing; extern int ecstasyGxmDirect; extern int ecstasyGxmParity; extern int ecstasyGxmFlushDraws; extern int ecstasyGxmProf; extern int ecstasyDeferOrder; extern int ecstasyGpuTimeline; extern int ecstasyGatherSampler; void StartGatherSampler(); void StartVitaPgo(); extern int ecstasyHalfFirstRun; extern int ecstasyRetireStamp; extern int ecstasyTexturePrewarmFair; extern int ecstasyGpuProbe; extern int ecstasyGpuHeavyShots; extern int ecstasyResidentVram; extern int ecstasyAlphaElide; extern int ecstasyAlphaCheck; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern int ecstasyAsyncParticles; extern int ecstasyPrepareCache; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
+namespace hp2 { extern int ecstasyAttachPrefetch; extern int ecstasySceneryLeafFast; extern int ecstasySceneryLeafVerify; extern int ecstasySceneryPrefetch; extern int ecstasySceneryFirstFast; extern int ecstasyReplayFast; extern int ecstasySceneryRunReplay; extern int ecstasyGatherDetail; extern double ecstasyGatherDetailMs; extern float ecstasyParticleNearFadeStart, ecstasyParticleNearFadeEnd; extern int ecstasyParticleMirrorCull; extern int ecstasySceneryReuseCensus; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasyVsyncInterval; extern std::uint32_t ecstasyGeometryPrewarmMax; extern std::uint32_t ecstasyGeometryPrewarmBurst; extern std::uint32_t ecstasyGeometryPrewarmWindow; extern std::uint32_t ecstasyGeometryPrewarmLookahead; extern int ecstasyGpuDiag; extern int ecstasyModelRunCache; extern int ecstasyTexturePrewarm; extern int ecstasyGeometryPrewarm; extern int ecstasyScissorElide; extern int ecstasySunQuery; extern int ecstasyInstancing; extern int ecstasyGxmDirect; extern int ecstasyGxmParity; extern int ecstasyGxmFlushDraws; extern int ecstasyGxmProf; extern int ecstasyDeferOrder; extern int ecstasyGpuTimeline; extern int ecstasyGatherSampler; void StartGatherSampler(); void StartVitaPgo(); extern int ecstasyHalfFirstRun; extern int ecstasyRetireStamp; extern int ecstasyTexturePrewarmFair; extern int ecstasyGpuProbe; extern int ecstasyGpuHeavyShots; extern int ecstasyResidentVram; extern int ecstasyAlphaElide; extern int ecstasyDeferResolve; extern int ecstasyAlphaCheck; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern int ecstasyAsyncParticles; extern int ecstasyPrepareCache; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
 namespace hp2 { extern std::array<int,2> ecstasySceneWorkerCores; extern int ecstasyDiscardSink; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
@@ -75,6 +76,36 @@ extern uint64_t collisionSpeculationVerifyBudget;
 namespace {
 class VitaLog;
 VitaLog* g_log{};
+// Display truth (always on, ~free): the vitaGL display-queue callback stamps
+// each flip with the vblank counter; a background thread logs the histogram
+// of vblanks between flips every 5 s (vita.flips: d2 = on time at 30 fps,
+// d3+ = a frame shown late). in_game counts flips while a race is running.
+std::atomic<std::uint32_t> g_flipLastVcount{0};
+std::array<std::atomic<std::uint32_t>, 6> g_flipIntervals{};
+std::atomic<int> g_flipInGame{0};
+void FlipCallback(void*)
+{
+    const std::uint32_t now = static_cast<std::uint32_t>(sceDisplayGetVcount());
+    const std::uint32_t last = g_flipLastVcount.exchange(now, std::memory_order_relaxed);
+    if (!last) return;
+    std::uint32_t delta = now - last;
+    if (delta > 5) delta = 5;
+    g_flipIntervals[delta].fetch_add(1, std::memory_order_relaxed);
+}
+void LogFlipLine(const char* detail);
+void* FlipLogThread(void*)
+{
+    for (;;) {
+        sceKernelDelayThread(5u * 1000u * 1000u);
+        std::uint32_t counts[6];
+        for (int i = 0; i < 6; ++i) counts[i] = g_flipIntervals[i].exchange(0, std::memory_order_relaxed);
+        char detail[128];
+        std::snprintf(detail, sizeof(detail), "in_game=%d d1=%u d2=%u d3=%u d4=%u d5plus=%u",
+            g_flipInGame.load(std::memory_order_relaxed), counts[1], counts[2], counts[3], counts[4], counts[5]);
+        LogFlipLine(detail);
+    }
+    return nullptr;
+}
 class VitaApplicationHost;
 VitaApplicationHost* g_host{};
 // Watchdog diagnostics: main-thread stage and completed-frame counter.
@@ -371,6 +402,7 @@ public:
     }
     void SetFramePipelining(bool enabled) override
     {
+        g_flipInGame.store(enabled ? 1 : 0, std::memory_order_relaxed);
         const bool want = enabled && pipelineAllowed_;
         if (want == pipelining_) return;
         FinishFrames();
@@ -568,6 +600,7 @@ public:
     hp2::EcstasyVulkanDevice* graphics_{};
 #endif
 };
+void LogFlipLine(const char* detail) { if (g_log) g_log->Line("vita.flips", detail); }
 }
 
 int main(int, char**)
@@ -681,6 +714,13 @@ int main(int, char**)
             log.Line("vita.gl", small ? "parameter buffer 16 MB" : "parameter buffer 32 MB");
         }
         vglInitExtended(4 * 1024 * 1024, kWidth, kHeight, 12 * 1024 * 1024 + static_cast<int>(kBigBlockBudget), SCE_GXM_MULTISAMPLE_NONE);
+        vglSetDisplayCallback(FlipCallback);
+        {
+            pthread_t flipThread; pthread_attr_t attributes; pthread_attr_init(&attributes);
+            pthread_attr_setstacksize(&attributes, 32 * 1024);
+            if (pthread_create(&flipThread, &attributes, FlipLogThread, nullptr) == 0) pthread_detach(flipThread);
+            pthread_attr_destroy(&attributes);
+        }
         {
             char heap[192]; vita_heap::Stats(heap, sizeof(heap));
             log.Line("vita.heap", heap);
@@ -944,6 +984,10 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_leaf_verify.txt").c_str(), &probe) >= 0) {
             hp2::ecstasySceneryLeafVerify = 1;
             log.Line("vita.diag", "scenery leaf verify");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/defer_resolve_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyDeferResolve = 0;
+            log.Line("vita.diag", "deferred index resolve off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/alpha_elide_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyAlphaElide = 0;

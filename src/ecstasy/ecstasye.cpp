@@ -8443,7 +8443,7 @@ public:
             auto victim=source.variants[0];
             for(std::size_t at=1;at<source.variantCount;++at)
                 if(slotLastGather_[source.variants[at]]<slotLastGather_[victim])victim=source.variants[at];
-            if(slotLastGather_[victim]==gather_) {return nullptr;}
+            if(Referenced(slotLastGather_[victim])) {return nullptr;}
             // A changed strip metadata value needs new vertex bytes, not
             // a new allocation or a new identity for identical GPU indices.
             // This variant has not been referenced by this Gather. Its CPU
@@ -8625,7 +8625,7 @@ private:
     }
     void Evict(std::uint32_t slot) {
         auto& entry=*entries_[slot];
-        Require(slotLastGather_[slot]!=gather_,"Cannot recycle resident geometry referenced by the current frame");
+        Require(!Referenced(slotLastGather_[slot]),"Cannot recycle resident geometry referenced by the current frame");
         auto found=sources_.find(entry.source);
         if(found!=sources_.end()) {
             auto& source=*found->second;
@@ -8656,6 +8656,15 @@ private:
     static constexpr std::uint32_t NoSlot=0xffffffffu;
     // Recycling choice (cache full): CLOCK sweep for an entry idle for at
     // least one full Gather, else any entry not referenced by this Gather.
+    // With the deferred index resolve the previous Gather's entries are
+    // still read (indices, tokens, minAlpha) by the GL thread.
+    bool Referenced(std::uint64_t last) const noexcept {
+        return last==gather_ || (protectPrevious_ && last && last+1==gather_);
+    }
+    bool protectPrevious_{};
+public:
+    void SetProtectPrevious(bool value) noexcept {protectPrevious_=value;}
+private:
     std::uint32_t PickVictim() {
         if(entries_.empty() || active_.size()>=live_)return NoSlot;
         for(int pass=0;pass<2;++pass)for(std::size_t step=0;step<entries_.size();++step) {
@@ -8663,7 +8672,7 @@ private:
             if(!entries_[slot])continue;
             const auto last=slotLastGather_[slot];
             if(!pass && slotPinnedUntil_[slot]>gather_)continue;
-            if(last!=gather_ && (pass || last+1<gather_))return slot;
+            if(!Referenced(last) && (pass || last+1<gather_))return slot;
         }
         return NoSlot;
     }

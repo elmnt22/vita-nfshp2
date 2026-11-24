@@ -74,7 +74,11 @@ struct GlFramePacket {
     std::vector<std::uint64_t> residentSpanTokens;
     std::vector<GlPendingTexture> uploads;
     std::vector<GlTexture*> deletes;
-    struct TextureRef {GlTexture* texture{};std::uint32_t width{},height{};};
+    struct TextureRef {GlTexture* texture{};std::uint32_t width{},height{};std::int32_t minAlpha{-1};};
+    // Deferred resident index resolve (ecstasyDeferResolve): the GL thread
+    // resolves this packet's resident batches against its own index cache.
+    std::uint64_t indexGather{};
+    bool deferredResolve{};
     std::vector<TextureRef> textures;
     std::array<std::array<std::uint32_t,2>,16> targets{};
     std::array<bool,16> targetUsed{};
@@ -790,7 +794,21 @@ struct EcstasyVulkanDevice::Storage {
     // the same sealed-frame bytes into the same pending upload.
     struct PendingDecode {const TextureInfo* texture{};std::size_t upload{},baseBytes{};bool repeatedPadding{};std::size_t index{};};
     void MarkRedundantAlphaTests(const std::vector<VkVertex>& vertices,const std::vector<std::uint32_t>& indices,
-        std::vector<VkDrawBatch>& batches);
+        std::vector<VkDrawBatch>& batches,const std::vector<std::array<float,4>>& record,
+        const std::vector<const VkResidentGeometryEntry*>& spans,const std::vector<GlFramePacket::TextureRef>* packetTextures);
+    // Latched at the first Render (flag files are read before it).
+    bool deferResolve{},deferResolveLatched{},glResidentIndicesAllocated{};
+    std::vector<VkResidentIndexEntry*> glIndexPendingUploads;
+    // Waits until the GL thread has drawn every packet but the one this
+    // Render claimed (it then touches no resident cache state).
+    void WaitOtherPacketsIdle()
+    {
+        if(!glThreadStarted_)return;
+        for(std::size_t i=0;i+1<packets.size();++i)sceKernelWaitSema(freeSema_,1,nullptr);
+        sceKernelSignalSema(freeSema_,static_cast<int>(packets.size()-1));
+        RethrowGlError();
+    }
+    void ResolveDeferredIndices(GlFramePacket& packet);
     std::vector<PendingDecode> pendingDecodes;
     void RunPendingDecodes();
     void LogReupload(const VkDrawTexture& old,const TextureInfo& texture);
@@ -924,8 +942,12 @@ void EcstasyVulkanDevice::Storage::UploadTexture(const TextureInfo& texture,std:
 // surface removal. Lit (SHADE) and render-target samples keep the test.
 int ecstasyAlphaElide=1;
 int ecstasyAlphaCheck=0;
+// defer_resolve_off.txt clears it: resident index resolve + alpha-test
+// marking run on the render thread (core 1) instead of the GL thread.
+int ecstasyDeferResolve=1;
 void EcstasyVulkanDevice::Storage::MarkRedundantAlphaTests(const std::vector<VkVertex>& vertices,
-    const std::vector<std::uint32_t>& indices,std::vector<VkDrawBatch>& batches)
+    const std::vector<std::uint32_t>& indices,std::vector<VkDrawBatch>& batches,const std::vector<std::array<float,4>>& record,
+    const std::vector<const VkResidentGeometryEntry*>& spans,const std::vector<GlFramePacket::TextureRef>* packetTextures)
 {
     if(!ecstasyAlphaElide)return;
     // Diagnostic reason counts: tested, shade, sampled, no texture alpha,
@@ -954,8 +976,7 @@ void EcstasyVulkanDevice::Storage::MarkRedundantAlphaTests(const std::vector<VkV
         float shadedAlpha=0.0f;
         if(shaded) {
             const auto first=batch.nativeShadingIndex;
-            if(first+19u>gatheredGlyphBounds.size()) {++why[1];continue;}
-            const auto& record=gatheredGlyphBounds;
+            if(first+19u>record.size()) {++why[1];continue;}
             std::uint32_t flags{},mode{},material{};
             std::memcpy(&flags,&record[first][0],4);std::memcpy(&mode,&record[first][1],4);
             std::memcpy(&material,&record[first][2],4);
@@ -983,15 +1004,18 @@ void EcstasyVulkanDevice::Storage::MarkRedundantAlphaTests(const std::vector<VkV
         }
         float texel=1.0f;
         if(!batch.untextured) {
-            if(batch.texture>=textures.size() || textures[batch.texture].minAlpha<0) {++why[3];continue;}
-            texel=static_cast<float>(textures[batch.texture].minAlpha)/128.0f;
+            const int textureMin=packetTextures ?
+                (batch.texture<packetTextures->size() ? (*packetTextures)[batch.texture].minAlpha:-1):
+                (batch.texture<textures.size() ? textures[batch.texture].minAlpha:-1);
+            if(textureMin<0) {++why[3];continue;}
+            texel=static_cast<float>(textureMin)/128.0f;
         }
         float vertex=std::numeric_limits<float>::infinity();
         if(shaded)vertex=shadedAlpha;
         else if(batch.residentGeometry) {
-            if(static_cast<std::size_t>(batch.nativeSpanFirst)+batch.nativeSpanCount>gatheredResidentIndexSpans.size())continue;
+            if(static_cast<std::size_t>(batch.nativeSpanFirst)+batch.nativeSpanCount>spans.size())continue;
             for(std::uint32_t at=0;at<batch.nativeSpanCount;++at)
-                vertex=std::min(vertex,gatheredResidentIndexSpans[batch.nativeSpanFirst+at]->minAlpha);
+                vertex=std::min(vertex,spans[batch.nativeSpanFirst+at]->minAlpha);
         } else if(batch.indexed) {
             if(batch.residentIndices || static_cast<std::size_t>(batch.first)+batch.count>indices.size())continue;
             bool valid=true;
@@ -1042,7 +1066,35 @@ void EcstasyVulkanDevice::Storage::RunPendingDecodes()
     pendingDecodes.clear();
 }
 
+#define HP2_GATHER_GL 1
 #include "src/ecstasy/ecstasy_gather.inc"
+#undef HP2_GATHER_GL
+
+void EcstasyVulkanDevice::Storage::ResolveDeferredIndices(GlFramePacket& packet)
+{
+    // GL thread, before the packet's uploads. The geometry entries its spans
+    // name were referenced by that Gather and stay unevicted/unreassigned
+    // through the next one (SetProtectPrevious); the 2-packet ring keeps a
+    // third Gather from starting before this packet is drawn.
+    residentIndexCache.Begin(packet.indexGather);
+    ResolveNativeResidentIndices(residentIndexCache,packet.residentSpans,packet.residentSpanTokens,packet.indices,packet.batches);
+    MarkRedundantAlphaTests(packet.vertices,packet.indices,packet.batches,packet.glyphBounds,packet.residentSpans,&packet.textures);
+    glIndexPendingUploads.clear();
+    if(!residentIndexCache.Active().empty()) {
+        packet.residentIndexCapacity=static_cast<std::size_t>(residentIndexCache.Capacity())*sizeof(std::uint32_t);
+        if(!glResidentIndicesAllocated) {glResidentIndicesAllocated=true;residentIndexCache.InvalidateUploads();}
+        for(auto* entry:residentIndexCache.Active()) {
+            if(entry->uploaded)continue;
+            const auto offset=static_cast<std::size_t>(entry->first)*sizeof(std::uint32_t);
+            const auto bytes=entry->shadow.size()*sizeof(std::uint32_t);
+            const auto* source=reinterpret_cast<const std::uint8_t*>(entry->shadow.data());
+            packet.residentIndexBytes.insert(packet.residentIndexBytes.end(),source,source+bytes);
+            packet.residentIndexRanges.push_back({{offset,bytes}});
+            glIndexPendingUploads.push_back(entry);
+        }
+    }
+    residentIndexCache.PublishUploads(glIndexPendingUploads);
+}
 
 namespace {
 // Compiled program cache (vitaGL caches only its own FFP shaders). Keyed by
@@ -1401,6 +1453,10 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
         std::lock_guard<std::mutex> lock(glStatsMutex);
         if(glError_) {auto error=glError_;glError_=nullptr;std::rethrow_exception(error);}
     }
+    if(!deferResolveLatched) {
+        deferResolveLatched=true;deferResolve=ecstasyDeferResolve!=0;
+        residentGeometry.SetProtectPrevious(deferResolve);
+    }
     building=&packets[nextPacket];nextPacket=(nextPacket+1)%packets.size();
     building->Clear();
     building->timelineEntry=timelineEntry;
@@ -1439,7 +1495,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     glRenderStage=2;
     Gather(*frame,data,elementIndices,batches);HP2_GATHER_PHASE((5u<<8)|(1u<<5));
     RunPendingDecodes();HP2_GATHER_PHASE((5u<<8)|(2u<<5));
-    MarkRedundantAlphaTests(data,elementIndices,batches);
+    if(!deferResolve)MarkRedundantAlphaTests(data,elementIndices,batches,gatheredGlyphBounds,gatheredResidentIndexSpans,nullptr);
     glRenderStage=3;HP2_GATHER_PHASE(6u<<8);
     statistics.gatherMilliseconds=milliseconds(Clock::now()-gatherBegin);
 
@@ -1464,7 +1520,8 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
             residentPendingUploads.push_back(slot);
         }
     }
-    if(!residentIndexCache.Active().empty()) {
+    packet.deferredResolve=deferResolve;packet.indexGather=gatherSerial;
+    if(!deferResolve && !residentIndexCache.Active().empty()) {
         packet.residentIndexCapacity=static_cast<std::size_t>(residentIndexCache.Capacity())*sizeof(std::uint32_t);
         if(!residentIndicesAllocated) {residentIndicesAllocated=true;residentIndexCache.InvalidateUploads();}
         for(auto* entry:residentIndexCache.Active()) {
@@ -1480,10 +1537,10 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     // Packets are drawn in order, so these contents are in place for every
     // later frame that resolves to the same slots.
     residentGeometry.PublishUploads(residentPendingUploads);
-    residentIndexCache.PublishUploads(residentIndexPendingUploads);
+    if(!deferResolve)residentIndexCache.PublishUploads(residentIndexPendingUploads);
     packet.textures.resize(textures.size());
     for(std::size_t index=0;index<textures.size();++index)
-        packet.textures[index]={glTextureOf(textures[index]),textures[index].width,textures[index].height};
+        packet.textures[index]={glTextureOf(textures[index]),textures[index].width,textures[index].height,textures[index].minAlpha};
     packet.width=options.width;packet.height=options.height;
     packet.depthTransfers=frame->DepthTransfers();
     std::swap(packet.vertices,data);std::swap(packet.indices,elementIndices);
@@ -1707,6 +1764,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
     struct GpuFrameCounts {unsigned draws,blended,passes,scissorUpdates,alphaTested;double textureBytes;std::vector<GLuint> seen;};
     static GpuFrameCounts gpuCounts{};
     if(gpuProbeFrame) {gpuCounts.draws=gpuCounts.blended=gpuCounts.passes=gpuCounts.scissorUpdates=gpuCounts.alphaTested=0;gpuCounts.textureBytes=0;gpuCounts.seen.clear();}
+    if(packet.deferredResolve)ResolveDeferredIndices(packet);
     glRenderStage=5;
     for(auto& upload:packet.uploads) {
         auto* texture=upload.texture;
