@@ -3762,6 +3762,17 @@ std::array<double,8> ecstasyWorldSplitMs{},ecstasyDiscardWorldSplitMs{};
 // Diagnostic: discarded-capture setup split (environment, matrices, begin, models).
 std::array<double,4> ecstasyDiscardSetupSplitMs{};
 std::array<std::uint64_t,8> ecstasySceneryRejectReasons{};
+// [1] split: no solid, no geometry, replacement, rigid anim, vertex anim, flag 0x1000, dashboard, no zwrite.
+std::array<std::uint64_t,8> ecstasySceneryModelStateReasons{};
+// Rigid-animated scenery through the opaque batch path (exact; Vita
+// rigid_batch_off.txt, PC HP2_RIGID_BATCH=0 off).
+int ecstasyRigidSceneryBatch=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    if(const char* value=std::getenv("HP2_RIGID_BATCH"))return std::atoi(value)!=0 ? 1:0;
+#endif
+    return 1;
+}();
+std::uint64_t ecstasyRigidSceneryBatched{};
 // Discarded catch-up captures append no UI polygon commands (Vita
 // discard_sink_off.txt / PC HP2_DISCARD_SINK=0).
 int ecstasyDiscardSink=[] {
@@ -3891,9 +3902,14 @@ bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edi
     std::uint64_t preparePass)
 {
     const auto* solid=model.solid;
-    if(!solid || !solid->geometry || model.replacement || solid->rigidAnimation ||
+    if(!solid || !solid->geometry || model.replacement || (solid->rigidAnimation && !rigidBatch_) ||
         solid->vertexAnimation || (solid->renderFlags&0x1000u) ||
-        dashboardProjection_ || !zWriteEnabled_) {++ecstasySceneryRejectReasons[1];return false;}
+        dashboardProjection_ || !zWriteEnabled_) {
+        ++ecstasySceneryRejectReasons[1];
+        ++ecstasySceneryModelStateReasons[!solid ? 0:!solid->geometry ? 1:model.replacement ? 2:(solid->rigidAnimation && !rigidBatch_) ? 3:
+            solid->vertexAnimation ? 4:(solid->renderFlags&0x1000u) ? 5:dashboardProjection_ ? 6:7];
+        return false;
+    }
     if(preparePass && ecstasyPrepareCache) {
         if(batch.preparedPass==preparePass && batch.preparedLit==lit &&
             batch.preparedResources==model.resources && batch.preparedGeometry==solid->geometry) {
@@ -4304,7 +4320,8 @@ void EcstasyFrame::EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const E
 
 bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
     const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
-    bool cullStrips,const EcstasyDrawProjection* viewProjection,std::uint64_t lightKey,std::uint64_t preparePass)
+    bool cullStrips,const EcstasyDrawProjection* viewProjection,std::uint64_t lightKey,std::uint64_t preparePass,
+    std::int32_t worldFrames)
 {
     using SampleClock=std::chrono::steady_clock;
     const bool sampling=ecstasyEmitSampling;
@@ -4316,7 +4333,30 @@ bool EcstasyFrame::RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edit
         mark=now;
     };
     sample(3);
-    if(!PrepareOpaqueSceneryBatch(batch,model,lightContext!=nullptr,preparePass)) {sample(0);return false;}
+    const bool rigid=model.solid && model.solid->rigidAnimation;
+    {
+        rigidBatch_=rigid && ecstasyRigidSceneryBatch && worldFrames!=INT32_MIN;
+        const bool prepared=PrepareOpaqueSceneryBatch(batch,model,lightContext!=nullptr,preparePass);
+        rigidBatch_=false;
+        if(!prepared) {sample(0);return false;}
+    }
+    // RenderModel's rigid animation (PAL10DC80), applied the same way: an
+    // expired start is cleared (idempotent if the fallback path runs it again)
+    // and the authored sample premultiplies localToWorld. Culling class came
+    // from the static traversal in both paths (RenderModel flag 4 = clip 2).
+    float animated[16];
+    if(rigid && model.rigidAnimationStart) {
+        auto& live=const_cast<EditorMarkerModel&>(model);
+        const auto time=editorMarkerModelRigidAnimationTime(&live,worldFrames);
+        if(time<0)live.rigidAnimationStart=0;
+        else {
+            float sampleMatrix[16];
+            Require(editorMarkerRigidAnimationMatrixAtTime(model.solid->rigidAnimation,sampleMatrix,time)!=0,
+                "Rigid model animation has no authored frame");
+            eMulMatrix(animated,sampleMatrix,localToWorld);localToWorld=animated;
+        }
+        ++ecstasyRigidSceneryBatched;
+    }
     sample(0);
     Require(phase_==Phase::Building && view.target && view.target->enabled && view.matricesCalculated,
         "Opaque scenery batch lost its live view");

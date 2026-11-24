@@ -1123,7 +1123,7 @@ public:
     bool RenderOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
         const float localToWorld[16],const CarCinematicScreen& view,const SceneLightContext* lightContext,
         bool cullStrips=false,const EcstasyDrawProjection* projection=nullptr,std::uint64_t lightKey=0,
-        std::uint64_t preparePass=0);
+        std::uint64_t preparePass=0,std::int32_t worldFrames=INT32_MIN);
     // A fresh nonzero light key for a caller-owned context that stays
     // unchanged while the key is used in this frame.
     std::uint64_t NewLightKey() noexcept {return ++lightKeyCounter_;}
@@ -1135,6 +1135,9 @@ public:
     // first result of this pass for the same batch/resources/lit state.
     bool PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const EditorMarkerModel& model,bool lit,
         std::uint64_t preparePass=0);
+    // Set only inside RenderOpaqueSceneryBatch when it was given worldFrames:
+    // a rigid-animated model then batches with RenderModel's animated matrix.
+    bool rigidBatch_{};
     void EmitOpaqueSceneryRuns(const OpaqueSceneryBatch& batch,const EditorMarkerModel& model,
         const float localToWorld[16],const CarCinematicScreen& view,const EcstasyDrawInstance& instance,
         const EcstasyDrawProjection& projection,bool cullStrips,std::vector<EcstasyDrawCommand>& output,

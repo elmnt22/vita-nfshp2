@@ -99,7 +99,7 @@ inline float sceneryLeafSquaredXY(const SceneryInstance& instance,const float fo
 #define HP2_PREFETCH(address) ((void)(address))
 #endif
 namespace hp2 { extern std::atomic<int> ecstasyAsyncMirrorPhase; extern std::atomic<std::int64_t> ecstasyMirrorZonesNs,ecstasyMirrorSeenNs; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelSceneryPrepare; }
-namespace hp2 { extern std::array<std::uint64_t,8> ecstasySceneryRejectReasons; }
+namespace hp2 { extern std::array<std::uint64_t,8> ecstasySceneryRejectReasons,ecstasySceneryModelStateReasons; extern std::uint64_t ecstasyRigidSceneryBatched; }
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
 
 SceneryInstance* sceneryFindInstanceByIndex(const Scenery* scenery,int32_t section,int32_t instance)
@@ -1484,7 +1484,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             if(!viewProjection)viewProjection=&frame.SceneryProjection(view);
             if(frame.RenderOpaqueSceneryBatch(batch,*draw.model,draw.matrix.data(),view,context,stripCull,
                 fastSceneryCapture ? viewProjection:nullptr,
-                fastSceneryCapture && worldContext && context==&*worldContext ? worldContextKey:0,preparePass)) {
+                fastSceneryCapture && worldContext && context==&*worldContext ? worldContextKey:0,preparePass,worldFrames)) {
                 if(verifying)serialRanges[drawIndex]={commandsBefore,frame.Commands().size()};
                 ++splitBatched;continue;
             }
@@ -1593,6 +1593,11 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 std::snprintf(text,sizeof(text),"per_render model_state=%.1f no_texture=%.1f depth_sorted=%.1f flag100=%.1f flag40=%.1f not_resident=%.1f",
                     r[1]/300.0,r[2]/300.0,r[3]/300.0,r[4]/300.0,r[5]/300.0,r[6]/300.0);
                 platform::RecordSessionEvent("render.scenery_reject",text);r={};
+                auto& m=hp2::ecstasySceneryModelStateReasons;
+                std::snprintf(text,sizeof(text),"per_render no_solid=%.1f no_geometry=%.1f replacement=%.1f rigid_anim=%.1f vertex_anim=%.1f flag1000=%.1f dashboard=%.1f no_zwrite=%.1f rigid_batched=%.1f",
+                    m[0]/300.0,m[1]/300.0,m[2]/300.0,m[3]/300.0,m[4]/300.0,m[5]/300.0,m[6]/300.0,m[7]/300.0,hp2::ecstasyRigidSceneryBatched/300.0);
+                hp2::ecstasyRigidSceneryBatched=0;
+                platform::RecordSessionEvent("render.scenery_model_state",text);m={};
             }
             std::snprintf(text,sizeof(text),"collect_ms=%.3f roots_ms=%.3f traverse_ms=%.3f dedupe_ms=%.3f parallel_emit=%.2f candidates=%.2f tested=%.1f clip_pass=%.1f facing_pass=%.1f pixel_pass=%.1f nodes=%.1f node_walk_ms=%.3f leaf_ms=%.3f leaf_fast=%d leaf_checks=%llu leaf_mismatches=%llu",
                 stages[0]/300,stages[1]/300,stages[2]/300,stages[3]/300,parallelViews/300,candidateViews/300,
