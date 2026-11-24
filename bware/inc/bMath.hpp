@@ -14,11 +14,19 @@ extern "C" {
 // Native PC floating-point operations. Historical bScalar* symbol names are
 // retained for binary/source compatibility, not as a PS2 FPU/VU emulator.
 // Render and physics use hardware float arithmetic; no bit-level FPU model.
+// Inline by default (exact: builds use -ffp-contract=off / MSVC /fp:precise,
+// so a caller cannot fuse the multiply-add; the non-LTO Vita build otherwise
+// paid a real call per operation). -DHP2_BSCALAR_OUTLINE=1 restores calls.
+#ifndef HP2_BSCALAR_OUTLINE
+#define HP2_BSCALAR_OUTLINE 0
+#endif
+#if HP2_BSCALAR_OUTLINE
 float bScalarAdd(float left, float right);
 float bScalarMultiply(float left, float right);
 float bScalarDivide(float numerator, float denominator);
 float bScalarFiniteRatio(float numerator, float denominator);
 float bScalarSquareRoot(float value);
+#endif
 
 // Component ratios retain the PC domain guard for an actual zero divisor
 // and overflowing quotient. Nonzero divisors and representable subnormal
@@ -34,6 +42,14 @@ static inline float finiteRatio(float numerator, float denominator)
         return copysignf(FLT_MAX, quotient);
     return quotient;
 }
+
+#if !HP2_BSCALAR_OUTLINE
+static inline float bScalarAdd(float left, float right) { return left + right; }
+static inline float bScalarMultiply(float left, float right) { return left * right; }
+static inline float bScalarDivide(float numerator, float denominator) { return numerator / denominator; }
+static inline float bScalarSquareRoot(float value) { return sqrtf(value); }
+static inline float bScalarFiniteRatio(float numerator, float denominator) { return finiteRatio(numerator, denominator); }
+#endif
 
 static inline int32_t convertFloatToInt32(float value)
 {

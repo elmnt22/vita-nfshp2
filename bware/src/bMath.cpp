@@ -8,6 +8,7 @@
 // These entry points retain existing caller ABI, but perform native CPU
 // arithmetic. The PS2 mantissa/carry/divider/root state machines were
 // removed from the PC runtime completely.
+#if HP2_BSCALAR_OUTLINE
 float bScalarAdd(float left, float right) { return left + right; }
 float bScalarMultiply(float left, float right) { return left * right; }
 float bScalarDivide(float numerator, float denominator) { return numerator / denominator; }
@@ -19,6 +20,7 @@ float bScalarFiniteRatio(float numerator, float denominator)
 {
     return finiteRatio(numerator, denominator);
 }
+#endif
 
 uint32_t vectorIntegerSquareRoot(uint32_t value)
 {
