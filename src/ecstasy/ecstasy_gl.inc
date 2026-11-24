@@ -445,7 +445,7 @@ struct EcstasyVulkanDevice::Storage {
     bool halfPrewarmed{};GLuint gpuDiagWhite{};GLuint halfDepthCopyProgram{};GLint halfDepthCopyMap{-1};bool halfDepthCopyFailed{},halfHardwareDepth{};
     GLint halfCompositeFlip{-1};
     bool halfCompositeFailed{};
-    std::uint64_t halfRuns{},halfBatches{},halfDepthWrites{};
+    std::uint64_t halfRuns{},halfBatches{},halfDepthWrites{},halfMissedBatches{},halfMissedIndices{},halfRunIndices{},halfBreaks[4]{};
     // Composite bounds: [x0,y0,x1,y1] window pixels for the next EndHalfParticles.
     std::array<float,4> halfBounds{{0.0f,0.0f,-1.0f,-1.0f}};GLuint halfBoundsQuad{};
     std::uint64_t halfCompositeBounded{},halfCompositeSkipped{};double halfCompositeArea{};
@@ -1537,6 +1537,7 @@ void EcstasyVulkanDevice::Storage::GlThread()
 // when the GPU finished each frame, so steady-state GPU throughput and GPU
 // starvation (waiting for the submit) can be separated without draining.
 int ecstasyGpuTimeline=0;
+int ecstasyHalfFirstRun=0;
 // resident_vram.txt: resident geometry in CDRAM (tested 2026-11-21: no GPU gain, -30 MB VRAM).
 int ecstasyResidentVram=0;
 // gpu_timeline.txt "1 N": screenshot (id 200000000+n) the frame after a GPU
@@ -1811,6 +1812,21 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         // Screen-filling smoke (user-approved 2026-11-20): quarter resolution.
         halfDivisor=ecstasyQuarterResMinScreens>0.0 && packet.particleScreens>=ecstasyQuarterResMinScreens ? 4u:2u;
         if(halfFrame && halfDivisor==4u)++quarterFrames;
+        // One split per frame: give it the run with the most particle
+        // indices. A blended non-particle draw (2026-11-24 replay: every
+        // frame) often splits a small first run from the bulk of the smoke,
+        // which then drew at full resolution. half_firstrun.txt: first run.
+        std::size_t halfRunStart=0;
+        if(halfFrame && !ecstasyHalfFirstRun) {
+            const auto& candidates=targetBatches[0];
+            std::uint64_t best=0;
+            for(std::size_t scan=0;scan<candidates.size();) {
+                if(!halfEligible(batches[candidates[scan]])) {++scan;continue;}
+                const auto start=scan;std::uint64_t size=0;
+                while(scan<candidates.size() && halfEligible(batches[candidates[scan]]))size+=batches[candidates[scan++]].count;
+                if(size>best) {best=size;halfRunStart=start;}
+            }
+        }
         if(!offscreen) {
             // The display scene must store its depth (sampled by the half pass)
             // and reload it after the composite for the draws that follow.
@@ -2313,10 +2329,16 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         };
         const auto& list=targetBatches[static_cast<std::size_t>(id)];
         for(std::size_t at=0;at<list.size();) {
-            if(halfFrame && halfEligible(batches[list[at]])) {
+            if(halfFrame && at>=halfRunStart && halfEligible(batches[list[at]])) {
                 halfFrame=false; // later runs this frame draw at full resolution
                 std::size_t end=at;
-                while(end<list.size() && halfEligible(batches[list[end]]))++end;
+                while(end<list.size() && halfEligible(batches[list[end]])) {halfRunIndices+=batches[list[end]].count;++end;}
+                if(end<list.size()) {
+                    // What ended the run: 0 particle (other blend), 1 non-particle blended, 2 opaque, 3 other.
+                    const auto& breaker=batches[list[end]];
+                    const auto blend=glBlendFor(breaker);
+                    ++halfBreaks[breaker.particle ? 0:blend.enable ? 1:breaker.target==0 ? 2:3];
+                }
                 if(!lastFrameHalf) {lastFrameHalf=true;++halfFramesTotal;}
                 std::uint32_t halfStarted=collisionWitnessClockMicros ? collisionWitnessClockMicros():0u;
                 EnterGl();
@@ -2378,6 +2400,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                 continue;
             }
             if(ecstasyGpuDiag==4 && halfEligible(batches[list[at]])) {++at;continue;}
+            if(!offscreen && halfEligible(batches[list[at]])) {++halfMissedBatches;halfMissedIndices+=batches[list[at]].count;}
             const auto head=list[at];
             for(std::size_t ahead=at+1;ahead<list.size() && ahead<=at+8;++ahead)
                 if(instanceRun[list[ahead]]) {PrefetchBatch(batches[list[ahead]]);break;}
@@ -2623,7 +2646,7 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
         lastUploadMs=milliseconds(uploadDone-renderBegin);
     }
     if((++journalFrames%300u)==0) {
-        char detail[320];
+        char detail[512];
         std::snprintf(detail,sizeof(detail),
             "frames=%llu batches=%" HP2_ZU " drawn=%llu skipped=%llu vertices=%" HP2_ZU " indices=%" HP2_ZU " resident_upload=%" HP2_ZU " "
             "textures=%" HP2_ZU " programs=%" HP2_ZU " gather_ms=%.2f upload_ms=%.2f draw_ms=%.2f swap_ms=%.2f",
@@ -2639,6 +2662,11 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
             const auto length=std::strlen(detail);
             std::snprintf(detail+length,sizeof(detail)-length," quarter=%.2f bounded=%.2f skipped=%.2f bounded_area=%.3f",quarterFrames/300.0,
                 halfCompositeBounded/300.0,halfCompositeSkipped/300.0,halfCompositeBounded ? halfCompositeArea/halfCompositeBounded:0.0);
+            const auto length2=std::strlen(detail);
+            std::snprintf(detail+length2,sizeof(detail)-length2," run_idx=%.0f missed=%.1f missed_idx=%.0f breaks=%llu/%llu/%llu/%llu",
+                halfRunIndices/300.0,halfMissedBatches/300.0,halfMissedIndices/300.0,(unsigned long long)halfBreaks[0],(unsigned long long)halfBreaks[1],
+                (unsigned long long)halfBreaks[2],(unsigned long long)halfBreaks[3]);
+            halfRunIndices=halfMissedBatches=halfMissedIndices=0;for(auto& b:halfBreaks)b=0;
             halfCompositeBounded=halfCompositeSkipped=0;halfCompositeArea=0.0;
             quarterFrames=0;
         }
