@@ -760,12 +760,10 @@ void FrontendPlayerManager::StartRace(const FrontendRaceSetupBindings& bindings)
         // Release it after ReplayManager has returned its borrowed nodes.
     }
     race.eventGame=gameType==8 || gameType==9;
-    // PC policy AFTER the retail race and replay snapshot have been built:
-    // Quick Game (2), Free Run (6), and Event Trees (8/9) provide no user
-    // Catch Up selector. Do not retain their PAL-forced enabled default.
-    // Actual selectable Challenge setup (3/4/5/7) keeps the user's choice,
-    // except when the optional launcher override disables it explicitly.
-    // Demo/replay snapshots remain intact for deterministic playback.
+    // After the retail race and replay snapshot have been built: retail
+    // Catch Up stays (PAL-forced on for Quick Game / Free Run / Event Trees,
+    // the user's choice in Challenge setup) unless the optional
+    // disable_catch_up override is set. Demo/replay snapshots stay intact.
     if(!bindings.demoReplay->active && !race.fastSpeedTrapSpawns &&
        ShouldDisableRaceCatchUp(gameType,applicationNativeGameplay.disableCatchUp))
         race.relativePaceEnabled=0;

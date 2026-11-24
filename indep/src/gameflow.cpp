@@ -561,7 +561,7 @@ void EndGameFlowLoadingTrackSpecific(ApplicationFrontendFlow& flow,const GameFlo
     // Reapply the same native race policy at the final, common boundary;
     // events and shortcuts can reinitialize RaceParameters after FRED.
     // Demo/replay data and the authored AI physics/road-speed curves remain
-    // unchanged. Quick Game and Event Trees have no pre-race Catch Up choice.
+    // unchanged. Retail Catch Up stays unless disable_catch_up is set.
     if(!parameters.demoReplay && !parameters.fastSpeedTrapSpawns &&
        ShouldDisableRaceCatchUp(menus.frontend->gameType,applicationNativeGameplay.disableCatchUp))
         parameters.relativePaceEnabled=0;

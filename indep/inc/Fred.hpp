@@ -195,18 +195,13 @@ struct FrontendRaceSetupOptions {
     std::array<std::int32_t,2> freeRun{{3,0}};
     std::array<std::int32_t,4> beTheCop{{2,0,1,0}};
 };
-// A native-race policy: PAL Quick Game and Event Tree do not expose a
-// Catch Up selector. In the PC port these non-configurable modes cannot
-// silently turn rubber-banding on. Challenge setup (3/4/5/7) keeps the
-// player's authored per-mode option unless the launcher explicitly overrides.
-inline bool RaceHasCatchUpChoice(std::int32_t gameType) noexcept
-{
-    return gameType==3 || gameType==4 || gameType==5 || gameType==7;
-}
+// Retail keeps the PAL-forced Catch Up of Quick Game / Free Run / Event Trees
+// (mainmenu StartQuickRace and the Challenge entries set it to 1); forcing it
+// off there made rivals pull away (GitHub issue 1). Only the explicit opt-in
+// launcher/config override (disable_catch_up, default off) disables it.
 inline bool ShouldDisableRaceCatchUp(std::int32_t gameType,bool launcherDisabled) noexcept
 {
-    return gameType>=2 && gameType<=9 &&
-        (launcherDisabled || !RaceHasCatchUpChoice(gameType));
+    return gameType>=2 && gameType<=9 && launcherDisabled;
 }
 
 struct FrontendPlayerManager {
