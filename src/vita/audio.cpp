@@ -11,6 +11,7 @@
 #include <vector>
 #include <mutex>
 #include <optional>
+extern int vitaWatchedThreads[5];
 #include <utility>
 #include <pthread.h>
 
@@ -272,6 +273,7 @@ public:
 private:
     void Run()
     {
+        ::vitaWatchedThreads[4]=sceKernelGetThreadId();
         // Core 2 with the mixer, below it and below the GL thread.
         sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_2);
         sceKernelChangeThreadPriority(0,180);
@@ -459,6 +461,7 @@ struct AudioDevice::State {
         // Core 2 (scene workers burst there only briefly); above the game threads.
         sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_2);
         sceKernelChangeThreadPriority(0,96);
+        ::vitaWatchedThreads[3]=sceKernelGetThreadId();
         std::size_t current=0;
         while(running.load(std::memory_order_relaxed)) {
             auto& buffer=buffers[current];current=(current+1)%buffers.size();

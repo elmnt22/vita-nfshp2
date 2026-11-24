@@ -77,6 +77,41 @@ namespace {
 class VitaLog;
 VitaLog* g_log{};
 int mainThreadPriority = -1;
+}
+int vitaWatchedThreads[5]{-1, -1, -1, -1, -1}; // main, render, GL, audio out, audio worker (thread_cpu.txt)
+extern int collisionHelperThreadIds[2];
+namespace {
+// thread_cpu.txt diagnostic: CPU share of the main, render, GL and helper
+// threads (kernel runClocks deltas) every 5 s (vita.thread_cpu).
+void IdleLogLine(const char* text);
+void StartThreadCpuProbe()
+{
+    const SceUID logger = sceKernelCreateThread("hp2_cpu_log", [](SceSize, void*) -> int {
+        static const char* const names[7] = {"main", "render", "gl", "helper0", "helper1", "audio", "audio_worker"};
+        SceUInt64 before[7]{};
+        SceUInt64 start = sceKernelGetSystemTimeWide();
+        for (;;) {
+            sceKernelDelayThread(5000000);
+            const SceUInt64 now = sceKernelGetSystemTimeWide();
+            const double wall = static_cast<double>(now - start); start = now;
+            const int ids[7] = {vitaWatchedThreads[0], vitaWatchedThreads[1], vitaWatchedThreads[2],
+                collisionHelperThreadIds[0], collisionHelperThreadIds[1], vitaWatchedThreads[3], vitaWatchedThreads[4]};
+            char text[320]; int at = 0;
+            for (int k = 0; k < 7; ++k) {
+                SceKernelThreadInfo info{}; info.size = sizeof(info);
+                if (ids[k] < 0 || sceKernelGetThreadInfo(ids[k], &info) < 0) continue;
+                const SceUInt64 clocks = info.runClocks;
+                at += std::snprintf(text + at, sizeof(text) - at, "%s=%.1f/c%d ", names[k],
+                    before[k] ? 100.0 * static_cast<double>(clocks - before[k]) / wall : 0.0, static_cast<int>(info.lastExecutedCpuId));
+                before[k] = clocks;
+                if (at >= static_cast<int>(sizeof(text))) break;
+            }
+            IdleLogLine(text);
+        }
+        return 0;
+    }, 64, 0x2000, 0, SCE_KERNEL_CPU_MASK_USER_2, nullptr);
+    if (logger >= 0) sceKernelStartThread(logger, 0, nullptr);
+}
 // Display truth (always on, ~free): the vitaGL display-queue callback stamps
 // each flip with the vblank counter; a background thread logs the histogram
 // of vblanks between flips every 5 s (vita.flips: d2 = on time at 30 fps,
@@ -554,6 +589,7 @@ public:
     {
         // Core 1: the application thread owns core 0.
         sceKernelChangeThreadCpuAffinityMask(0, SCE_KERNEL_CPU_MASK_USER_1);
+        vitaWatchedThreads[1] = sceKernelGetThreadId();
         hp2::ecstasySceneJobsLane = 1;
         {
             std::uint32_t fpscr = 0;
@@ -624,6 +660,9 @@ void LogFlipLine(const char* detail) { if (g_log) g_log->Line("vita.flips", deta
 void LogFlipGaps(const char* detail) { if (g_log) g_log->Line("vita.flip_gaps", detail); }
 }
 
+namespace {
+void IdleLogLine(const char* text) {if (g_log) g_log->Line("vita.thread_cpu", text);}
+}
 int main(int, char**)
 {
     // Max clocks: the engine is CPU bound on the Cortex-A9.
@@ -634,6 +673,7 @@ int main(int, char**)
     // Main/game thread owns core 0; engine scene workers use cores 1-2.
     sceKernelChangeThreadCpuAffinityMask(0, SCE_KERNEL_CPU_MASK_USER_0);
     mainThreadPriority = sceKernelGetThreadCurrentPriority();
+    vitaWatchedThreads[0] = sceKernelGetThreadId();
 
     const std::filesystem::path base = kDataDirectory;
     const auto saves = base / "Saves";
@@ -882,6 +922,7 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/retire_verify.txt").c_str(), &probe) >= 0) hp2::ecstasyRetireStamp = 2;
         if (sceIoGetstat((std::string(kDataDirectory) + "/prewarm_unfair.txt").c_str(), &probe) >= 0) hp2::ecstasyTexturePrewarmFair = 0;
         if (sceIoGetstat((std::string(kDataDirectory) + "/gather_sampler.txt").c_str(), &probe) >= 0) {hp2::ecstasyGatherSampler = 1; hp2::StartGatherSampler();}
+        if (sceIoGetstat((std::string(kDataDirectory) + "/thread_cpu.txt").c_str(), &probe) >= 0) StartThreadCpuProbe();
         hp2::StartVitaPgo(); // HP2_VITA_PGO=generate builds only
         if (sceIoGetstat((std::string(kDataDirectory) + "/gpu_probe.txt").c_str(), &probe) >= 0) hp2::ecstasyGpuProbe = 1;
         if (sceIoGetstat((std::string(kDataDirectory) + "/halfres_off.txt").c_str(), &probe) >= 0) {

@@ -1665,6 +1665,7 @@ void EcstasyVulkanDevice::Storage::GlThread()
 {
     // Core 2: the application thread owns core 0, the gathering render thread core 1.
     sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_2);
+    ::vitaWatchedThreads[2]=sceKernelGetThreadId();
     {char detail[40];std::snprintf(detail,sizeof(detail),"priority=%d",sceKernelGetThreadCurrentPriority());
         platform::RecordSessionEvent("renderer.vitagl.gl_thread_priority",detail);}
     std::size_t index=0;

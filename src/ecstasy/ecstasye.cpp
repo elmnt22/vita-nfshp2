@@ -66,6 +66,7 @@ void collisionHelperPublish(unsigned count,void (*function)(void*,unsigned),void
 bool collisionHelperClaimExact(unsigned index);
 extern std::atomic<std::int64_t> collisionHelperWakeNs[2];
 extern int collisionHelperThreadIds[2];
+extern int vitaWatchedThreads[5];
 #if defined(__vita__)
 // Diagnostic: kernel state of both helpers when the main thread reaches the
 // mirror join and no helper has claimed the mirror task (first 6 per window).

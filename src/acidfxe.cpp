@@ -76,16 +76,40 @@ float dragAcceleration(float velocity, float drag)
     return signedDrag * square;
 }
 
+// Per-definition constants of advanceParticle's atlas step (same arithmetic,
+// computed once per group instead of once per particle).
+inline void particlePrefetch(const void* address)
+{
+#if defined(__GNUC__)
+    __builtin_prefetch(address);
+#else
+    (void)address;
+#endif
+}
+struct ParticleAtlasStep {
+    int32_t period{};
+    uint32_t cells{};
+};
+ParticleAtlasStep particleAtlasStep(const WorldParticleDefinition& definition)
+{
+    ParticleAtlasStep step;
+    if (definition.animationRate != 0) {
+        const float periodValue = 1024.0f * (1.0f / static_cast<float>(definition.animationRate));
+        step.period = convertFloatToInt32(periodValue);
+        step.cells = (1u << static_cast<uint8_t>(definition.atlasWidthPower)) <<
+            static_cast<uint8_t>(definition.atlasHeightPower);
+    }
+    return step;
+}
+
 void advanceParticle(WorldParticle& particle, const WorldParticleDefinition& definition,
-                     const CarMovement* car, float elapsed, int32_t ticks)
+                     const CarMovement* car, float elapsed, int32_t ticks, const ParticleAtlasStep& atlas)
 {
     const int32_t previousTicks = particle.remainingTicks;
     const int32_t remainingTicks = previousTicks - ticks;
     if (definition.animationRate != 0) {
-        const float periodValue = 1024.0f * (1.0f / static_cast<float>(definition.animationRate));
-        const int32_t period = convertFloatToInt32(periodValue);
-        const uint32_t cells = (1u << static_cast<uint8_t>(definition.atlasWidthPower)) <<
-            static_cast<uint8_t>(definition.atlasHeightPower);
+        const int32_t period = atlas.period;
+        const uint32_t cells = atlas.cells;
         const int32_t frames = previousTicks / period - remainingTicks / period;
         particle.atlasFrame = static_cast<uint8_t>((static_cast<uint32_t>(particle.atlasFrame) +
             static_cast<uint32_t>(frames)) & (cells - 1u));
@@ -492,12 +516,17 @@ WorldServicesResult worldParticlesAdvance(WorldParticleSystem* system, float ela
     WorldParticleGroup* group = system->firstGroup;
     while (group) {
         WorldParticleGroup* next = group->next;
+        if (next) particlePrefetch(next);
         WorldParticle* particle = group->first;
+        const ParticleAtlasStep atlas = particleAtlasStep(*group->definition);
         while (particle) {
             WorldParticle* following = particle->next;
+            // The pool's free list scatters a group's particles: start the
+            // next particle's miss while this one is advanced.
+            if (following) particlePrefetch(following);
             if (static_cast<int32_t>(particle->remainingTicks) - ticks <= 0)
                 removeParticle(*system, *group, *particle);
-            else advanceParticle(*particle, *group->definition, group->car, elapsed, ticks);
+            else advanceParticle(*particle, *group->definition, group->car, elapsed, ticks, atlas);
             particle = following;
         }
         if (!group->first) worldParticlesDisposeGroup(system, group);
