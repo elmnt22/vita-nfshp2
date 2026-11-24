@@ -102,6 +102,50 @@ extern int bMatrixNeonEnabled;
 // batches, front hits, map hits, misses, tokens hashed, indices copied,
 // capacity fallbacks.
 namespace hp2 {std::array<std::uint64_t,7> ecstasyIndexCacheStats{};}
+namespace hp2 {extern std::atomic<std::uint32_t> textureOwnerDeaths;}
+// Vita gather_sampler.txt (diagnostic): the render thread stores its gather
+// phase (major<<8 | category<<5 | last step+1) in a word; a high-priority
+// thread on the same core samples it at ~1 kHz and logs a histogram.
+namespace hp2 {
+int ecstasyGatherSampler=0;
+int ecstasyTexturePrewarmFair=1; // texture prewarm: per-pack lookup budget + drop keys absent from a published pack
+int ecstasyRetireStamp=1; // vitaGL: 0 sorted-set retire, 1 stamp retire, 2 stamp + verify against sorted set
+volatile std::uint32_t ecstasyGatherPhase=0;
+#ifdef __vita__
+static void* GatherSamplerThread(void*)
+{
+    sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_1);
+    sceKernelChangeThreadPriority(0,64);
+    std::array<std::uint32_t,2048> counts{};std::uint32_t total=0;
+    for(;;) {
+        sceKernelDelayThread(1000);
+        ++counts[ecstasyGatherPhase&2047u];
+        if(++total>=5000) {
+            std::array<std::pair<std::uint32_t,std::uint32_t>,2048> sorted{};
+            for(std::uint32_t i=0;i<2048;++i)sorted[i]={counts[i],i};
+            std::sort(sorted.begin(),sorted.end(),[](const auto& x,const auto& y){return x.first>y.first;});
+            char detail[700];int used=std::snprintf(detail,sizeof(detail),"samples=%u",total);
+            for(std::size_t i=0;i<28 && sorted[i].first;++i) {
+                const auto phase=sorted[i].second;
+                used+=std::snprintf(detail+used,sizeof(detail)-used," %u.%u.%u=%.1f",phase>>8,(phase>>5)&7u,phase&31u,100.0*sorted[i].first/total);
+                if(used>=static_cast<int>(sizeof(detail)))break;
+            }
+            platform::RecordSessionEvent("renderer.vitagl.gather_sampler",detail);
+            counts={};total=0;
+        }
+    }
+    return nullptr;
+}
+void StartGatherSampler()
+{
+    pthread_t thread;pthread_attr_t attributes;pthread_attr_init(&attributes);pthread_attr_setstacksize(&attributes,64*1024);
+    if(pthread_create(&thread,&attributes,GatherSamplerThread,nullptr)==0)pthread_detach(thread);
+    pthread_attr_destroy(&attributes);
+}
+#endif
+}
+#define HP2_GATHER_PHASE(value) do{if(::hp2::ecstasyGatherSampler)::hp2::ecstasyGatherPhase=(value);}while(0)
+#define HP2_GATHER_STEP(index) do{if(::hp2::ecstasyGatherSampler)::hp2::ecstasyGatherPhase=(::hp2::ecstasyGatherPhase&~31u)|static_cast<std::uint32_t>((index)+1u);}while(0)
 namespace hp2 {std::array<std::uint64_t,5> ecstasySkinSplitMicros{};
 // RenderModel parallel strip capture threshold (exact either way; PC
 // HP2_PARALLEL_MODEL_STRIPS, Vita model_par<N>.txt).
@@ -5433,7 +5477,10 @@ void EcstasyFrame::CollectTexturePrewarm()
             found=state.packs.insert_or_assign(pack,std::move(entry)).first;
         }
         auto& entry=found->second;
-        for(std::size_t tries=entry.pending.size();tries && lookups<256;--tries,++lookups) {
+        // Per-pack budget: a pack whose listed images are unloaded (cars not
+        // in this race) must not starve the packs after it (TRACK).
+        std::size_t packLookups=0;
+        for(std::size_t tries=entry.pending.size();tries && (ecstasyTexturePrewarmFair ? packLookups<128:lookups<256);--tries,++lookups,++packLookups) {
             if(entry.cursor>=entry.pending.size())entry.cursor=0;
             const auto wanted=entry.pending[entry.cursor];
             const TextureInfo* texture=nullptr;
@@ -5442,6 +5489,10 @@ void EcstasyFrame::CollectTexturePrewarm()
             if(texture && texture->descriptor && texture->descriptor->authoredRecord &&
                 texture->descriptor->authoredRecordSize>=164) {
                 state.handed.push_back({pack,texture,!wanted.second});
+                entry.pending[entry.cursor]=entry.pending.back();entry.pending.pop_back();
+            } else if(ecstasyTexturePrewarmFair && !const_cast<TexturePack*>(pack)->ContainsKey(wanted.first)) {
+                // Not in this published pack (another track's TRACK list):
+                // it can never resolve here. A replaced pack restarts its list.
                 entry.pending[entry.cursor]=entry.pending.back();entry.pending.pop_back();
             } else ++entry.cursor;
         }
@@ -8608,14 +8659,26 @@ public:
     }
     // tokens[i]==spans[i]->indexToken and indexTotal is the batch's summed
     // span index count (recorded at gather time, so a hit reads no entry).
+    static std::uint64_t Hash(const std::vector<std::uint64_t>& tokens,std::uint32_t first,std::uint32_t count) noexcept
+    {
+        std::uint64_t hash=1469598103934665603ull;
+        for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at)
+            hash=(hash^tokens[at])*1099511628211ull;
+        return hash;
+    }
     VkResidentIndexEntry* Acquire(const std::vector<const VkResidentGeometryEntry*>& spans,
         const std::vector<std::uint64_t>& tokens,std::uint32_t first,std::uint32_t count,std::uint32_t indexTotal)
     {
         Require(first<=spans.size() && count<=spans.size()-first,"Resident index spans exceed their frame owner");
-        std::uint64_t hash=1469598103934665603ull;const std::uint64_t indices=indexTotal;
+        return AcquireHashed(spans,tokens,first,count,indexTotal,Hash(tokens,first,count));
+    }
+    VkResidentIndexEntry* AcquireHashed(const std::vector<const VkResidentGeometryEntry*>& spans,
+        const std::vector<std::uint64_t>& tokens,std::uint32_t first,std::uint32_t count,std::uint32_t indexTotal,
+        const std::uint64_t hash)
+    {
+        Require(first<=spans.size() && count<=spans.size()-first,"Resident index spans exceed their frame owner");
+        const std::uint64_t indices=indexTotal;
         auto& stats=ecstasyIndexCacheStats;++stats[0];stats[4]+=count;
-        for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at)
-            hash=(hash^tokens[at])*1099511628211ull;
 #if !defined(__vita__)
         {
             std::uint64_t summed=0;
@@ -8807,6 +8870,7 @@ public:
     VkNativeFrameTextureReferences(const std::vector<EcstasyDrawCommand>& commands,
         std::vector<VkNativeTextureKey>& scratch) noexcept
         :commands_(commands),keys_(scratch) {}
+    const std::vector<EcstasyDrawCommand>& Commands() const noexcept {return commands_;}
     const std::vector<VkNativeTextureKey>& Get() const {
         if(!collected_) {
             CollectNativeTextureReferences(keys_,commands_);
@@ -8823,6 +8887,8 @@ private:
 bool NativeTextureReferenced(const std::vector<VkNativeTextureKey>& referenced,VkNativeTextureKey key)
 {return std::binary_search(referenced.begin(),referenced.end(),key);}
 
+// Retire skip inputs: owner destructions (texture.cpp) and CaptureOwners calls.
+inline std::uint64_t textureOwnerCaptures{};
 // Diagnostic: bytes compared by texture validation (vitaGL journal).
 inline std::uint64_t nativeTextureCompareBytes{},nativeTextureCompares{};
 struct VkDrawTexture {
@@ -8859,6 +8925,8 @@ struct VkDrawTexture {
     std::size_t sourcePixelOffset{},sourcePaletteOffset{};
     bool hasPaletteOwner{},sourcePaletteLinear{};
     std::uint64_t lastReferencedFrame{};
+    // vitaGL stamp retire: Render serial of the last frame referencing this entry.
+    std::uint64_t retireStamp{};
     std::uint64_t generation{};
     std::uint64_t validatedGather{};
     bool uploadCompleted{};
@@ -8873,6 +8941,7 @@ struct VkDrawTexture {
     }
     void CaptureOwners(const TextureInfo& texture)
     {
+        ++textureOwnerCaptures;
         metadataOwner=textureMetadataOwner(texture.descriptor);
         pixelOwner=texture.pixels.borrowed ? std::weak_ptr<TexturePixelStorage>{}:texture.pixels.owner;
         paletteOwner=texture.palette.borrowed ? std::weak_ptr<TexturePixelStorage>{}:texture.palette.owner;

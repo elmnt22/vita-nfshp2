@@ -57,11 +57,13 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     profile.shadowGatherSamples=sampleShadowGather ? 1u:0u;
     profile.shadowGatherMilliseconds={};
     const auto nativeWorkers=NativeSceneEffectiveHardwareConcurrency();
+    HP2_GATHER_PHASE(2u<<8);
     const auto validateStarted=Clock::now();
     residentGeometry.ValidateSources(frame.Commands(),frame.SceneryRunStrips(),nativeWorkers);
     // Per-strip copies of run commands that leave the cached scenery path.
     // Stable addresses: generic jobs keep pointers until this Gather ends.
     sceneryRunFallbacks.clear();
+    HP2_GATHER_PHASE(3u<<8);
     const auto loopStarted=Clock::now();
     nativeGatherFrameMs[0]=std::chrono::duration<double,std::milli>(loopStarted-validateStarted).count();
     profile.gatherValidationMilliseconds+=nativeGatherFrameMs[0];
@@ -282,6 +284,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     if(ecstasyGatherDetail)nativeGatherStepBefore=nativeGatherStepMilliseconds;
     bool timeScenery=false;std::uint32_t sceneryTimeIndex=0;Clock::time_point sceneryMark{};
     const auto sceneryStep=[&](std::size_t index) {
+        HP2_GATHER_STEP(index);
         if(!timeScenery)return;
         const auto now=Clock::now();
         nativeGatherStepMilliseconds[index]+=std::chrono::duration<double,std::milli>(now-sceneryMark).count();
@@ -296,8 +299,8 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             draw.carShadow!=EcstasyCarShadow::None || !draw.target ||
             draw.target->id<0 || draw.target->id>14 ||
             draw.target->width<=0 || draw.target->height<=0)return false;
-        const bool clamp=NativeDrawClampsTexture(draw);
-        const auto textureIndex=resolveTexture(*draw.texture,clamp);
+        const bool clamp=NativeDrawClampsTexture(draw);HP2_GATHER_STEP(25);
+        const auto textureIndex=resolveTexture(*draw.texture,clamp);HP2_GATHER_STEP(26);
         auto& texture=textures[textureIndex];
         const auto destination=draw.target->id>=7 ? draw.target->id:0;
         const auto& raster=rasterFor(*draw.target,destination);
@@ -522,6 +525,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // dominate the sampled frame; [7] counts timed segments for calibration.
     std::uint32_t stepDrawIndex=0;bool timeDraw=false;std::uint32_t templateTimeIndex=0;
     const auto step=[&](std::size_t index) {
+        HP2_GATHER_STEP(index);
         if(!timeDraw)return;
         nativeGatherStepMilliseconds[7]+=1.0;
         const auto now=Clock::now();
@@ -556,6 +560,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // general solid branch below for everything that depends on the strip.
     const auto continueSolidTemplate=[&](const EcstasyDrawCommand& draw,const SolidTemplate& source,
         const EditorMarkerSolidGeometry::Strip* runStrip=nullptr,VkResidentGeometryEntry** residentOut=nullptr) {
+        HP2_GATHER_STEP(22);
         const bool timeTemplate=sampleCategories && (templateTimeIndex++&7u)==0;
         const auto templateStarted=timeTemplate ? Clock::now():Clock::time_point{};
         struct TemplateTimer {
@@ -584,7 +589,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         job.glyphBoundsIndex=0;job.reflection=false;job.targetSample=false;
         job.lineTopology=batch.wireframe;
         const auto acquireStarted=timeTemplate ? Clock::now():Clock::time_point{};
-        bool prepare=false;auto* resident=residentGeometry.Acquire(job,prepare);
+        bool prepare=false;auto* resident=residentGeometry.Acquire(job,prepare);HP2_GATHER_STEP(23);
         if(residentOut)*residentOut=resident;
         if(timeTemplate)nativeGatherStepMilliseconds[11]+=std::chrono::duration<double,std::milli>(Clock::now()-acquireStarted).count();
         nativeSolidKinds[draw.kind==EcstasyDrawKind::SolidSpecularStrip ? 2:draw.carShadow!=EcstasyCarShadow::None ? 3:0]+=1;
@@ -921,7 +926,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
                 const auto& slot=solidTemplateSlot(*modelRunSingle);
                 if(slot.draw==modelRunSingle) {
                     if(sampleCategories)nativeGatherStepMilliseconds[15]+=1.0;
-                    categoryTimer.Enter(run);
+                    HP2_GATHER_PHASE((3u<<8)|(static_cast<std::uint32_t>(NativeGatherCategoryTimer::Category(run))<<5));categoryTimer.Enter(run);
                     if(stripIndex==1 && modelRunCacheMode) {
                         const bool replayed=replayModelRun(run,*modelRunSingle,slot);
                         if(replayed && modelRunCacheMode==1) {
@@ -955,7 +960,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             // path continues below as its own stable per-strip command.
             const auto& run=*current;
             const EcstasyDrawCommand* fallback=nullptr;
-            categoryTimer.Enter(run);
+            HP2_GATHER_PHASE((3u<<8)|(static_cast<std::uint32_t>(NativeGatherCategoryTimer::Category(run))<<5));categoryTimer.Enter(run);
             if(ecstasySceneryReuseCensus && runResume==0)
                 censusSequence(run,&runStrips[run.sceneryRunFirst],run.sceneryRunCount);
             while(runResume<run.sceneryRunCount) {
@@ -998,7 +1003,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         } else ++commandAt;
         const auto& draw=*current;
         const auto drawVertexStart=output.size();
-        categoryTimer.Enter(draw);
+        HP2_GATHER_PHASE((3u<<8)|(static_cast<std::uint32_t>(NativeGatherCategoryTimer::Category(draw))<<5));categoryTimer.Enter(draw);
         timeDraw=(sampleCategories || ecstasyGatherDetail) && (stepDrawIndex++&7u)==0;
         if(timeDraw)stepMark=Clock::now();
 #if defined(HP2_ENABLE_VITAGL) && !defined(HP2_VITA_ENVIRONMENT_MAP)
@@ -1165,7 +1170,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         }
         const std::uint8_t* wire=nullptr;std::size_t textureIndex{};
         if(!targetSample) {
-            textureIndex=resolveTexture(*draw.texture,NativeDrawClampsTexture(draw));wire=draw.texture->descriptor->authoredRecord;
+            HP2_GATHER_STEP(24);textureIndex=resolveTexture(*draw.texture,NativeDrawClampsTexture(draw));wire=draw.texture->descriptor->authoredRecord;
         }
         step(8);
         const bool particle=draw.kind==EcstasyDrawKind::ParticleGroup;
@@ -1610,6 +1615,7 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
             census.sum={};census.frames=0;
         }
     }
+    HP2_GATHER_PHASE(4u<<8);
     const auto finishStarted=Clock::now();
     profile.coldVertexJobs+=nativeStripJobs.size();profile.coldVertices+=nativePendingWork;
     if(!directSourcePreparation) {
@@ -1639,11 +1645,13 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
         }
     }
     residentGeometry.CompletePreparation();
+    HP2_GATHER_PHASE(5u<<8);
     const auto indicesStarted=Clock::now();
     nativeGatherFrameMs[1]=std::chrono::duration<double,std::milli>(finishStarted-loopStarted).count();
     nativeGatherFrameMs[2]=std::chrono::duration<double,std::milli>(indicesStarted-finishStarted).count();
     profile.gatherVertexJobsMilliseconds+=nativeGatherFrameMs[2];
     ResolveNativeResidentIndices(residentIndexCache,gatheredResidentIndexSpans,gatheredResidentSpanTokens,elementIndices,batches);
+    HP2_GATHER_PHASE((5u<<8)|(3u<<5));
     nativeGatherFrameMs[3]=std::chrono::duration<double,std::milli>(Clock::now()-indicesStarted).count();
     profile.gatherIndicesMilliseconds+=nativeGatherFrameMs[3];
     profile.gatherFinishMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-finishStarted).count();

@@ -1,3 +1,4 @@
+#include <atomic>
 #include <array>
 #include "Texture.hpp"
 #include "CarLoader.hpp"
@@ -167,8 +168,12 @@ TexturePixelStorage::TexturePixelStorage(std::size_t bytes,std::size_t alignment
     if (!data_)throw std::bad_alloc();
 }
 
+// Counts texture owner destructions: a weak_ptr to either owner can only
+// expire after one of these runs (renderer retire skip, see ecstasy_gl.inc).
+std::atomic<std::uint32_t> textureOwnerDeaths{0};
 TexturePixelStorage::~TexturePixelStorage()
 {
+    textureOwnerDeaths.fetch_add(1,std::memory_order_release);
 #ifdef _WIN32
     _aligned_free(data_);
 #else
@@ -176,8 +181,15 @@ TexturePixelStorage::~TexturePixelStorage()
 #endif
 }
 
+extern std::atomic<std::uint32_t> textureOwnerDeaths;
 class TextureMetadataStorage final {
 public:
+    TextureMetadataStorage()=default;
+    TextureMetadataStorage(const TextureMetadataStorage&)=default;
+    TextureMetadataStorage(TextureMetadataStorage&&)=default;
+    TextureMetadataStorage& operator=(const TextureMetadataStorage&)=default;
+    TextureMetadataStorage& operator=(TextureMetadataStorage&&)=default;
+    ~TextureMetadataStorage() {textureOwnerDeaths.fetch_add(1,std::memory_order_release);}
     std::vector<std::uint8_t> authored;
     std::vector<EditorMarkerTexture> descriptors;
     std::vector<TextureInfo> textures;
@@ -434,6 +446,16 @@ TextureInfo* TexturePack::GetLoadedTexture(std::uint32_t key)
         if(texture.descriptor->key==key && texture.pixels.owner &&
             (!texture.paletteBytes || texture.palette.owner))return &texture;
     return nullptr;
+}
+
+bool TexturePack::ContainsKey(std::uint32_t key)
+{
+    auto* metadata=storage_->metadata.get();
+    if(!metadata || !metadata->published)return true;
+    metadata->EnsureKeyIndex();
+    if(metadata->keyIndexValid)return metadata->MayContain(key) && metadata->byKey.count(key)!=0;
+    for(const auto& texture:metadata->textures)if(texture.descriptor->key==key)return true;
+    return false;
 }
 
 TextureInfo* TexturePack::GetNthTexture(std::int32_t index)

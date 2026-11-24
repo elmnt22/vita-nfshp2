@@ -170,6 +170,8 @@ public:
     TexturePack& operator=(TexturePack&&)=delete;
     bool LoadTextureTableFromFile(const char* filename);
     TextureInfo* GetLoadedTexture(std::uint32_t key);
+    // Published metadata has a record with this key (loaded or not).
+    bool ContainsKey(std::uint32_t key);
     TextureInfo* GetTexture(std::uint32_t key);
     TextureInfo* GetNthTexture(std::int32_t index);
     LoadedTextureData* FindLoadedTextureData(std::int32_t begin,std::int32_t bytes);

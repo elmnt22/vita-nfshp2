@@ -623,8 +623,95 @@ struct EcstasyVulkanDevice::Storage {
             ++gatherSerial;
         }
     }
+    // Stamp retire (ecstasyRetireStamp): one pass over the commands with the
+    // same skips/Requires/keys as CollectNativeTextureReferences stamps each
+    // cached entry a command references (found through a self-validating
+    // direct-mapped slot cache, else textureIndices); the scan then reads the
+    // stamp instead of a sorted set + binary search. Same decisions: a
+    // reference to an uncached key never matched an entry anyway.
+    struct RetireSlot {const TextureInfo* source{};bool padding{};std::size_t index{};};
+    std::array<RetireSlot,1024> retireSlots{};
+    std::uint64_t retireSerial{};
+    std::uint64_t retireVerifyFrames{},retireVerifyMismatches{};
+    // Scan skip: with no owner destruction and no CaptureOwners since a scan
+    // that left every entry alive, no entry can fail OwnersAlive (weak_ptrs
+    // expire only when an owner is destroyed), so the scan would erase nothing.
+    std::uint32_t retireDeathsSeen{};std::uint64_t retireCapturesSeen{};bool retireAllAlive{};
+    std::uint64_t retireSkips{},retireScans{};
+    void StampReferencedTextures(const std::vector<EcstasyDrawCommand>& commands)
+    {
+        const auto serial=++retireSerial;
+        const TextureInfo* lastTexture=nullptr;bool lastClamp=false;
+        for(const auto& draw:commands) {
+            if(draw.kind==EcstasyDrawKind::FogPass || draw.kind==EcstasyDrawKind::FocusMaskPass ||
+                draw.kind==EcstasyDrawKind::DepthOfFieldPass || draw.kind==EcstasyDrawKind::BlackAndWhitePass ||
+                draw.kind==EcstasyDrawKind::SceneHistoryBoundary || draw.kind==EcstasyDrawKind::SceneHistorySource)continue;
+            if(draw.sampledTarget) {
+                Require(!draw.texture,"Target-sampled draw has conflicting image owners");continue;
+            }
+            Require(draw.texture,"Vulkan draw lost its actual texture");
+            const bool forcedClamp=NativeDrawClampsTexture(draw);
+            if(draw.texture==lastTexture && forcedClamp==lastClamp)continue;
+            lastTexture=draw.texture;lastClamp=forcedClamp;
+            const auto key=NativeTextureKey(*draw.texture,forcedClamp);
+            const auto identity=reinterpret_cast<std::uintptr_t>(key.source);
+            auto& slot=retireSlots[((identity>>4)^(identity>>14)^(key.repeatedPadding ? 0x155u:0u))&(retireSlots.size()-1)];
+            std::size_t index;
+            if(slot.source==key.source && slot.padding==key.repeatedPadding && slot.index<textures.size() &&
+                textures[slot.index].source==key.source && textures[slot.index].repeatedPadding==key.repeatedPadding)
+                index=slot.index;
+            else {
+                const auto found=textureIndices.find(key);
+                if(found==textureIndices.end())continue;
+                index=found->second;slot={key.source,key.repeatedPadding,index};
+            }
+            textures[index].retireStamp=serial;textures[index].lastReferencedFrame=completedFrameSerial;
+        }
+    }
     bool RetireUnusedTextures(const VkNativeFrameTextureReferences& frameTextures)
     {
+        if(ecstasyRetireStamp) {
+            // Skip frames need no stamps: every entry is alive, so none is
+            // erasable whatever this frame references (lastReferencedFrame
+            // is not read by this backend). Verify mode stamps every frame.
+            const auto deaths=textureOwnerDeaths.load(std::memory_order_acquire);
+            const bool skip=ecstasyRetireStamp!=3 && retireAllAlive && deaths==retireDeathsSeen &&
+                textureOwnerCaptures==retireCapturesSeen;
+            if(!skip || ecstasyRetireStamp==2)StampReferencedTextures(frameTextures.Commands());
+            if(ecstasyRetireStamp==2) {
+                const auto& referenced=frameTextures.Get();
+                ++retireVerifyFrames;
+                for(const auto& texture:textures)
+                    if((texture.retireStamp==retireSerial)!=NativeTextureReferenced(referenced,{texture.source,texture.repeatedPadding}))
+                        ++retireVerifyMismatches;
+                if(retireVerifyFrames%300==0) {
+                    char detail[160];std::snprintf(detail,sizeof(detail),"frames=%llu mismatches=%llu textures=%u skips=%llu scans=%llu",
+                        static_cast<unsigned long long>(retireVerifyFrames),static_cast<unsigned long long>(retireVerifyMismatches),
+                        static_cast<unsigned>(textures.size()),static_cast<unsigned long long>(retireSkips),static_cast<unsigned long long>(retireScans));
+                    platform::RecordSessionEvent("renderer.vitagl.retire_verify",detail);
+                }
+            }
+            if(skip) {
+                ++retireSkips;
+                if(ecstasyRetireStamp==2)for(const auto& texture:textures)
+                    if(texture.retireStamp!=retireSerial && !texture.OwnersAlive())++retireVerifyMismatches;
+                return false;
+            }
+            ++retireScans;
+            bool changed=false,allAlive=true;
+            for(auto at=textures.begin();at!=textures.end();) {
+                if(at->retireStamp==retireSerial) {if(allAlive && !at->OwnersAlive())allAlive=false;++at;}
+                else if(!at->OwnersAlive()) {Destroy(*at);at=textures.erase(at);changed=true;}
+                else ++at;
+            }
+            retireAllAlive=allAlive;retireDeathsSeen=deaths;retireCapturesSeen=textureOwnerCaptures;
+            if(changed) {
+                textureIndices.clear();textureIndices.reserve(textures.size());
+                for(std::size_t index=0;index<textures.size();++index)
+                    textureIndices.emplace(VkNativeTextureKey{textures[index].source,textures[index].repeatedPadding},index);
+            }
+            return changed;
+        }
         const auto& referenced=frameTextures.Get();
         const auto isReferenced=[&](const VkDrawTexture& texture) {
             return NativeTextureReferenced(referenced,{texture.source,texture.repeatedPadding});
@@ -1302,7 +1389,9 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     // Claim a free packet: at most one frame is gathered while one is drawn.
     const auto claimBegin=Clock::now();
     const std::uint64_t timelineEntry=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
+    HP2_GATHER_PHASE(0u);
     if(glThreadStarted_)sceKernelWaitSema(freeSema_,1,nullptr);
+    HP2_GATHER_PHASE(1u<<8);
     const auto claimMs=milliseconds(Clock::now()-claimBegin);
     struct ReleaseOnThrow {
         Storage& storage;bool armed{true};
@@ -1324,11 +1413,11 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     // vitaGL defers resource frees until the GPU is done with them; the CPU
     // side treats every Render as following the previous frame's completion.
     ++completedFrameSerial;
-    BeginGather();
-    VkNativeFrameTextureReferences frameTextures(frame->Commands(),referencedTextures);
-    RetireUnusedTextures(frameTextures);
-    preparedFrame.historyReaders=EcstasyFindNativeHistoryReaders(frame->Commands());
-    const auto mirror=MirrorPresentation(*frame);
+    BeginGather();HP2_GATHER_PHASE((1u<<8)|(1u<<5));
+    VkNativeFrameTextureReferences frameTextures(frame->Commands(),referencedTextures);HP2_GATHER_PHASE((1u<<8)|(2u<<5));
+    RetireUnusedTextures(frameTextures);HP2_GATHER_PHASE((1u<<8)|(3u<<5));
+    preparedFrame.historyReaders=EcstasyFindNativeHistoryReaders(frame->Commands());HP2_GATHER_PHASE((1u<<8)|(4u<<5));
+    const auto mirror=MirrorPresentation(*frame);HP2_GATHER_PHASE((1u<<8)|(5u<<5));
     const auto commandCount=frame->Commands().size();
     EnsureTarget(0,options.width,options.height);
     for(const auto& draw:frame->Commands()) {
@@ -1348,10 +1437,10 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     data.clear();elementIndices.clear();batches.clear();gatheredGlyphBounds.clear();gatheredGlyphBounds.push_back({});
     const auto gatherBegin=Clock::now();
     glRenderStage=2;
-    Gather(*frame,data,elementIndices,batches);
-    RunPendingDecodes();
+    Gather(*frame,data,elementIndices,batches);HP2_GATHER_PHASE((5u<<8)|(1u<<5));
+    RunPendingDecodes();HP2_GATHER_PHASE((5u<<8)|(2u<<5));
     MarkRedundantAlphaTests(data,elementIndices,batches);
-    glRenderStage=3;
+    glRenderStage=3;HP2_GATHER_PHASE(6u<<8);
     statistics.gatherMilliseconds=milliseconds(Clock::now()-gatherBegin);
 
     // Resident geometry/index slots: copy dirty entries into the packet; the
@@ -1505,6 +1594,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
     release.armed=false;
     packet.timelineReady=ecstasyGpuTimeline ? sceKernelGetSystemTimeWide():0;
     packet.timelineResident=nativeGatherResidentEvents;
+    HP2_GATHER_PHASE(0u);
     if(!glThreadStarted_) {Submit(packet);return true;}
     sceKernelSignalSema(readySema_,1);
     // Unpipelined callers expect the frame on screen when Render returns.
