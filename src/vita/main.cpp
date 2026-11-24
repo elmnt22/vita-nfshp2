@@ -76,6 +76,7 @@ extern uint64_t collisionSpeculationVerifyBudget;
 namespace {
 class VitaLog;
 VitaLog* g_log{};
+int mainThreadPriority = -1;
 // Display truth (always on, ~free): the vitaGL display-queue callback stamps
 // each flip with the vblank counter; a background thread logs the histogram
 // of vblanks between flips every 5 s (vita.flips: d2 = on time at 30 fps,
@@ -557,7 +558,8 @@ public:
         {
             std::uint32_t fpscr = 0;
             asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
-            char detail[48]; std::snprintf(detail, sizeof(detail), "fpscr=0x%08x", static_cast<unsigned>(fpscr));
+            char detail[80]; std::snprintf(detail, sizeof(detail), "fpscr=0x%08x priority=%d main_priority=%d", static_cast<unsigned>(fpscr),
+                sceKernelGetThreadCurrentPriority(), mainThreadPriority);
             if (g_log) g_log->Line("vita.render_thread", detail);
         }
         for (;;) {
@@ -631,6 +633,7 @@ int main(int, char**)
     scePowerSetGpuXbarClockFrequency(166);
     // Main/game thread owns core 0; engine scene workers use cores 1-2.
     sceKernelChangeThreadCpuAffinityMask(0, SCE_KERNEL_CPU_MASK_USER_0);
+    mainThreadPriority = sceKernelGetThreadCurrentPriority();
 
     const std::filesystem::path base = kDataDirectory;
     const auto saves = base / "Saves";

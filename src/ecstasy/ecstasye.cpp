@@ -64,6 +64,37 @@
 unsigned collisionHelperPoolSize();
 void collisionHelperPublish(unsigned count,void (*function)(void*,unsigned),void* context);
 bool collisionHelperClaimExact(unsigned index);
+extern std::atomic<std::int64_t> collisionHelperWakeNs[2];
+extern int collisionHelperThreadIds[2];
+#if defined(__vita__)
+// Diagnostic: kernel state of both helpers when the main thread reaches the
+// mirror join and no helper has claimed the mirror task (first 6 per window).
+int ecstasyHelperProbeBudget=6;
+static void ProbeIdleHelpers()
+{
+    if(ecstasyHelperProbeBudget<=0)return;
+    --ecstasyHelperProbeBudget;
+    char text[200];int at=0;
+    for(int slot=0;slot<2;++slot) {
+        SceKernelThreadInfo info{};info.size=sizeof(info);
+        if(collisionHelperThreadIds[slot]<0 || sceKernelGetThreadInfo(collisionHelperThreadIds[slot],&info)<0)continue;
+        at+=std::snprintf(text+at,sizeof(text)-at,"slot%d status=%d prio=%d wait=0x%x wait_id=0x%x cpu=%d last_cpu=%d ",
+            slot,static_cast<int>(info.status),static_cast<int>(info.currentPriority),static_cast<unsigned>(info.waitType),
+            static_cast<unsigned>(info.waitId),static_cast<int>(info.currentCpuId),static_cast<int>(info.lastExecutedCpuId));
+        if(at>=static_cast<int>(sizeof(text)))break;
+    }
+    hp2::platform::RecordSessionEvent("render.helper_probe",text);
+}
+#endif
+namespace hp2 {
+int ecstasyHelperProbeBudgetReset()
+{
+#if defined(__vita__)
+    ::ecstasyHelperProbeBudget=6;
+#endif
+    return 0;
+}
+}
 bool collisionHelperClaim(unsigned& index);
 void collisionHelperClose();
 
@@ -3761,6 +3792,10 @@ std::uint64_t ecstasyAsyncMirrorStats[12]{}; // [8..11] abort reasons
 // Diagnostic timeline (us after launch, summed): [0] samples, [1] job claimed,
 // [2] view1 zones published, [3] job zones seen, [4] job done, [5] main at Finish.
 std::uint64_t ecstasyMirrorTimeline[9]{}; // [6] particles claimed, [7] particles done, [8] close done
+// Claim delay histogram (index 0 task): <100, <300, <1000, <3000, >=3000 us; [5] max.
+std::uint64_t ecstasyMirrorClaimHistogram[6]{};
+// Helper wake delay after launch per slot: <100, <1000, >=1000 us, not woken (stale).
+std::uint64_t ecstasyMirrorWakeHistogram[2][4]{};
 std::atomic<std::int64_t> ecstasyMirrorLaunchNs{0},ecstasyMirrorZonesNs{0},ecstasyMirrorSeenNs{0};
 static std::int64_t MirrorNowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -4992,6 +5027,9 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             if(!launched || finished || mirrorJoined)return;
             mirrorJoined=true;
             job.collectReady.store(1,std::memory_order_release);
+#if defined(__vita__)
+            if(!job.claimedNs)ProbeIdleHelpers();
+#endif
             while(!job.mirrorDone.load(std::memory_order_acquire)) {
                 if(collisionHelperClaimExact(0)) {++ecstasyAsyncMirrorStats[4];AsyncMirrorJob::Run(&job,0);}
             }
@@ -5019,6 +5057,15 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
                 ecstasyMirrorTimeline[4]+=us(job.doneNs);ecstasyMirrorTimeline[5]+=us(arrived);
                 ecstasyMirrorTimeline[6]+=us(job.particleClaimedNs);ecstasyMirrorTimeline[7]+=us(job.particleDoneNs.load());
                 ecstasyMirrorTimeline[8]+=us(MirrorNowNs());
+                const auto claim=us(job.claimedNs);
+                ++ecstasyMirrorClaimHistogram[claim<100 ? 0:claim<300 ? 1:claim<1000 ? 2:claim<3000 ? 3:4];
+                ecstasyMirrorClaimHistogram[5]=std::max<std::uint64_t>(ecstasyMirrorClaimHistogram[5],claim);
+                for(int slot=0;slot<2;++slot) {
+                    const auto wake=collisionHelperWakeNs[slot].load();
+                    if(wake<launch) {++ecstasyMirrorWakeHistogram[slot][3];continue;}
+                    const auto delay=us(wake);
+                    ++ecstasyMirrorWakeHistogram[slot][delay<100 ? 0:delay<1000 ? 1:2];
+                }
             }
         }
         ~AsyncMirror() {if(job.scenery)job.scenery->SetCollectSignal(nullptr);Finish();}

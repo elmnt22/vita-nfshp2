@@ -76,7 +76,7 @@ extern uint64_t collisionPipeLong,collisionPipeZeroDraw,collisionPipeBehind[9];
 extern uint64_t collisionPipeMissPair,collisionPipeMissStart,collisionPipeShort,collisionPipeDrawDelta[4];
 extern uint64_t collisionPipeContacts,collisionPipeEntryMisses,collisionPipeBreaks,collisionPipeTasks,collisionPipeUsed,collisionPipePasses;
 extern uint64_t worldParallelResolveStats[2];
-namespace hp2 { extern int ecstasyPrepareCache; extern std::uint64_t ecstasyPrepareCacheStats[3]; extern std::uint64_t ecstasyAsyncMirrorStats[12]; extern std::uint64_t ecstasyMirrorTimeline[9]; extern int ecstasyAsyncParticles; extern std::uint64_t ecstasyAsyncParticleStats[5]; }
+namespace hp2 { extern int ecstasyPrepareCache; extern std::uint64_t ecstasyPrepareCacheStats[3]; extern std::uint64_t ecstasyAsyncMirrorStats[12]; extern std::uint64_t ecstasyMirrorTimeline[9]; extern std::uint64_t ecstasyMirrorClaimHistogram[6]; extern std::uint64_t ecstasyMirrorWakeHistogram[2][4]; int ecstasyHelperProbeBudgetReset(); extern int ecstasyAsyncParticles; extern std::uint64_t ecstasyAsyncParticleStats[5]; }
 namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,4> carShadowSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; extern std::array<std::uint64_t,7> ecstasyIndexCacheStats; extern std::array<std::uint64_t,10> ecstasyResidentStats; extern std::array<double,4> ecstasyDiscardSetupSplitMs; extern int ecstasyDiscardSink; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
@@ -1645,6 +1645,18 @@ bool ApplicationRuntime::Tick()
                         std::snprintf(detail,sizeof(detail),"samples=%llu claimed_us=%.0f zones_published_us=%.0f zones_seen_us=%.0f job_done_us=%.0f main_finish_us=%.0f particles_claimed_us=%.0f particles_done_us=%.0f closed_us=%.0f",
                             (unsigned long long)t[0],t[1]/m,t[2]/m,t[3]/m,t[4]/m,t[5]/m,t[6]/m,t[7]/m,t[8]/m);
                         s.host.RecordSessionEvent("render.mirror_timeline",detail);
+                        auto& h=hp2::ecstasyMirrorClaimHistogram;
+                        std::snprintf(detail,sizeof(detail),"lt100=%llu lt300=%llu lt1000=%llu lt3000=%llu ge3000=%llu max_us=%llu",
+                            (unsigned long long)h[0],(unsigned long long)h[1],(unsigned long long)h[2],(unsigned long long)h[3],(unsigned long long)h[4],(unsigned long long)h[5]);
+                        s.host.RecordSessionEvent("render.mirror_claim_histogram",detail);
+                        std::fill(std::begin(h),std::end(h),0);
+                        auto& w=hp2::ecstasyMirrorWakeHistogram;
+                        std::snprintf(detail,sizeof(detail),"slot0 lt100=%llu lt1000=%llu ge1000=%llu none=%llu slot1 lt100=%llu lt1000=%llu ge1000=%llu none=%llu",
+                            (unsigned long long)w[0][0],(unsigned long long)w[0][1],(unsigned long long)w[0][2],(unsigned long long)w[0][3],
+                            (unsigned long long)w[1][0],(unsigned long long)w[1][1],(unsigned long long)w[1][2],(unsigned long long)w[1][3]);
+                        s.host.RecordSessionEvent("render.mirror_wake_histogram",detail);
+                        (void)hp2::ecstasyHelperProbeBudgetReset();
+                        for(auto& row:w)std::fill(std::begin(row),std::end(row),0);
                         std::fill(std::begin(t),std::end(t),0);
                     }
                     const auto mismatches=a[7];std::fill(std::begin(a),std::end(a),0);a[7]=mismatches;

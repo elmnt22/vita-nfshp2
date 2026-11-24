@@ -119,6 +119,13 @@ uint32_t collisionSplitNow()
 // helper_wake.txt "<priority>".
 int collisionHelperWakePriority=185;
 uint32_t collisionPoolHotMicros=60; // needs the host clock (Vita); pool_hot.txt: "<us>" (0 off)
+// Diagnostic: when each helper last returned from its wake semaphore.
+std::atomic<int64_t> collisionHelperWakeNs[2]{};
+int collisionHelperThreadIds[2]{-1,-1};
+int64_t collisionHelperNowNs()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 std::atomic<uint64_t> collisionPoolHelperTasks{0},collisionPoolHelperMicros{0};
 uint64_t collisionPoolMainMicros=0;
 uint64_t collisionPoolMainTasks=0,collisionPoolRuns=0,collisionPoolRunMicros=0,collisionPoolWaitMicros=0;
@@ -239,6 +246,7 @@ private:
                 sceKernelChangeThreadCpuAffinityMask(0,slot==0 ? SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2);
                 sceKernelChangeThreadPriority(0,185);
                 collisionHelperSlot=static_cast<int>(slot);
+                collisionHelperThreadIds[slot]=sceKernelGetThreadId();
                 Instance().Loop();
                 return nullptr;
             },&slots_[slot])==0) {pthread_detach(thread);++helpers_;}
@@ -289,6 +297,8 @@ private:
             bool raised=collisionHelperWakePriority!=185;
             if(raised)sceKernelChangeThreadPriority(0,collisionHelperWakePriority);
             sceKernelWaitSema(sema_,1,nullptr);
+            if(collisionHelperSlot>=0 && collisionHelperSlot<2)
+                collisionHelperWakeNs[collisionHelperSlot].store(collisionHelperNowNs(),std::memory_order_relaxed);
 #else
             bool raised=false;
             {
