@@ -118,6 +118,7 @@ uint32_t collisionSplitNow()
 // its task at once. It drops back to 185 after the batch as before.
 // helper_wake.txt "<priority>".
 int collisionHelperWakePriority=185;
+int collisionHelperFloat=0;
 uint32_t collisionPoolHotMicros=60; // needs the host clock (Vita); pool_hot.txt: "<us>" (0 off)
 // Diagnostic: when each helper last returned from its wake semaphore.
 std::atomic<int64_t> collisionHelperWakeNs[2]{};
@@ -243,7 +244,10 @@ private:
             slots_[slot]=slot;
             if(pthread_create(&thread,&attributes,[](void* argument) -> void* {
                 const unsigned slot=*static_cast<unsigned*>(argument);
-                sceKernelChangeThreadCpuAffinityMask(0,slot==0 ? SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2);
+                // helper_float.txt: both helpers may run on core 1 or 2 (the
+                // kernel places a woken helper on whichever is free first).
+                sceKernelChangeThreadCpuAffinityMask(0,collisionHelperFloat ? (SCE_KERNEL_CPU_MASK_USER_1|SCE_KERNEL_CPU_MASK_USER_2):
+                    slot==0 ? SCE_KERNEL_CPU_MASK_USER_1:SCE_KERNEL_CPU_MASK_USER_2);
                 sceKernelChangeThreadPriority(0,185);
                 collisionHelperSlot=static_cast<int>(slot);
                 collisionHelperThreadIds[slot]=sceKernelGetThreadId();
