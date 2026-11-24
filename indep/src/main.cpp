@@ -1,6 +1,7 @@
 #include <atomic>
 #include <exception>
 #include "Flags.hpp"
+#include "Race.hpp"
 #ifdef __SWITCH__
 #include "src/nx/control_layout.hpp"
 #include "src/nx/controller_session.hpp"
@@ -445,6 +446,41 @@ struct ApplicationRuntime::Storage {
     }
     std::array<int32_t,7> journalState{{INT32_MIN,INT32_MIN,INT32_MIN,INT32_MIN,INT32_MIN,INT32_MIN,INT32_MIN}};
     uint32_t journalSummaryTicks{};
+    // Diagnostic (PC HP2_CAR_SPEED_LOG=1): once per world second, each car's
+    // mover mode, reported speed, ground speed from its position change,
+    // race progress and rank (issue 1: rivals moving faster than physics).
+    int32_t carSpeedLoop{INT32_MIN};std::array<std::array<float,3>,16> carSpeedPositions{};
+    void RecordCarSpeeds(WorldSimulation* simulation)
+    {
+#if !defined(__vita__) && !defined(__SWITCH__)
+        static const bool enabled=[] {const char* value=std::getenv("HP2_CAR_SPEED_LOG");return value && *value=='1';}();
+        if(!enabled || !simulation || !simulation->world)return;
+        const auto loop=clock.worldLoopCounter;
+        if(carSpeedLoop!=INT32_MIN && loop-carSpeedLoop<60 && loop>=carSpeedLoop)return;
+        const bool valid=carSpeedLoop!=INT32_MIN && loop>carSpeedLoop;
+        const float seconds=valid ? static_cast<float>(loop-carSpeedLoop)/60.0f:1.0f;
+        carSpeedLoop=loop;
+        const auto& world=*simulation->world;
+        char detail[1400]{};int used=std::snprintf(detail,sizeof(detail),"loop=%d dt=%.2f",loop,static_cast<double>(seconds));
+        for(int32_t index=0;index<world.totalCars && index<16;++index) {
+            const auto* car=world.carTable[index];if(!car)continue;
+            const auto* movement=static_cast<const CarMovement*>(car->movement);
+            const auto* vehicle=movement?movement->bindings.state:nullptr;
+            auto& last=carSpeedPositions[static_cast<std::size_t>(index)];
+            const float dx=car->position[0]-last[0],dy=car->position[1]-last[1],dz=car->position[2]-last[2];
+            const float ground=valid ? std::sqrt(dx*dx+dy*dy+dz*dz)/seconds:0.0f;
+            last={{car->position[0],car->position[1],car->position[2]}};
+            const auto* entry=car->raceEntry;
+            if(used<static_cast<int>(sizeof(detail))-96)
+                used+=std::snprintf(detail+used,sizeof(detail)-static_cast<std::size_t>(used)," c%d=m%d,v%.1f,g%.1f,p%.4f,r%d",
+                    index,movement?movement->mode:-1,static_cast<double>(vehicle?vehicle->speed:0.0f),static_cast<double>(ground),
+                    static_cast<double>(entry?entry->progress:-1.0f),entry?static_cast<int>(entry->position):-1);
+        }
+        host.RecordSessionEvent("debug.car_speeds",detail);
+#else
+        (void)simulation;
+#endif
+    }
     void RecordLifecycle(WorldSimulation* simulation,GameSession* session)
     {
         const auto* first=parameters.drivers && parameters.driverCount>0?parameters.drivers:nullptr;
@@ -461,6 +497,7 @@ struct ApplicationRuntime::Storage {
             hp2::platform::RecordHeapCheckpoint("application.state");
         }
         const auto ticks=static_cast<uint32_t>(clock.realTimer);
+        RecordCarSpeeds(simulation);
         if(!simulation || !simulation->world || ticks-journalSummaryTicks<20000u)return;
         journalSummaryTicks=ticks;
         const auto& world=*simulation->world;const auto* car=world.totalCars>0?world.carTable[0]:nullptr;
