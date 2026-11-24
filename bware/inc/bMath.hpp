@@ -132,8 +132,41 @@ void vectorMatrixFromQuaternion(float matrix[16], const float quaternion[4]);
 void vectorQuaternionFromMatrixCopy(float output[4], const float matrix[16]);
 void vectorMatrixInverseAffine(float output[16], const float matrix[16]);
 void vectorMatrixMultiply(float output[16], const float left[16], const float right[16]);
+#if !HP2_BSCALAR_OUTLINE && defined(__ARM_NEON) && !(defined(_M_X64) || defined(__SSE2__))
+// Vita: header-inline (identical arithmetic to bMatrix.cpp; NEON VMLA is not
+// fused). The scalar fallback is used until the boot self-test passes.
+#define HP2_BMATRIX_TRANSFORM_INLINE 1
+#ifdef __cplusplus
+}
+#endif
+#include "bware/inc/bMathNeon.hpp"
+#ifdef __cplusplus
+extern "C" {
+#endif
+static inline void vectorMatrixTransform(float output[4], const float matrix[16], const float input[4])
+{
+    if (bMatrixNeonEnabled) { vst1q_f32(output, bNeonTransformMatrix(matrix, vld1q_f32(input))); return; }
+    const float x = input[0], y = input[1], z = input[2], w = input[3];
+    float result[4];
+    for (int row = 0; row < 4; ++row)
+        result[row] = ((matrix[row]*x + matrix[row+4]*y) + matrix[row+8]*z) + matrix[row+12]*w;
+    memcpy(output, result, sizeof(result));
+}
+static inline void vectorMatrixTransformPoint(float output[4], const float matrix[16], const float input[4])
+{
+    if (bMatrixNeonEnabled) {
+        const float32x2_t high = vld1_lane_f32(input + 2, vdup_n_f32(1.0f), 0);
+        vst1q_f32(output, bNeonTransformMatrix(matrix, vcombine_f32(vld1_f32(input), high)));
+        return;
+    }
+    const float point[4] = {input[0], input[1], input[2], 1.0f};
+    vectorMatrixTransform(output, matrix, point);
+}
+#else
+#define HP2_BMATRIX_TRANSFORM_INLINE 0
 void vectorMatrixTransform(float output[4], const float matrix[16], const float value[4]);
 void vectorMatrixTransformPoint(float output[4], const float matrix[16], const float value[4]);
+#endif
 float* vectorMatrixTranspose(float output[16], const float matrix[16]);
 
 uint32_t vectorRandomBounded(uint32_t bound, uint32_t* state);

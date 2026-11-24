@@ -86,6 +86,7 @@ void vectorMatrixInverseAffine(float output[16], const float matrix[16])
     memcpy(output, result, sizeof(result));
 }
 
+#if !HP2_BMATRIX_TRANSFORM_INLINE
 void vectorMatrixTransform(float output[4], const float matrix[16], const float input[4])
 {
     // Column-major matrix, column vector. Snapshot input before storing output:
@@ -112,6 +113,8 @@ void vectorMatrixTransform(float output[4], const float matrix[16], const float 
 #endif
 }
 
+#endif
+
 // Scalar reference for the Vita NEON self-test.
 void vectorMatrixTransformScalar(float output[4], const float matrix[16], const float input[4])
 {
@@ -129,6 +132,7 @@ float* vectorMatrixTranspose(float output[16], const float matrix[16])
     memcpy(output, result, sizeof(result)); return output;
 }
 
+#if !HP2_BMATRIX_TRANSFORM_INLINE
 void vectorMatrixTransformPoint(float output[4], const float matrix[16], const float input[4])
 {
 #if NFSHP2_NATIVE_NEON
@@ -142,3 +146,4 @@ void vectorMatrixTransformPoint(float output[4], const float matrix[16], const f
     const float point[4] = {input[0], input[1], input[2], 1.0f};
     vectorMatrixTransform(output, matrix, point);
 }
+#endif
