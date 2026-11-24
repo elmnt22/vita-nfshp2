@@ -59,7 +59,7 @@ unsigned int sceUserMainThreadStackSize = 4u * 1024u * 1024u;
 }
 
 namespace hp2 { extern int nativeRaceStartDrainFrames; extern int nativeSpeedTrapSettle; }
-namespace hp2 { extern int ecstasyHalfCompositeBounds; extern int ecstasyHalfDepthPolicy; extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern int debugBenchSeed; extern std::atomic<int> debugDemoStarted; extern int debugRaceInputStep; extern int debugBenchMirror; }
+namespace hp2 { extern int ecstasyHalfCompositeBounds; extern int ecstasyHalfDepthPolicy; extern int debugQuickRaceTrack, debugQuickRaceReverse; extern int debugDemoTrack; extern int debugBenchSeed; extern std::atomic<int> debugDemoStarted; extern int debugRaceInputStep; extern int debugCarSpeedLog; namespace ai { extern int retailThinkTurns; } extern int debugBenchMirror; }
 extern int collisionWitnessWarmProbe;
 extern int collisionQueuePrediction;
 extern uint32_t (*collisionWitnessProbeClock)();
@@ -228,6 +228,12 @@ public:
                 if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/padrec.bin").c_str(), "wb")) std::fclose(file);
                 log_.Line("vita.padrec", "record");
             }
+        }
+        {
+            SceIoStat probe{};
+            if (sceIoGetstat((std::string(kDataDirectory) + "/car_speed_log.txt").c_str(), &probe) >= 0) ::hp2::debugCarSpeedLog = 1;
+            // ai_think_loops.txt: old per-world-loop AI think turns (2x retail rate).
+            if (sceIoGetstat((std::string(kDataDirectory) + "/ai_think_loops.txt").c_str(), &probe) >= 0) ::hp2::ai::retailThinkTurns = 0;
         }
         // Testing: quickrace_track.txt "<track> [reverse]" forces Quick Race
         // onto that track (normal menus and input; no autopad taps).

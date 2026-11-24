@@ -2,6 +2,7 @@
 #include <exception>
 #include "Flags.hpp"
 #include "Race.hpp"
+#include "CarMover.hpp"
 #ifdef __SWITCH__
 #include "src/nx/control_layout.hpp"
 #include "src/nx/controller_session.hpp"
@@ -128,6 +129,13 @@ namespace hp2 {int debugBenchSeed=[] {
 // Logical input steps since the live race session left RC_STATE_NONE
 // (-1 outside one): the index for host pad record/replay benches.
 int debugRaceInputStep=-1;
+// PC HP2_CAR_SPEED_LOG=1 / Vita car_speed_log.txt: debug.car_speeds events.
+int debugCarSpeedLog=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    if(const char* value=std::getenv("HP2_CAR_SPEED_LOG"))return *value=='1' ? 1:0;
+#endif
+    return 0;
+}();
 int debugBenchMirror=[] {
 #if !defined(__vita__)
     if(const char* value=std::getenv("HP2_BENCH_MIRROR"))return std::atoi(value)!=0 ? 1:0;
@@ -452,11 +460,9 @@ struct ApplicationRuntime::Storage {
     int32_t carSpeedLoop{INT32_MIN};std::array<std::array<float,3>,16> carSpeedPositions{};
     void RecordCarSpeeds(WorldSimulation* simulation)
     {
-#if !defined(__vita__) && !defined(__SWITCH__)
-        static const bool enabled=[] {const char* value=std::getenv("HP2_CAR_SPEED_LOG");return value && *value=='1';}();
-        if(!enabled || !simulation || !simulation->world)return;
+        if(!debugCarSpeedLog || !simulation || !simulation->world)return;
         const auto loop=clock.worldLoopCounter;
-        if(carSpeedLoop!=INT32_MIN && loop-carSpeedLoop<60 && loop>=carSpeedLoop)return;
+        if(carSpeedLoop!=INT32_MIN && loop-carSpeedLoop<15 && loop>=carSpeedLoop)return;
         const bool valid=carSpeedLoop!=INT32_MIN && loop>carSpeedLoop;
         const float seconds=valid ? static_cast<float>(loop-carSpeedLoop)/60.0f:1.0f;
         carSpeedLoop=loop;
@@ -475,11 +481,15 @@ struct ApplicationRuntime::Storage {
                 used+=std::snprintf(detail+used,sizeof(detail)-static_cast<std::size_t>(used)," c%d=m%d,v%.1f,g%.1f,p%.4f,r%d",
                     index,movement?movement->mode:-1,static_cast<double>(vehicle?vehicle->speed:0.0f),static_cast<double>(ground),
                     static_cast<double>(entry?entry->progress:-1.0f),entry?static_cast<int>(entry->position):-1);
+            if(movement && movement->mode==6 && movement->belt && movement->bindings.belt && used<static_cast<int>(sizeof(detail))-96) {
+                const auto* belt=movement->belt;const auto* bind=movement->bindings.belt;
+                used+=std::snprintf(detail+used,sizeof(detail)-static_cast<std::size_t>(used),",be%.2f,bv%.1f,ba%.1f,bt%.1f,bd%.2f",
+                    static_cast<double>(belt->elapsed),static_cast<double>(belt->parameterScale ? belt->velocityParameter/belt->parameterScale:0.0f),
+                    static_cast<double>(belt->parameterScale ? belt->accelerationParameter/belt->parameterScale:0.0f),
+                    static_cast<double>(bind->targetSpeed ? *bind->targetSpeed:-1.0f),static_cast<double>(bind->targetDuration ? *bind->targetDuration:-1.0f));
+            }
         }
         host.RecordSessionEvent("debug.car_speeds",detail);
-#else
-        (void)simulation;
-#endif
     }
     void RecordLifecycle(WorldSimulation* simulation,GameSession* session)
     {

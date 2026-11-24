@@ -1015,6 +1015,12 @@ static void sampleProgress(DriverAIBase* driver,float elapsed)
         driver->progressHistory.value<0.20000000298023224f&&!nearPlayer)
         carMotionRequestRecovery(movement->bindings.ownerMotion,&movement->bindings.environment->recovery);
 }
+namespace hp2::ai {int retailThinkTurns=[] {
+#if !defined(__vita__) && !defined(__SWITCH__)
+    if(const char* value=std::getenv("HP2_AI_THINK_LOOPS"))return *value=='1' ? 0:1;
+#endif
+    return 1;
+}();}
 static int32_t selectedThisFrame(const DriverAIBase* driver)
 {
     const WorldSimulation* simulation=driver->environment->simulation;
@@ -1022,7 +1028,8 @@ static int32_t selectedThisFrame(const DriverAIBase* driver)
     const Car* car=driver->physics.movement->bindings.owner;
     // Scheduling uses simulation iterations. The elapsed-time frame
     // accumulator can advance by more than one and skip eligible Cars.
-    const int32_t frame=simulation->clock->worldLoopCounter;
+    const GameTime* clock=simulation->clock;
+    const int32_t frame=clock->worldLoopCounter;
     const int32_t group=car->driverInfo->driverClass;
     if(group==2 || group==3){
         const int32_t first=group==2 ? world->firstGroupEnd:world->thirdGroupEnd;
@@ -1030,7 +1037,11 @@ static int32_t selectedThisFrame(const DriverAIBase* driver)
         const int32_t tableIndex=static_cast<std::int32_t>(car->tableIndex);
         return tableIndex>=first && tableIndex<last &&
             world->carTable[tableIndex]==car &&
-            hp2::ai::GroupCarDue(frame,tableIndex-first,last-first,group==2 ? 8:6);
+            (hp2::ai::retailThinkTurns ?
+                hp2::ai::GroupCarDueInSpan(clock->worldTimeFrames,
+                    convertFloatToInt32(bScalarMultiply(bScalarAdd(clock->worldTimeRemainder,clock->worldTimeElapsed),60.0f)),
+                    tableIndex-first,last-first,group==2 ? 8:6) :
+                hp2::ai::GroupCarDue(frame,tableIndex-first,last-first,group==2 ? 8:6));
     }
     return driver->thinkDelay<=driver->activePerception->lateralExtent;
 }
