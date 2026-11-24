@@ -152,6 +152,8 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // Geometry prewarm: the ordinary Acquire + vertex preparation (uploaded
     // with this frame's active entries), no draw, ahead of first use.
     if(PrewarmAllowed() && !frame.PrewarmStrips().empty()) {
+        struct GentleScope {VkResidentGeometryCache& cache;~GentleScope(){cache.SetPrewarmGentle(false);}} gentle{residentGeometry};
+        residentGeometry.SetPrewarmGentle(ecstasyPrewarmVictimIdle!=0);
         for(const auto& item:frame.PrewarmStrips()) {
             ++nativeGeometryPrewarmCounters[0];
             const auto& strip=*item.strip;

@@ -5660,6 +5660,11 @@ void EcstasyFrame::CollectTexturePrewarm()
 // has ever shown (28k on the larger tracks) evicts the strips in view and
 // thrashes the cache. Vita geometry_prewarm_max.txt "<strips>".
 std::uint32_t ecstasyGeometryPrewarmMax=6000;
+// Resident victim sweep: first-pass (pin-honouring) scan bound; 0 = unbounded.
+std::uint32_t ecstasyVictimPinScan=256;
+// Geometry prewarm may only recycle entries idle this many Gathers
+// (0: ordinary victim choice, Vita prewarm_evict_any.txt).
+std::uint32_t ecstasyPrewarmVictimIdle=900;
 // Strips handed in the world's first prewarm frame (Vita geometry_prewarm_burst.txt).
 std::uint32_t ecstasyGeometryPrewarmBurst=0;
 // Prewarm only strips first used within this many seals of the world
@@ -8792,15 +8797,39 @@ private:
     bool protectPrevious_{};
 public:
     void SetProtectPrevious(bool value) noexcept {protectPrevious_=value;}
+    void SetPrewarmGentle(bool value) noexcept {prewarmGentle_=value;}
+private:
+    bool prewarmGentle_{};
+public:
 private:
     std::uint32_t PickVictim() {
         if(entries_.empty() || active_.size()>=live_)return NoSlot;
-        for(int pass=0;pass<2;++pass)for(std::size_t step=0;step<entries_.size();++step) {
+        if(prewarmGentle_) {
+            // Prewarm takes only an unpinned entry idle for at least
+            // ecstasyPrewarmVictimIdle Gathers (bounded scan), never one
+            // that was in view recently; otherwise the strip is skipped.
+            const std::size_t limit=std::min<std::size_t>(256,entries_.size());
+            for(std::size_t step=0;step<limit;++step) {
+                const auto slot=static_cast<std::uint32_t>(clockHand_);clockHand_=(clockHand_+1)%entries_.size();
+                if(!entries_[slot] || slotPinnedUntil_[slot]>gather_)continue;
+                const auto last=slotLastGather_[slot];
+                if(!Referenced(last) && last+ecstasyPrewarmVictimIdle<gather_)return slot;
+            }
+            return NoSlot;
+        }
+        // Pass 0 honours prewarm pins; with thousands of pinned slots an
+        // unbounded pass 0 scanned most of the cache per miss (~0.5 ms each,
+        // 1000-strip reveals stalled Gather 200-600 ms). It is bounded to
+        // ecstasyVictimPinScan slots (0: unbounded, Vita victim_scan_full.txt).
+        for(int pass=0;pass<2;++pass) {
+            const std::size_t limit=!pass && ecstasyVictimPinScan ? std::min<std::size_t>(ecstasyVictimPinScan,entries_.size()):entries_.size();
+            for(std::size_t step=0;step<limit;++step) {
             const auto slot=static_cast<std::uint32_t>(clockHand_);clockHand_=(clockHand_+1)%entries_.size();
             if(!entries_[slot])continue;
             const auto last=slotLastGather_[slot];
             if(!pass && slotPinnedUntil_[slot]>gather_)continue;
             if(!Referenced(last) && (pass || last+1<gather_))return slot;
+            }
         }
         return NoSlot;
     }
