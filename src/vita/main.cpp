@@ -67,7 +67,7 @@ extern uint32_t (*collisionWitnessClockMicros)();
 extern int worldParallelCapture;
 extern int worldParallelResolve;
 namespace hp2::frontend { extern int flailerDiscardEarlyOut; }
-namespace hp2 { extern int ecstasyAttachPrefetch; extern int ecstasySceneryLeafFast; extern int ecstasySceneryLeafVerify; extern int ecstasySceneryPrefetch; extern int ecstasySceneryFirstFast; extern int ecstasyReplayFast; extern int ecstasySceneryRunReplay; extern int ecstasyGatherDetail; extern double ecstasyGatherDetailMs; extern float ecstasyParticleNearFadeStart, ecstasyParticleNearFadeEnd; extern int ecstasyParticleMirrorCull; extern int ecstasySceneryReuseCensus; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasyVsyncInterval; extern std::uint32_t ecstasyGeometryPrewarmMax; extern int ecstasyGpuDiag; extern int ecstasyModelRunCache; extern int ecstasyTexturePrewarm; extern int ecstasyGeometryPrewarm; extern int ecstasyScissorElide; extern int ecstasySunQuery; extern int ecstasyInstancing; extern int ecstasyGxmDirect; extern int ecstasyGxmParity; extern int ecstasyGxmFlushDraws; extern int ecstasyGxmProf; extern int ecstasyDeferOrder; extern int ecstasyGpuTimeline; extern int ecstasyGatherSampler; void StartGatherSampler(); extern int ecstasyHalfFirstRun; extern int ecstasyRetireStamp; extern int ecstasyTexturePrewarmFair; extern int ecstasyGpuProbe; extern int ecstasyGpuHeavyShots; extern int ecstasyResidentVram; extern int ecstasyAlphaElide; extern int ecstasyAlphaCheck; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern int ecstasyAsyncParticles; extern int ecstasyPrepareCache; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
+namespace hp2 { extern int ecstasyAttachPrefetch; extern int ecstasySceneryLeafFast; extern int ecstasySceneryLeafVerify; extern int ecstasySceneryPrefetch; extern int ecstasySceneryFirstFast; extern int ecstasyReplayFast; extern int ecstasySceneryRunReplay; extern int ecstasyGatherDetail; extern double ecstasyGatherDetailMs; extern float ecstasyParticleNearFadeStart, ecstasyParticleNearFadeEnd; extern int ecstasyParticleMirrorCull; extern int ecstasySceneryReuseCensus; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyFragmentMediump; extern int ecstasyForceNoVsync; extern int ecstasyVsyncInterval; extern std::uint32_t ecstasyGeometryPrewarmMax; extern std::uint32_t ecstasyGeometryPrewarmBurst; extern std::uint32_t ecstasyGeometryPrewarmWindow; extern std::uint32_t ecstasyGeometryPrewarmLookahead; extern int ecstasyGpuDiag; extern int ecstasyModelRunCache; extern int ecstasyTexturePrewarm; extern int ecstasyGeometryPrewarm; extern int ecstasyScissorElide; extern int ecstasySunQuery; extern int ecstasyInstancing; extern int ecstasyGxmDirect; extern int ecstasyGxmParity; extern int ecstasyGxmFlushDraws; extern int ecstasyGxmProf; extern int ecstasyDeferOrder; extern int ecstasyGpuTimeline; extern int ecstasyGatherSampler; void StartGatherSampler(); extern int ecstasyHalfFirstRun; extern int ecstasyRetireStamp; extern int ecstasyTexturePrewarmFair; extern int ecstasyGpuProbe; extern int ecstasyGpuHeavyShots; extern int ecstasyResidentVram; extern int ecstasyAlphaElide; extern int ecstasyAlphaCheck; extern int ecstasySceneWorkerPriority; extern int ecstasyParallelSceneryPrepare; extern int ecstasyHalfResSkipAlphaTest; extern int ecstasyHalfResHardwareDepth; extern int ecstasySceneJobsSerial; extern int ecstasySceneClaimPool; extern int ecstasyAsyncMirrorScenery; extern int ecstasyAsyncParticles; extern int ecstasyPrepareCache; extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyAffineUV; extern int ecstasySceneryFastMerge; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelParticles; extern int ecstasyParticleJobsPooled; extern int ecstasyParallelModelStrips; extern int ecstasyParallelSkinStrips; extern int ecstasyHalfResParticles; extern double ecstasyHalfResMinScreens; extern double ecstasyQuarterResMinScreens; extern int ecstasyHalfResDepthFlip; extern int ecstasyHalfResSync; extern int ecstasyHalfResCompositeFlip; extern std::vector<std::uint64_t> ecstasyScreenshotFrames; extern std::vector<std::uint64_t> ecstasyDisplayShotFrames; }
 namespace hp2 { extern std::array<int,2> ecstasySceneWorkerCores; extern int ecstasyDiscardSink; }
 extern int collisionSpeculationMode;
 extern uint64_t collisionSpeculationVerifyBudget;
@@ -1017,14 +1017,18 @@ int main(int, char**)
             hp2::ecstasyTexturePrewarm = 0;
             log.Line("vita.diag", "texture prewarm off");
         }
-        // Geometry prewarm is off by default: on the larger tracks the listed
-        // strips exceed the 24 MB resident cache and thrash it (track 62 at
-        // 30 fps lock: 25.1 fps with 1.2 s hitches vs 29.2 off; track 24
-        // 29.7 vs 29.6). geometry_prewarm_on.txt enables it (capped).
-        hp2::ecstasyGeometryPrewarm = 0;
-        if (sceIoGetstat((std::string(kDataDirectory) + "/geometry_prewarm_on.txt").c_str(), &probe) >= 0) {
-            hp2::ecstasyGeometryPrewarm = 1;
-            log.Line("vita.diag", "geometry prewarm on");
+        // Geometry prewarm, timed: strips are listed with the seal of their
+        // first use in a world (geometry_prewarm2.txt). Those first used in
+        // the first 900 seals are prepared behind the loading screen (burst
+        // 4000), later ones 300 seals ahead of their recorded first use. The
+        // old untimed list thrashed the 24 MB cache on the larger tracks;
+        // the timed one holds only the near future. geometry_prewarm_off.txt.
+        hp2::ecstasyGeometryPrewarm = 1;
+        hp2::ecstasyGeometryPrewarmWindow = 900;
+        hp2::ecstasyGeometryPrewarmBurst = 4000;
+        if (sceIoGetstat((std::string(kDataDirectory) + "/geometry_prewarm_off.txt").c_str(), &probe) >= 0) {
+            hp2::ecstasyGeometryPrewarm = 0;
+            log.Line("vita.diag", "geometry prewarm off");
         }
         if (sceIoGetstat((std::string(kDataDirectory) + "/model_run_cache_off.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyModelRunCache = 0;
@@ -1036,6 +1040,21 @@ int main(int, char**)
             std::fclose(diag);
             char text[48];std::snprintf(text, sizeof(text), "gpu diagnostic mode %d", hp2::ecstasyGpuDiag);
             log.Line("vita.diag", text);
+        }
+        if (FILE* file = std::fopen((std::string(kDataDirectory) + "/geometry_prewarm_window.txt").c_str(), "r")) {
+            unsigned value = 0;
+            if (std::fscanf(file, "%u", &value) == 1) hp2::ecstasyGeometryPrewarmWindow = value;
+            std::fclose(file);
+        }
+        if (FILE* file = std::fopen((std::string(kDataDirectory) + "/geometry_prewarm_lookahead.txt").c_str(), "r")) {
+            unsigned value = 0;
+            if (std::fscanf(file, "%u", &value) == 1) hp2::ecstasyGeometryPrewarmLookahead = value;
+            std::fclose(file);
+        }
+        if (FILE* file = std::fopen((std::string(kDataDirectory) + "/geometry_prewarm_burst.txt").c_str(), "r")) {
+            unsigned value = 0;
+            if (std::fscanf(file, "%u", &value) == 1) hp2::ecstasyGeometryPrewarmBurst = value;
+            std::fclose(file);
         }
         if (FILE* file = std::fopen((std::string(kDataDirectory) + "/geometry_prewarm_max.txt").c_str(), "r")) {
             unsigned value = 0;

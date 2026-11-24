@@ -5368,6 +5368,22 @@ std::array<std::uint64_t,2> nativeReplayFastCounters{};
 // hits, misses, replayed strips, recorded runs
 std::array<std::uint64_t,4> nativeSceneryReplayCounters{};
 namespace {
+// Prewarm lists are appended by a detached writer: an fopen/append on the
+// Vita's memory card took up to 0.86 s on the game thread.
+void AppendPrewarmLinesAsync(const char* path,std::vector<std::string>& appended,std::atomic<bool>& flushing)
+{
+    auto lines=std::make_shared<std::vector<std::string>>(std::move(appended));appended.clear();
+    flushing.store(true,std::memory_order_release);
+    try {
+        std::thread([lines,path,&flushing] {
+            if(FILE* file=std::fopen(path,"a")) {
+                for(const auto& line:*lines)std::fprintf(file,"%s\n",line.c_str());
+                std::fclose(file);
+            }
+            flushing.store(false,std::memory_order_release);
+        }).detach();
+    } catch(...) {appended=std::move(*lines);flushing.store(false,std::memory_order_release);}
+}
 struct TexturePrewarmState {
     std::mutex mutex;
     bool loaded{};
@@ -5378,6 +5394,7 @@ struct TexturePrewarmState {
     std::unordered_map<const TexturePack*,Pack> packs;
     std::vector<TexturePack*> lastPacks;
     std::uint32_t sealsSinceFlush{};
+    std::atomic<bool> flushing{}; // a writer thread is appending to the file
     // Found images are handed to every sealed frame until a Gather confirms
     // them (a sealed frame can be dropped without being gathered).
     struct Handed {const TexturePack* pack{};const TextureInfo* texture{};bool forcedClamp{};};
@@ -5503,13 +5520,9 @@ void EcstasyFrame::CollectTexturePrewarm()
             static_cast<unsigned>(prewarmTextures_.size()),renderFrameCounter_);
         platform::RecordSessionEvent("render.texture_prewarm_batch",text);
     }
-    if(++state.sealsSinceFlush>=300 && !state.appended.empty()) {
+    if(++state.sealsSinceFlush>=300 && !state.appended.empty() && !state.flushing.load(std::memory_order_acquire)) {
         state.sealsSinceFlush=0;
-        if(FILE* file=std::fopen(TexturePrewarmPath(),"a")) {
-            for(const auto& line:state.appended)std::fprintf(file,"%s\n",line.c_str());
-            std::fclose(file);
-        }
-        state.appended.clear();
+        AppendPrewarmLinesAsync(TexturePrewarmPath(),state.appended,state.flushing);
     }
 }
 // Geometry prewarm (Vita geometry_prewarm_off.txt; PC HP2_GEOMETRY_PREWARM=0
@@ -5524,6 +5537,13 @@ void EcstasyFrame::CollectTexturePrewarm()
 // has ever shown (28k on the larger tracks) evicts the strips in view and
 // thrashes the cache. Vita geometry_prewarm_max.txt "<strips>".
 std::uint32_t ecstasyGeometryPrewarmMax=6000;
+// Strips handed in the world's first prewarm frame (Vita geometry_prewarm_burst.txt).
+std::uint32_t ecstasyGeometryPrewarmBurst=0;
+// Prewarm only strips first used within this many seals of the world
+// appearing (0: all, file order). Vita geometry_prewarm_window.txt.
+std::uint32_t ecstasyGeometryPrewarmWindow=0;
+// Timed mode: hand a strip this many seals before its recorded first use.
+std::uint32_t ecstasyGeometryPrewarmLookahead=300;
 int ecstasyGeometryPrewarm=[] {
 #if !defined(__vita__) && !defined(__SWITCH__)
     if(const char* value=std::getenv("HP2_GEOMETRY_PREWARM"))return std::atoi(value);
@@ -5538,7 +5558,10 @@ struct GeometryPrewarmRecord {
     std::uint32_t lod0{},lod1{};
     bool line{};
     std::uint32_t sequence{}; // file order = first-use order
+    std::uint32_t frame{~0u}; // seals since the world appeared, at first use (~0u: unknown)
 };
+// Seals since the current world root appeared (game thread writes, Gather reads).
+std::atomic<std::uint32_t> geometryPrewarmWorldFrame{0};
 struct GeometryPrewarmState {
     std::mutex mutex;
     bool loaded{};
@@ -5546,18 +5569,21 @@ struct GeometryPrewarmState {
     std::vector<std::string> appended;
     std::unordered_map<std::uint32_t,std::vector<GeometryPrewarmRecord>> bySolid;
     std::set<std::uint32_t> doneSolids; // queued this session (per root)
-    std::vector<EcstasyFrame::PrewarmStrip> queue,handed;
+    std::vector<std::pair<std::uint32_t,EcstasyFrame::PrewarmStrip>> queue; // (first-use frame or sequence, strip), earliest at the back
+    std::vector<EcstasyFrame::PrewarmStrip> handed;
     const EditorMarkerResources* root{};std::uint64_t rootRevision{~0ull};
     std::uint32_t queuedTotal{}; // per root, capped by ecstasyGeometryPrewarmMax
+    bool burst{}; // next hand-out is the world's first (ecstasyGeometryPrewarmBurst)
     std::uint32_t sealsSinceFlush{};
+    std::atomic<bool> flushing{}; // a writer thread is appending to the file
 };
 GeometryPrewarmState& GeometryPrewarm() {static GeometryPrewarmState state;return state;}
 const char* GeometryPrewarmPath() noexcept
 {
 #if defined(__vita__)
-    return "ux0:data/NFSHP2/geometry_prewarm.txt";
+    return "ux0:data/NFSHP2/geometry_prewarm2.txt";
 #else
-    return "Saves/geometry_prewarm.txt";
+    return "Saves/geometry_prewarm2.txt";
 #endif
 }
 // Identity without lod0: the resident key (and the GL/GXM vertex stream)
@@ -5570,8 +5596,8 @@ std::string GeometryPrewarmIdentity(GeometryPrewarmRecord record)
 }
 std::string GeometryPrewarmLine(const GeometryPrewarmRecord& record)
 {
-    char text[96];std::snprintf(text,sizeof(text),"%08x %u %d %08x %08x %u",record.solid,record.index,record.line ? 1:0,
-        record.lod0,record.lod1,record.glyph);
+    char text[112];std::snprintf(text,sizeof(text),"%08x %u %d %08x %08x %u %u",record.solid,record.index,record.line ? 1:0,
+        record.lod0,record.lod1,record.glyph,record.frame);
     return text;
 }
 void LoadGeometryPrewarm(GeometryPrewarmState& state)
@@ -5582,7 +5608,9 @@ void LoadGeometryPrewarm(GeometryPrewarmState& state)
     char line[128];
     while(std::fgets(line,sizeof(line),file)) {
         GeometryPrewarmRecord record;unsigned solid=0,index=0,lod0=0,lod1=0,glyph=0;int lineTopology=0;
-        if(std::sscanf(line,"%x %u %d %x %x %u",&solid,&index,&lineTopology,&lod0,&lod1,&glyph)!=6)continue;
+        unsigned frame=~0u;
+        if(std::sscanf(line,"%x %u %d %x %x %u %u",&solid,&index,&lineTopology,&lod0,&lod1,&glyph,&frame)<6)continue;
+        record.frame=frame;
         record.solid=solid;record.index=index;record.line=lineTopology!=0;record.lod0=lod0;record.lod1=lod1;record.glyph=glyph;
         if(!state.known.insert(GeometryPrewarmIdentity(record)).second)continue;
         record.sequence=static_cast<std::uint32_t>(state.known.size());
@@ -5601,6 +5629,7 @@ void EcstasyRecordGeometryFirstUse(const EditorMarkerSolid* solid,const EditorMa
     GeometryPrewarmRecord record;
     record.solid=solid->key;record.index=static_cast<std::uint32_t>(strip-strips.data());record.line=lineTopology;
     std::memcpy(&record.lod0,&lod[0],4);std::memcpy(&record.lod1,&lod[1],4);record.glyph=glyphBoundsIndex;
+    record.frame=geometryPrewarmWorldFrame.load(std::memory_order_relaxed);
     auto identity=GeometryPrewarmIdentity(record);
     auto& state=GeometryPrewarm();
     std::lock_guard<std::mutex> lock(state.mutex);
@@ -5633,9 +5662,11 @@ void EcstasyFrame::CollectGeometryPrewarm()
     std::lock_guard<std::mutex> lock(state.mutex);
     if(!state.loaded)LoadGeometryPrewarm(state);
     if(root && (root!=state.root || root->bindingRevision!=state.rootRevision)) {
-        if(root!=state.root) {state.doneSolids.clear();state.queue.clear();state.handed.clear();state.queuedTotal=0;}
+        if(root!=state.root) {state.doneSolids.clear();state.queue.clear();state.handed.clear();state.queuedTotal=0;state.burst=true;
+            geometryPrewarmWorldFrame.store(0,std::memory_order_relaxed);}
         state.root=root;state.rootRevision=root->bindingRevision;
         std::vector<std::pair<std::uint32_t,PrewarmStrip>> fresh;
+        const bool timed=ecstasyGeometryPrewarmWindow!=0;
         // Queue the listed strips of every newly present solid.
         for(const auto* catalogue=root;catalogue;catalogue=catalogue->nextCatalogue)
             for(std::size_t at=0;at<catalogue->solidCount;++at) {
@@ -5646,34 +5677,49 @@ void EcstasyFrame::CollectGeometryPrewarm()
                 state.doneSolids.insert(solid.key);
                 for(const auto& record:listed->second) {
                     if(record.index>=solid.geometry->strips.size())continue;
+                    // Only strips first used early in a world (the race start and
+                    // the first stretch): later ones would evict what is in view.
+                    if(timed && record.frame==~0u)continue;
                     PrewarmStrip entry;entry.strip=&solid.geometry->strips[record.index];
                     std::memcpy(&entry.lod[0],&record.lod0,4);std::memcpy(&entry.lod[1],&record.lod1,4);
                     entry.glyphBoundsIndex=record.glyph;entry.lineTopology=record.line;
-                    fresh.emplace_back(record.sequence,entry);
+                    fresh.emplace_back(timed ? record.frame:record.sequence,entry);
                 }
             }
         // Earliest first-use first, up to the per-world cap; the queue pops
         // from the back, so store it reversed.
         std::stable_sort(fresh.begin(),fresh.end(),[](const auto& a,const auto& b) {return a.first<b.first;});
-        const std::size_t room=state.queuedTotal<ecstasyGeometryPrewarmMax ? ecstasyGeometryPrewarmMax-state.queuedTotal:0u;
+        // Timed lists are paced by first-use frame instead (bounded lookahead).
+        const std::size_t room=timed ? fresh.size():
+            (state.queuedTotal<ecstasyGeometryPrewarmMax ? ecstasyGeometryPrewarmMax-state.queuedTotal:0u);
         if(fresh.size()>room)fresh.resize(room);
         state.queuedTotal+=static_cast<std::uint32_t>(fresh.size());
-        std::vector<PrewarmStrip> merged;merged.reserve(fresh.size()+state.queue.size());
-        for(auto it=fresh.rbegin();it!=fresh.rend();++it)merged.push_back(it->second);
-        merged.insert(merged.end(),state.queue.begin(),state.queue.end());
-        state.queue.swap(merged);
+        // Merge with what is still queued, earliest at the back.
+        fresh.insert(fresh.end(),state.queue.begin(),state.queue.end());
+        std::stable_sort(fresh.begin(),fresh.end(),[](const auto& a,const auto& b) {return a.first>b.first;});
+        state.queue.swap(fresh);
     }
     // A few strips per frame; handed strips repeat until a Gather confirms
     // them (a sealed frame can be dropped without being gathered).
-    while(state.handed.size()<32 && !state.queue.empty()) {state.handed.push_back(state.queue.back());state.queue.pop_back();}
+    // The world's first hand-out may take up to ecstasyGeometryPrewarmBurst
+    // at once: that Gather is behind the loading screen, not gameplay.
+    // Timed (ecstasyGeometryPrewarmWindow): the burst takes strips first used
+    // within the window; later strips are handed when their recorded first
+    // use is at most ecstasyGeometryPrewarmLookahead seals ahead.
+    const bool timed=ecstasyGeometryPrewarmWindow!=0;
+    const bool burst=state.burst && !state.queue.empty();
+    const std::size_t handLimit=burst ? std::max<std::size_t>(32,ecstasyGeometryPrewarmBurst):32;
+    if(!state.queue.empty())state.burst=false;
+    const std::uint32_t now=geometryPrewarmWorldFrame.load(std::memory_order_relaxed);
+    const std::uint64_t horizon=burst ? ecstasyGeometryPrewarmWindow:std::uint64_t{now}+ecstasyGeometryPrewarmLookahead;
+    while(state.handed.size()<handLimit && !state.queue.empty() && (!timed || state.queue.back().first<=horizon)) {
+        state.handed.push_back(state.queue.back().second);state.queue.pop_back();
+    }
     prewarmStrips_=state.handed;
-    if(++state.sealsSinceFlush>=300 && !state.appended.empty()) {
+    if(root)geometryPrewarmWorldFrame.fetch_add(1,std::memory_order_relaxed);
+    if(++state.sealsSinceFlush>=300 && !state.appended.empty() && !state.flushing.load(std::memory_order_acquire)) {
         state.sealsSinceFlush=0;
-        if(FILE* file=std::fopen(GeometryPrewarmPath(),"a")) {
-            for(const auto& line:state.appended)std::fprintf(file,"%s\n",line.c_str());
-            std::fclose(file);
-        }
-        state.appended.clear();
+        AppendPrewarmLinesAsync(GeometryPrewarmPath(),state.appended,state.flushing);
     }
 }
 // Vita defer_order_off.txt: Seal materializes the command order itself.

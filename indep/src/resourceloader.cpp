@@ -323,10 +323,22 @@ void validateTrackChunks(const std::vector<std::uint8_t>& bytes)
 
 void ResourceRegistry::PostLoadFixup()
 {
+    using FixupClock=std::chrono::steady_clock;
+    const auto t0=FixupClock::now();
     ResourceRefresh();
+    const auto t1=FixupClock::now();
     UpdateLightTextures();
+    const auto t2=FixupClock::now();
     Effects().UpdateTextures(*this);
+    const auto t3=FixupClock::now();
     Flailer().DeleteAllStrips();
+    const auto t4=FixupClock::now();
+    if(platform::nativeDiagnosticsEnabled) {
+        const auto ms=[](FixupClock::time_point a,FixupClock::time_point b){return std::chrono::duration<double,std::milli>(b-a).count();};
+        char detail[160];std::snprintf(detail,sizeof(detail),"refresh_ms=%.2f light_ms=%.2f effects_ms=%.2f flailer_ms=%.2f",
+            ms(t0,t1),ms(t1,t2),ms(t2,t3),ms(t3,t4));
+        platform::RecordSessionEvent("resource.fixup",detail);
+    }
 }
 
 struct ResourceFile::Storage {
@@ -761,7 +773,15 @@ void ResourceLoader::RetireResourceFile(ResourceFile* file,bool terminal)
         service.queued.CancelAndWait(data.queuedId);data.queuedId=0;data.transfersPending=0;
     }
     Require(!data.queuedId && !data.transfersPending,"ResourceFile cannot retire an outstanding physical write");
-    NativeDrainRendering();
+    {
+        const auto drainStarted=std::chrono::steady_clock::now();
+        NativeDrainRendering();
+        if(platform::nativeDiagnosticsEnabled) {
+            char detail[64];std::snprintf(detail,sizeof(detail),"drain_ms=%.2f",
+                std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-drainStarted).count());
+            platform::RecordSessionEvent("resource.unload.drain",detail);
+        }
+    }
     logResourceEvent("resource.unload.begin",data.filename,data.bindings.kind,data.type,data.flags,
         0,data.physical.range.Size(),service.pendingFiles);
     data.animationData.reset();
