@@ -1258,6 +1258,8 @@ GlProgram& EcstasyVulkanDevice::Storage::Program(std::uint32_t key)
 }
 
 int ecstasyGxmDirect=1; // Vita gxm_off.txt: every draw through vitaGL
+// Diagnostic diag_nodraw.txt: 1 skips every direct draw, 2 only particle batches.
+int ecstasyDiagNoDraw=0;
 int ecstasyGxmFlushDraws=0; // Vita gxm_flush.txt N: sceGxmMidSceneFlush every N direct draws (vertex work starts early)
 int ecstasyGxmParity=0; // Vita gxm_parity.txt: shot frames drawn twice (vitaGL shot +100000000, then direct)
 int ecstasyGxmProf=0; // Vita gxm_prof.txt: per-draw pass profile (adds ~2 us clock calls per draw)
@@ -2394,7 +2396,8 @@ void EcstasyVulkanDevice::Storage::Submit(GlFramePacket& packet)
                     if(instanceBase!=dStream1) {sceGxmSetVertexStream(gxm_context,1,instanceBase);dStream1=instanceBase;++directCalls[7];}
                     ++directCalls[8];
                 }
-                if(batch.indexed) {
+                if(ecstasyDiagNoDraw==1 || (ecstasyDiagNoDraw==2 && batch.particle)) {}
+                else if(batch.indexed) {
                     if(vertexBase!=dStream0) {sceGxmSetVertexStream(gxm_context,0,vertexBase);dStream0=vertexBase;++directCalls[6];}
                     ++directCalls[9];
                     const auto* indices=static_cast<const std::uint8_t*>(indexBase)+static_cast<std::size_t>(batch.first)*sizeof(std::uint32_t);

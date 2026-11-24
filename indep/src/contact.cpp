@@ -175,6 +175,15 @@ public:
 #endif
     }
     bool ClaimOne(unsigned& index) {return Claim(generation_,index);}
+    // Claims index `wanted` only if it is the next unclaimed one.
+    bool ClaimExact(unsigned wanted)
+    {
+        uint32_t state=state_.load();
+        for(;;) {
+            if((state>>16)!=generation_ || (state&0xffffu)!=wanted || wanted>=count_)return false;
+            if(state_.compare_exchange_weak(state,state+1))return true;
+        }
+    }
     void Close()
     {
         state_.store((generation_<<16)|0xffffu);
@@ -384,6 +393,7 @@ void collisionHelperPublish(unsigned count,void (*function)(void*,unsigned),void
     CollisionHelperPool::Instance().Publish(count,function,context);
 }
 bool collisionHelperClaim(unsigned& index) {return CollisionHelperPool::Instance().ClaimOne(index);}
+bool collisionHelperClaimExact(unsigned index) {return CollisionHelperPool::Instance().ClaimExact(index);}
 void collisionHelperClose() {CollisionHelperPool::Instance().Close();}
 unsigned collisionHelperCount()
 {

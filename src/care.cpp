@@ -501,7 +501,7 @@ void carPartCullerCull(CarPartCuller* parts,const float eye[4])
     }
 }
 
-namespace hp2 { std::array<std::uint64_t,8> carRenderSplitMicros{}; std::array<std::uint64_t,7> carSetupSplitMicros{}; }
+namespace hp2 { std::array<std::uint64_t,4> carShadowSplitMicros{}; std::array<std::uint64_t,8> carRenderSplitMicros{}; std::array<std::uint64_t,7> carSetupSplitMicros{}; }
 namespace {
 void updateCarRenderReplacementTextures(CarAppearance& render,Car* car,bool reconnect=true)
 {
@@ -1044,6 +1044,9 @@ std::size_t renderCarSunShadow(CarAppearance& render,Car* car,const CarCinematic
     bool frontend,std::size_t lod,std::int32_t pixels,CarShadowTerrain& shadowTerrain)
 {
     if(lod>=3 || frontend || !car || !render.models[0].solid || !render.auxiliaryTexture || view.id==3)return 0;
+    const bool shadowTimed=diagFineTimers && collisionWitnessClockMicros!=nullptr;
+    std::uint32_t shadowMark=shadowTimed ? collisionWitnessClockMicros():0u;
+    struct ShadowEmitTimer {bool on;std::uint32_t& mark;~ShadowEmitTimer(){if(on)hp2::carShadowSplitMicros[1]+=collisionWitnessClockMicros()-mark;}};
     auto* movement=car->Movement();
     const auto* collision=movement && movement->bindings.ownerMotion ? movement->bindings.ownerMotion->collision:nullptr;
     if(!collision || !collision->shape)return 0;
@@ -1081,6 +1084,8 @@ std::size_t renderCarSunShadow(CarAppearance& render,Car* car,const CarCinematic
             grounded.push_back(point);
         }
     }
+    if(shadowTimed) {const auto now=collisionWitnessClockMicros();hp2::carShadowSplitMicros[0]+=now-shadowMark;shadowMark=now;}
+    ShadowEmitTimer emitTimer{shadowTimed,shadowMark};
     const auto smooth=carShadowSmooth(grounded);const auto count=smooth.size();
     if(count<3)return 0;
     for(std::size_t axis=0;axis<4;++axis)center[axis]=(smooth[0][axis]+smooth[count/2][axis])*0.5f;
@@ -1135,6 +1140,8 @@ std::size_t renderCarRoadShadow(CarAppearance& render,Car* car,const CarCinemati
         nativeFrame->movement->bindings.state->activeContactCount==4 && !render.cullers[13].culled)return 0;
     const auto* texture=hp2::textureInfoForDescriptor(render.shadowTexture);
     hp2::Require(texture && render.definition,"Car shadow lost its real texture/definition owner");
+    const bool roadTimed=diagFineTimers && collisionWitnessClockMicros!=nullptr;
+    std::uint32_t roadMark=roadTimed ? collisionWitnessClockMicros():0u;
     auto* terrain=frontend ? nullptr:shadowTerrain.Get();
     constexpr std::size_t grid=4;
     const std::size_t pointCount=grid*grid;
@@ -1196,6 +1203,8 @@ std::size_t renderCarRoadShadow(CarAppearance& render,Car* car,const CarCinemati
             if(central(i))points[i][2]+=0.07999999821186066f;
         }
     }
+    if(roadTimed) {const auto now=collisionWitnessClockMicros();hp2::carShadowSplitMicros[2]+=now-roadMark;roadMark=now;}
+    struct RoadEmitTimer {bool on;std::uint32_t& mark;~RoadEmitTimer(){if(on)hp2::carShadowSplitMicros[3]+=collisionWitnessClockMicros()-mark;}} roadEmit{roadTimed,roadMark};
     const float sun=lighting ? lighting->sunlightIntensity:0.0f;
     const float alpha=frontend ? 92.0f:sun<0.4000000059604645f ? 70.0f:
         sun>1.0f ? 140.0f:70.0f+70.0f*((sun-0.4000000059604645f)/0.6000000238418579f);

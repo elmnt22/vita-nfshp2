@@ -76,8 +76,8 @@ extern uint64_t collisionPipeLong,collisionPipeZeroDraw,collisionPipeBehind[9];
 extern uint64_t collisionPipeMissPair,collisionPipeMissStart,collisionPipeShort,collisionPipeDrawDelta[4];
 extern uint64_t collisionPipeContacts,collisionPipeEntryMisses,collisionPipeBreaks,collisionPipeTasks,collisionPipeUsed,collisionPipePasses;
 extern uint64_t worldParallelResolveStats[2];
-namespace hp2 { extern int ecstasyPrepareCache; extern std::uint64_t ecstasyPrepareCacheStats[3]; extern std::uint64_t ecstasyAsyncMirrorStats[12]; extern int ecstasyAsyncParticles; extern std::uint64_t ecstasyAsyncParticleStats[5]; }
-namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; extern std::array<std::uint64_t,7> ecstasyIndexCacheStats; extern std::array<double,4> ecstasyDiscardSetupSplitMs; extern int ecstasyDiscardSink; }
+namespace hp2 { extern int ecstasyPrepareCache; extern std::uint64_t ecstasyPrepareCacheStats[3]; extern std::uint64_t ecstasyAsyncMirrorStats[12]; extern std::uint64_t ecstasyMirrorTimeline[9]; extern int ecstasyAsyncParticles; extern std::uint64_t ecstasyAsyncParticleStats[5]; }
+namespace hp2 { extern std::array<double,5> ecstasyAttachSolidPartMs; extern double ecstasyAttachSolidMs; extern std::uint64_t ecstasyAttachSolidCalls,ecstasyAttachSolidCommands; extern std::array<double,8> ecstasyWorldSplitMs,ecstasyDiscardWorldSplitMs; extern std::array<std::uint64_t,6> nisRenderSplitMicros; extern std::array<std::uint64_t,8> carRenderSplitMicros; extern std::array<std::uint64_t,4> carShadowSplitMicros; extern std::array<std::uint64_t,7> carSetupSplitMicros; extern std::array<std::uint64_t,5> ecstasySkinSplitMicros; extern std::array<std::uint64_t,7> ecstasyIndexCacheStats; extern std::array<std::uint64_t,10> ecstasyResidentStats; extern std::array<double,4> ecstasyDiscardSetupSplitMs; extern int ecstasyDiscardSink; }
 extern uint64_t collisionWitnessQueries,collisionWitnessIterations,collisionWitnessRestarts,collisionWitnessExhausted;
 extern double collisionWitnessMilliseconds,collisionWitnessWarmMilliseconds;
 extern uint64_t collisionWitnessWarmMismatches;
@@ -1640,6 +1640,13 @@ bool ApplicationRuntime::Tick()
                         (unsigned long long)a[4],a[5]/n,a[6]/n,(unsigned long long)a[7],(unsigned long long)a[8],(unsigned long long)a[9],
                         (unsigned long long)a[10],(unsigned long long)a[11]);
                     s.host.RecordSessionEvent("render.async_mirror",detail);
+                    if(auto& t=hp2::ecstasyMirrorTimeline;t[0]) {
+                        const double m=static_cast<double>(t[0]);
+                        std::snprintf(detail,sizeof(detail),"samples=%llu claimed_us=%.0f zones_published_us=%.0f zones_seen_us=%.0f job_done_us=%.0f main_finish_us=%.0f particles_claimed_us=%.0f particles_done_us=%.0f closed_us=%.0f",
+                            (unsigned long long)t[0],t[1]/m,t[2]/m,t[3]/m,t[4]/m,t[5]/m,t[6]/m,t[7]/m,t[8]/m);
+                        s.host.RecordSessionEvent("render.mirror_timeline",detail);
+                        std::fill(std::begin(t),std::end(t),0);
+                    }
                     const auto mismatches=a[7];std::fill(std::begin(a),std::end(a),0);a[7]=mismatches;
                 }
                 if(auto& a=worldParallelResolveStats;a[0]+a[1]) {
@@ -1797,6 +1804,11 @@ bool ApplicationRuntime::Tick()
                     std::snprintf(detail,sizeof(detail),"cars=%llu setup_us=%.1f flares_us=%.1f driver_us=%.1f shadows_us=%.1f body_us=%.1f wheels_us=%.1f wipers_us=%.1f",
                         static_cast<unsigned long long>(e[7]),e[0]/n,e[1]/n,e[2]/n,e[3]/n,e[4]/n,e[5]/n,e[6]/n);
                     s.host.RecordSessionEvent("render.car_split",detail);
+                    if(auto& w=hp2::carShadowSplitMicros;true) {
+                        std::snprintf(detail,sizeof(detail),"per_car_render_us sun_compute=%.1f sun_emit=%.1f road_compute=%.1f road_emit=%.1f",
+                            w[0]/n,w[1]/n,w[2]/n,w[3]/n);
+                        s.host.RecordSessionEvent("render.car_shadow_split",detail);w={};
+                    }
                     auto& t=hp2::carSetupSplitMicros;
                     std::snprintf(detail,sizeof(detail),"pre=%.1f textures=%.1f culler=%.1f lodbias=%.1f lighting=%.1f changed=%llu unchanged=%llu",
                         t[5]/n,t[0]/n,t[1]/n,t[2]/n,t[3]/n,(unsigned long long)t[4],(unsigned long long)t[6]);
@@ -1845,6 +1857,14 @@ bool ApplicationRuntime::Tick()
                 cpu.gatherVertexJobsMilliseconds/count,cpu.gatherIndicesMilliseconds/count,
                 cpu.coldVertexJobs/count,cpu.coldVertices/count);
             s.host.RecordSessionEvent("render.gather_detail",detail);
+            if(auto& r=hp2::ecstasyResidentStats;r[0]) {
+                std::snprintf(detail,sizeof(detail),
+                    "acquires=%.1f front_hits=%.1f new=%.1f evict=%.1f capture_posed=%.1f capture_revisioned=%.1f variant=%.1f source_new=%.1f live=%llu capacity=%llu",
+                    r[0]/count,r[1]/count,r[2]/count,r[3]/count,r[4]/count,r[5]/count,r[6]/count,r[7]/count,
+                    (unsigned long long)r[8],(unsigned long long)r[9]);
+                s.host.RecordSessionEvent("render.resident_geometry",detail);
+                const auto live=r[8],capacity=r[9];r={};r[8]=live;r[9]=capacity;
+            }
             if(auto& e=hp2::ecstasyIndexCacheStats;e[0]) {
                 std::snprintf(detail,sizeof(detail),
                     "batches=%.1f front_hits=%.1f map_hits=%.1f misses=%.1f tokens=%.1f copied_indices=%.1f fallbacks=%.1f",

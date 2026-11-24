@@ -63,6 +63,7 @@
 #include <cstddef>
 unsigned collisionHelperPoolSize();
 void collisionHelperPublish(unsigned count,void (*function)(void*,unsigned),void* context);
+bool collisionHelperClaimExact(unsigned index);
 bool collisionHelperClaim(unsigned& index);
 void collisionHelperClose();
 
@@ -101,7 +102,20 @@ extern int bMatrixNeonEnabled;
 // Resident index cache counters, summed per log window (render thread only):
 // batches, front hits, map hits, misses, tokens hashed, indices copied,
 // capacity fallbacks.
-namespace hp2 {std::array<std::uint64_t,7> ecstasyIndexCacheStats{};}
+namespace hp2 {std::array<std::uint64_t,7> ecstasyIndexCacheStats{};
+// Resident geometry: acquires, front hits, new entries, evictions, byte captures of
+// unrevisioned (posed) / revisioned strips, variant reassigns, source creates, live, capacity.
+std::array<std::uint64_t,10> ecstasyResidentStats{};
+// Posed (skinned) strip copies get new XYZ every frame: draw them from the
+// frame vertex stream instead of churning resident slots (same vertex bytes;
+// Vita posed_stream_off.txt, PC HP2_POSED_STREAM=0 restores resident use).
+int ecstasyPosedStream=[] {
+#if defined(__vita__) || defined(__SWITCH__)
+    return 1;
+#else
+    const char* value=std::getenv("HP2_POSED_STREAM");return value ? std::atoi(value):1;
+#endif
+}();}
 namespace hp2 {extern std::atomic<std::uint32_t> textureOwnerDeaths;}
 // Vita gather_sampler.txt (diagnostic): the render thread stores its gather
 // phase (major<<8 | category<<5 | last step+1) in a word; a high-priority
@@ -3744,6 +3758,13 @@ int ecstasyAsyncMirrorScenery=[] {
 }();
 // views, merged, state/matrix fallbacks, aborts, inline runs, wait us, job us, verify mismatches
 std::uint64_t ecstasyAsyncMirrorStats[12]{}; // [8..11] abort reasons
+// Diagnostic timeline (us after launch, summed): [0] samples, [1] job claimed,
+// [2] view1 zones published, [3] job zones seen, [4] job done, [5] main at Finish.
+std::uint64_t ecstasyMirrorTimeline[9]{}; // [6] particles claimed, [7] particles done, [8] close done
+std::atomic<std::int64_t> ecstasyMirrorLaunchNs{0},ecstasyMirrorZonesNs{0},ecstasyMirrorSeenNs{0};
+static std::int64_t MirrorNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 // Particle walk + quad build for views 1 and 3 prepared on the mirror job's
 // idle second helper slot during view1's scenery; committed at the original
 // position after an exact view-state check (exact; Vita async_particles_off.txt;
@@ -3757,6 +3778,14 @@ int ecstasyAsyncParticles=[] {
 }();
 // prepared sets, committed calls, fallback calls, verify mismatches, failures
 std::uint64_t ecstasyAsyncParticleStats[5]{};
+// The four particle prepares (views 1/3 x Frame/World lists) are separate pool
+// tasks, so both helpers and the main thread at the join share them (each
+// writes only its own prepared set; Vita async_particles_whole.txt: one task).
+int ecstasyAsyncParticleSplit=1;
+// With split particle tasks, view3 joins only the mirror scenery task; the
+// batch stays open through view3's world tail and closes before the particle
+// commit (exact: the commit re-checks the views; Vita async_join_early.txt: 0).
+int ecstasyAsyncLateJoin=1;
 // Diagnostic phase (Vita watchdog): main 1 launched, 2 finishing, 3 closing,
 // 4 merged/done; job +10: 10 waiting for view1 zones, 11 rendering, 12 done.
 std::atomic<int> ecstasyAsyncMirrorPhase{0};
@@ -4903,27 +4932,42 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         SceneryResources* scenery{};const CarCinematicScreen* view{};EcstasyFrame* aux{};
         std::uint32_t mask{};std::int32_t worldFrames{};
         SceneryResources::AsyncCapture capture;
-        std::atomic<int> collectReady{0};
+        std::atomic<int> collectReady{0},mirrorDone{0};
         std::exception_ptr failure;
         std::uint32_t micros{};
+        std::int64_t claimedNs{},doneNs{},particleClaimedNs{};std::atomic<std::int64_t> particleDoneNs{0};
         // Particles (index 1).
         bool particles{};
         const WorldParticleSystem* lists[2]{};const ChopperEffectData* catalogue{};
         AsyncParticleView particleViews[2];
-        std::exception_ptr particleFailure;
+        std::exception_ptr particleFailures[4];
+        bool particleSplit{};
+        bool ParticleFailed() const noexcept {
+            for(const auto& set:particleFailures)if(set)return true;
+            return false;
+        }
         static void Run(void* context,unsigned index) {
             auto& job=*static_cast<AsyncMirrorJob*>(context);
-            if(index==1) {
-                if(!job.particles)return;
-                try {
-                    for(int v=0;v<2;++v)for(int l=0;l<2;++l)
-                        PrepareWorldParticles(*job.lists[l],*job.catalogue,*job.particleViews[v].view,
+            if(index>=1) {
+                if(!job.particles || index>4 || (!job.particleSplit && index!=1))return;
+                if(index==1)job.particleClaimedNs=MirrorNowNs();
+                struct Done {std::atomic<std::int64_t>& at;~Done(){
+                    const auto now=MirrorNowNs();auto seen=at.load();
+                    while(seen<now && !at.compare_exchange_weak(seen,now)) {}
+                }} done{job.particleDoneNs};
+                const int first=job.particleSplit ? static_cast<int>(index)-1:0,last=job.particleSplit ? first+1:4;
+                for(int set=first;set<last;++set) {
+                    const int v=set/2,l=set%2;
+                    try {
+                        PrepareWorldParticles(*job.lists[l],*job.catalogue,job.particleViews[v].screen,
                             asyncParticlePrepared[v][l],true);
-                } catch(...) {job.particleFailure=std::current_exception();}
+                    } catch(...) {job.particleFailures[set]=std::current_exception();}
+                }
                 return;
             }
             if(index!=0)return;
             const auto started=std::chrono::steady_clock::now();
+            job.claimedNs=MirrorNowNs();
             ecstasyAsyncMirrorPhase.fetch_add(10);
 #if !defined(__vita__) && !defined(__SWITCH__)
             // Race testing: start late so the job overlaps view1's tail.
@@ -4932,18 +4976,31 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
 #endif
             try {job.scenery->Render(*job.view,*job.aux,job.mask,job.worldFrames,true,&job.capture);}
             catch(...) {job.failure=std::current_exception();}
+            job.mirrorDone.store(1,std::memory_order_release);
             ecstasyAsyncMirrorPhase.fetch_add(2);
+            job.doneNs=MirrorNowNs();
             job.micros=static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now()-started).count());
         }
     };
     struct AsyncMirror {
         AsyncMirrorJob job;
-        bool launched{},finished{};
+        bool launched{},finished{},mirrorJoined{};
+        // Waits for the mirror scenery task only (running it here if no
+        // helper has claimed it); the particle tasks stay open.
+        void FinishMirror() {
+            if(!launched || finished || mirrorJoined)return;
+            mirrorJoined=true;
+            job.collectReady.store(1,std::memory_order_release);
+            while(!job.mirrorDone.load(std::memory_order_acquire)) {
+                if(collisionHelperClaimExact(0)) {++ecstasyAsyncMirrorStats[4];AsyncMirrorJob::Run(&job,0);}
+            }
+        }
         CarCinematicScreen screen{};CarCinematicViewFrame camera{};
         void Finish() {
             if(!launched || finished)return;
             finished=true;
+            const auto arrived=MirrorNowNs();
             job.collectReady.store(1,std::memory_order_release);
             ecstasyAsyncMirrorPhase.fetch_add(1);
             unsigned index;
@@ -4954,6 +5011,15 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             ecstasyAsyncMirrorPhase.fetch_add(1);
             collisionHelperClose();
             ecstasyAsyncMirrorPhase.fetch_add(1);
+            const auto launch=ecstasyMirrorLaunchNs.load();
+            const auto us=[&](std::int64_t at) {return at>launch ? static_cast<std::uint64_t>((at-launch)/1000):0u;};
+            if(job.claimedNs && job.doneNs) {
+                ++ecstasyMirrorTimeline[0];ecstasyMirrorTimeline[1]+=us(job.claimedNs);
+                ecstasyMirrorTimeline[2]+=us(ecstasyMirrorZonesNs.load());ecstasyMirrorTimeline[3]+=us(ecstasyMirrorSeenNs.load());
+                ecstasyMirrorTimeline[4]+=us(job.doneNs);ecstasyMirrorTimeline[5]+=us(arrived);
+                ecstasyMirrorTimeline[6]+=us(job.particleClaimedNs);ecstasyMirrorTimeline[7]+=us(job.particleDoneNs.load());
+                ecstasyMirrorTimeline[8]+=us(MirrorNowNs());
+            }
         }
         ~AsyncMirror() {if(job.scenery)job.scenery->SetCollectSignal(nullptr);Finish();}
     } asyncMirror;
@@ -4990,9 +5056,11 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
             ++ecstasyAsyncParticleStats[0];
         }
         asyncMirror.launched=true;
+        ecstasyMirrorLaunchNs.store(MirrorNowNs());ecstasyMirrorZonesNs.store(0);ecstasyMirrorSeenNs.store(0);
         ++ecstasyAsyncMirrorStats[0];
         ecstasyAsyncMirrorPhase.store(1);
-        collisionHelperPublish(2,&AsyncMirrorJob::Run,&job);
+        job.particleSplit=job.particles && ecstasyAsyncParticleSplit;
+        collisionHelperPublish(job.particleSplit ? 5:2,&AsyncMirrorJob::Run,&job);
     }
     for(std::size_t i=1;i<10;++i) {
         auto& view=views.screens[i];if(!active(view))continue;
@@ -5001,9 +5069,10 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         // override. Raster/depth projection retains the actual camera range.
         const float clipFar=view.id>=4 && view.id<10 ? 32.0f:0.0f;
         const bool mergeMirror=asyncMirror.launched && i==3;
-        if(asyncMirror.launched && i>=2 && !asyncMirror.finished) {
+        if(asyncMirror.launched && i>=2 && !asyncMirror.finished && !asyncMirror.mirrorJoined) {
             const auto waitStarted=std::chrono::steady_clock::now();
-            asyncMirror.Finish();
+            if(ecstasyAsyncLateJoin && asyncMirror.job.particleSplit)asyncMirror.FinishMirror();
+            else asyncMirror.Finish();
             ecstasyAsyncMirrorStats[5]+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now()-waitStarted).count());
             ecstasyAsyncMirrorStats[6]+=asyncMirror.job.micros;
@@ -5160,17 +5229,23 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
     captureCheckpoint(2);
     // PAL113378/113388: separate FrameEffects and WorldEffects lists share
     // allocation pools, not live particles. Both borrow the retained catalogue.
+    if(asyncMirror.launched && !asyncMirror.finished) {
+        const auto waitStarted=std::chrono::steady_clock::now();
+        asyncMirror.Finish();
+        ecstasyAsyncMirrorStats[5]+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now()-waitStarted).count());
+    }
     if(scene.emitRaceGeometry && scene.effects) {
         auto& catalogue=resources->Effects();
         auto& job=asyncMirror.job;
         const bool prepared=asyncMirror.launched && asyncMirror.finished && job.particles;
-        if(prepared && job.particleFailure)++ecstasyAsyncParticleStats[4];
+        if(prepared && job.ParticleFailed())++ecstasyAsyncParticleStats[4];
         for(std::size_t i=1;i<4;++i)if(active(views.screens[i])) {
             auto& view=views.screens[i];
             ecstasyViewSetCurrent(&views,&view);
             const int slot=i==1 ? 0:i==3 ? 1:-1;
             bool same=false;
-            if(prepared && slot>=0 && !job.particleFailure) {
+            if(prepared && slot>=0 && !job.ParticleFailed()) {
                 // Exact only if nothing the prepare read changed since.
                 const auto& snapshot=job.particleViews[slot];
                 constexpr auto first=offsetof(CarCinematicScreen,pixelScale);
@@ -8401,6 +8476,7 @@ public:
         prepare=false;VkResidentGeometryKey key;
         if(!Capacity() || !NativeResidentGeometryKey(job,key))return nullptr;
         const auto* token=job.Strip();
+        if(ecstasyPosedStream && token && token->nativePoseSource && !token->nativeVertexRevision)return nullptr;
         const auto identity=reinterpret_cast<std::uintptr_t>(token);
         const auto hash=(identity>>4)^(identity>>12)^(identity>>20)^
             (static_cast<std::size_t>(key.words[1])*0x9e3779b9u)^key.words[0]^key.words[2];
@@ -8410,7 +8486,9 @@ public:
         // protected against eviction until this Gather finishes. This skips
         // repeated map/variant traversal for another pass of the same strip,
         // not the mandatory validation at its first use in each frame.
+        ++ecstasyResidentStats[0];
         if(cached && cached->source==token && cached->key==key) {
+            ++ecstasyResidentStats[1];
             job.count=cached->count;Touch(*cached);return cached;
         }
         auto* resolved=FindSource(token);
@@ -8419,6 +8497,7 @@ public:
                 return nullptr;
             }
             resolved=sources_.emplace(token,std::unique_ptr<VkResidentGeometrySource>(new VkResidentGeometrySource)).first->second.get();
+            ++ecstasyResidentStats[7];
             resolved->token=token;FrameSource(token)=resolved;
         }
         auto& source=*resolved;
@@ -8463,21 +8542,22 @@ public:
                     entry.indices[index]=first+topology.indices[index];
 
             }
-            entry.prepared=false;entry.uploaded=false;++nativeGatherResidentEvents[3];
+            entry.prepared=false;entry.uploaded=false;++nativeGatherResidentEvents[3];++ecstasyResidentStats[6];
             entry.serial=++nextSerial_;slotSerial_[victim]=entry.serial;slotPrepared_[victim]=0;
             slotPinnedUntil_[victim]=0;slotPrewarmed_[victim]=0;
             if(job.draw && job.draw->model)
                 EcstasyRecordGeometryFirstUse(job.draw->model->solid,token,job.lineTopology,job.lod,job.glyphBoundsIndex);
             Touch(entry);prepare=true;cached=&entry;return &entry;
         }
-        ++nativeGatherResidentEvents[0];
+        ++nativeGatherResidentEvents[0];++ecstasyResidentStats[2];
+        ecstasyResidentStats[8]=live_;ecstasyResidentStats[9]=entries_.size();
         if(free_.empty()) {
             const auto victim=PickVictim();
             if(victim==NoSlot) {
                 if(!source.variantCount)ForgetSource(token);
                 return nullptr;
             }
-            Evict(victim);++nativeGatherResidentEvents[1];
+            Evict(victim);++nativeGatherResidentEvents[1];++ecstasyResidentStats[3];
         }
         const auto slot=free_.back();free_.pop_back();
         auto owned=std::unique_ptr<VkResidentGeometryEntry>(new VkResidentGeometryEntry);auto& entry=*owned;
@@ -8605,7 +8685,7 @@ private:
         const bool sameRevision=revision!=0 && revision==source.vertexRevision;
         const bool matches=sameRevision || (compared ? validations_[source.queuedValidation].matches:
             source.generation && source.Matches(*token));
-        if(!matches) {source.Capture(*token);++nativeGatherResidentEvents[2];}
+        if(!matches) {source.Capture(*token);++nativeGatherResidentEvents[2];++ecstasyResidentStats[revision ? 5:4];}
         source.vertexRevision=revision;
         // Publication stays at the original first used strip. A
         // completed comparison alone never marks source bytes valid.

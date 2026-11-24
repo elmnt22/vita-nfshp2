@@ -98,7 +98,7 @@ inline float sceneryLeafSquaredXY(const SceneryInstance& instance,const float fo
 #else
 #define HP2_PREFETCH(address) ((void)(address))
 #endif
-namespace hp2 { extern std::atomic<int> ecstasyAsyncMirrorPhase; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelSceneryPrepare; }
+namespace hp2 { extern std::atomic<int> ecstasyAsyncMirrorPhase; extern std::atomic<std::int64_t> ecstasyMirrorZonesNs,ecstasyMirrorSeenNs; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelSceneryPrepare; }
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
 
 SceneryInstance* sceneryFindInstanceByIndex(const Scenery* scenery,int32_t section,int32_t instance)
@@ -786,9 +786,12 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     const auto sectionCapacity=distanceScale>1.0f ?
         std::max<std::size_t>(128,loadedSections_.size()+74u):128u;
     if(async && async->collectReady)while(!async->collectReady->load(std::memory_order_acquire)) {}
-    if(async)hp2::ecstasyAsyncMirrorPhase.fetch_add(1);
+    if(async) {hp2::ecstasyAsyncMirrorPhase.fetch_add(1);hp2::ecstasyMirrorSeenNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
     const auto* selectedZone=CollectSections(view,S.sectionScratch_,sectionCapacity,&S.nativeRenderStatistics_.sourceSections);
-    if(!async && collectSignal_)collectSignal_->store(1,std::memory_order_release);
+    if(!async && collectSignal_) {
+        hp2::ecstasyMirrorZonesNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        collectSignal_->store(1,std::memory_order_release);
+    }
     const auto splitCollected=std::chrono::steady_clock::now();
     const auto sourceSections=S.nativeRenderStatistics_.sourceSections;
     S.nativeRenderStatistics_.extendedSections=S.sectionScratch_.size()-sourceSections;
