@@ -37,7 +37,7 @@ endif()
 
 # kubridge crash handler: weak imports, so the eboot loads without kubridge.skprx.
 enable_language(ASM)
-add_executable(NFSHP2 src/vita/main.cpp src/vita/audio.cpp src/vita/selftest.cpp src/vita/fastclock.cpp src/vita/crash.cpp src/vita/alloccensus.cpp src/vita/kubridge/kubridge_stub.S)
+add_executable(NFSHP2 src/vita/main.cpp src/vita/audio.cpp src/vita/selftest.cpp src/vita/fastclock.cpp src/vita/crash.cpp src/vita/alloccensus.cpp src/vita/pgo.cpp src/vita/kubridge/kubridge_stub.S)
 target_compile_options(NFSHP2 PRIVATE -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard)
 target_link_libraries(NFSHP2 PRIVATE -Wl,--wrap=_ZNSt6chrono3_V212steady_clock3nowEv
     -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=memalign -Wl,--wrap=free -Wl,--wrap=malloc_usable_size
@@ -54,6 +54,39 @@ if(HP2_VITA_LTO)
     set_property(TARGET NFSHP2Core NFSHP2Engine NFSHP2 PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
     target_link_options(NFSHP2 PRIVATE "-flto=${HP2_VITA_LTO_JOBS}" -flto-partition=balanced
         -ffp-contract=off -fno-fast-math -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard)
+endif()
+
+# GCC PGO (HP2_VITA_PGO): "generate" instruments the engine and renderer
+# (no LTO needed; src/vita/pgo.cpp writes ux0:data/NFSHP2/pgo.stream);
+# "use" reads <build>/profile-data: split each pgo.stream with
+#   python tools/vita/gcov_stream_split.py pgo.stream runN
+# (gcov-tool merge-stream breaks on Windows: its stdin is text mode) and merge
+#   arm-vita-eabi-gcov-tool merge run1/profile-data run2/profile-data -o profile-data
+# Compiler-only: the same source semantics (-fno-fast-math, no fp contraction).
+set(HP2_VITA_PGO "off" CACHE STRING "Vita GCC PGO mode: off, generate, or use")
+set_property(CACHE HP2_VITA_PGO PROPERTY STRINGS off generate use)
+if(NOT HP2_VITA_PGO STREQUAL "off")
+    file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}" hp2_vita_profile_prefix)
+    if(HP2_VITA_PGO STREQUAL "generate")
+        set(hp2_vita_profile_flags -fprofile-generate=profile-data -fno-profile-values
+            -fprofile-update=single -fprofile-info-section=hp2_gcov_info)
+        target_link_options(NFSHP2 PRIVATE ${hp2_vita_profile_flags} "LINKER:-z,nostart-stop-gc")
+        set_property(SOURCE src/vita/pgo.cpp APPEND PROPERTY COMPILE_DEFINITIONS HP2_PGO_GENERATE=1)
+    else()
+        set(hp2_vita_profile_flags -fprofile-use=profile-data -fno-profile-values -fprofile-correction
+            -Wno-missing-profile -Wno-coverage-mismatch -Wno-error)
+        # GCC 15.2 lto1 segfaults (IPA modref) on profile-use LTO objects, with
+        # or without -fprofile-partial-training / -fno-ipa-modref, so the
+        # profiled libraries compile without LTO (still faster than LTO alone).
+        list(APPEND hp2_vita_profile_flags -fprofile-partial-training -fno-lto)
+    endif()
+    list(APPEND hp2_vita_profile_flags "-fprofile-prefix-path=${hp2_vita_profile_prefix}")
+    foreach(hp2_target IN ITEMS NFSHP2Core NFSHP2Engine)
+        target_compile_options(${hp2_target} PRIVATE ${hp2_vita_profile_flags})
+    endforeach()
+    if(HP2_VITA_PGO STREQUAL "use")
+        target_link_options(NFSHP2 PRIVATE -fprofile-use=profile-data)
+    endif()
 endif()
 
 vita_create_self(eboot.bin NFSHP2 UNSAFE)
