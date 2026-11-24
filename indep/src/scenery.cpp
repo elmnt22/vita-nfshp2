@@ -99,6 +99,7 @@ inline float sceneryLeafSquaredXY(const SceneryInstance& instance,const float fo
 #define HP2_PREFETCH(address) ((void)(address))
 #endif
 namespace hp2 { extern std::atomic<int> ecstasyAsyncMirrorPhase; extern std::atomic<std::int64_t> ecstasyMirrorZonesNs,ecstasyMirrorSeenNs; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelSceneryPrepare; }
+namespace hp2 { extern std::array<std::uint64_t,8> ecstasySceneryRejectReasons; }
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
 
 SceneryInstance* sceneryFindInstanceByIndex(const Scenery* scenery,int32_t section,int32_t instance)
@@ -1587,6 +1588,12 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 split[0]/300,split[1]/300,split[2]/300,split[3]/300,split[4]/300,counts[0]/300,counts[1]/300,counts[2]/300,counts[3]/300,
                 counts[4]/300,counts[5]/300,counts[6]/300,counts[7]/300,counts[8]/300);
             platform::RecordSessionEvent("render.scenery_split",text);
+            {
+                auto& r=hp2::ecstasySceneryRejectReasons;
+                std::snprintf(text,sizeof(text),"per_render model_state=%.1f no_texture=%.1f depth_sorted=%.1f flag100=%.1f flag40=%.1f not_resident=%.1f",
+                    r[1]/300.0,r[2]/300.0,r[3]/300.0,r[4]/300.0,r[5]/300.0,r[6]/300.0);
+                platform::RecordSessionEvent("render.scenery_reject",text);r={};
+            }
             std::snprintf(text,sizeof(text),"collect_ms=%.3f roots_ms=%.3f traverse_ms=%.3f dedupe_ms=%.3f parallel_emit=%.2f candidates=%.2f tested=%.1f clip_pass=%.1f facing_pass=%.1f pixel_pass=%.1f nodes=%.1f node_walk_ms=%.3f leaf_ms=%.3f leaf_fast=%d leaf_checks=%llu leaf_mismatches=%llu",
                 stages[0]/300,stages[1]/300,stages[2]/300,stages[3]/300,parallelViews/300,candidateViews/300,
                 sceneryWalkCounters[0]/300.0,sceneryWalkCounters[1]/300.0,sceneryWalkCounters[2]/300.0,

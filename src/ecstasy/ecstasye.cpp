@@ -3761,6 +3761,7 @@ int ecstasyParallelSceneryEmit=[] {
 std::array<double,8> ecstasyWorldSplitMs{},ecstasyDiscardWorldSplitMs{};
 // Diagnostic: discarded-capture setup split (environment, matrices, begin, models).
 std::array<double,4> ecstasyDiscardSetupSplitMs{};
+std::array<std::uint64_t,8> ecstasySceneryRejectReasons{};
 // Discarded catch-up captures append no UI polygon commands (Vita
 // discard_sink_off.txt / PC HP2_DISCARD_SINK=0).
 int ecstasyDiscardSink=[] {
@@ -3892,7 +3893,7 @@ bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edi
     const auto* solid=model.solid;
     if(!solid || !solid->geometry || model.replacement || solid->rigidAnimation ||
         solid->vertexAnimation || (solid->renderFlags&0x1000u) ||
-        dashboardProjection_ || !zWriteEnabled_)return false;
+        dashboardProjection_ || !zWriteEnabled_) {++ecstasySceneryRejectReasons[1];return false;}
     if(preparePass && ecstasyPrepareCache) {
         if(batch.preparedPass==preparePass && batch.preparedLit==lit &&
             batch.preparedResources==model.resources && batch.preparedGeometry==solid->geometry) {
@@ -3905,10 +3906,13 @@ bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edi
             }
 #endif
             if(batch.preparedOk)reusedOpaqueSceneryStrips_+=batch.strips.size();
+            else ++ecstasySceneryRejectReasons[batch.eligible ? 6:batch.rejectReason&7u];
             return batch.preparedOk;
         }
         ++ecstasyPrepareCacheStats[1];
+        const auto before=ecstasySceneryRejectReasons;
         const bool ok=PrepareOpaqueSceneryBatch(batch,model,lit,0);
+        if(!ok && before==ecstasySceneryRejectReasons)++ecstasySceneryRejectReasons[batch.eligible ? 6:batch.rejectReason&7u];
         batch.preparedPass=preparePass;batch.preparedLit=lit;batch.preparedResources=model.resources;
         batch.preparedGeometry=solid->geometry;batch.preparedOk=ok;
         return ok;
@@ -3933,6 +3937,7 @@ bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edi
                 textureInfoForDescriptor(batch.bindings[index]):nullptr;
             if(!texture || texture->requiresDepthSort || (strip.flags&0x140u)) {
                 batch.eligible=false;
+                batch.rejectReason=!texture ? 2:texture->requiresDepthSort ? 3:(strip.flags&0x100u) ? 4:5;
                 break;
             }
             batch.strips.push_back({&strip,texture,
@@ -3945,7 +3950,11 @@ bool EcstasyFrame::PrepareOpaqueSceneryBatch(OpaqueSceneryBatch& batch,const Edi
     }
     // Same predicate as over every strip: each strip texture is one of these.
     if(!batch.eligible || std::any_of(batch.uniqueTextures.begin(),batch.uniqueTextures.end(),
-        [](const TextureInfo* texture) {return !texture->pixels.Data();}))return false;
+        [](const TextureInfo* texture) {return !texture->pixels.Data();})) {
+        // Census (reasons 2-5 eligible=false; 6 = texture pixels not resident).
+        if(!preparePass || !ecstasyPrepareCache)++ecstasySceneryRejectReasons[batch.eligible ? 6:batch.rejectReason&7u];
+        return false;
+    }
     if(ecstasySceneryRuns) {
         const auto* root=model.resources && model.resources->catalogueRoot ?
             model.resources->catalogueRoot:model.resources;

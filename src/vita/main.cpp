@@ -1161,6 +1161,11 @@ int main(int, char**)
             hp2::ecstasyPrewarmVictimIdle = 0;
             log.Line("vita.diag", "geometry prewarm may evict any idle entry");
         }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/music_main.txt").c_str(), &probe) >= 0) {
+            extern int vitaAudioMusicOnWorker;
+            vitaAudioMusicOnWorker = 0;
+            log.Line("vita.diag", "music refill on the game thread");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/victim_scan_full.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyVictimPinScan = 0;
             log.Line("vita.diag", "resident victim scan unbounded");

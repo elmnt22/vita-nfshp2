@@ -12,6 +12,8 @@
 #include <mutex>
 #include <optional>
 extern int vitaWatchedThreads[5];
+// Music refill on the audio worker (Vita music_main.txt: game thread, old path).
+int vitaAudioMusicOnWorker=1;
 #include <utility>
 #include <pthread.h>
 
@@ -263,6 +265,15 @@ public:
         jobs_.clear();
     }
     bool Running() const noexcept {return started_;}
+    // Called on the worker after every job, on a mixer Kick() and every 50 ms when idle
+    // (music refill without any game-thread lock or post). Set before Start.
+    void SetService(std::function<void()> service)
+    {
+        {std::lock_guard<std::mutex> lock(mutex_);service_=std::move(service);}
+        hasService_.store(true,std::memory_order_release);
+        if(started_)sceKernelSignalSema(sema_,1);
+    }
+    void Kick() {if(started_)sceKernelSignalSema(sema_,1);}
     // Runs job inline when the worker is unavailable.
     void Post(std::function<void()> job)
     {
@@ -278,15 +289,18 @@ private:
         sceKernelChangeThreadCpuAffinityMask(0,SCE_KERNEL_CPU_MASK_USER_2);
         sceKernelChangeThreadPriority(0,180);
         for(;;) {
-            sceKernelWaitSema(sema_,1,nullptr);
+            SceUInt timeout=50000; // mixer Kick()s on a low music voice; this is a fallback
+            sceKernelWaitSema(sema_,1,hasService_.load(std::memory_order_acquire) ? &timeout:nullptr);
             std::function<void()> job;
+            const std::function<void()>* service=nullptr;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if(stopping_)return;
-                if(jobs_.empty())continue;
-                job=std::move(jobs_.front());jobs_.pop_front();
+                if(!jobs_.empty()) {job=std::move(jobs_.front());jobs_.pop_front();}
+                if(service_)service=&service_; // set once, never changed after
             }
-            job();
+            if(job)job();
+            if(service)(*service)();
         }
     }
     pthread_t thread_{};
@@ -294,6 +308,8 @@ private:
     bool started_{},stopping_{};
     std::mutex mutex_;
     std::deque<std::function<void()>> jobs_;
+    std::function<void()> service_;
+    std::atomic<bool> hasService_{false};
 };
 
 struct MusicRead {
@@ -449,6 +465,52 @@ struct AudioDevice::State {
         threadStarted=true;
     }
 
+    // Worker-side music refill (vitaAudioMusicOnWorker): the same
+    // completed-read append and next-read issue the game thread did in Pump,
+    // with the decode run inline here. Only the worker touches pendingRead.
+    void ServiceMusic()
+    {
+        std::array<std::shared_ptr<MusicRead>,48> reads{};
+        bool any=false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            for(std::size_t index=0;index<voices.size();++index) {
+                auto& voice=voices[index];
+                if(voice.pendingRead && voice.pendingRead->result.done.load(std::memory_order_acquire)) {
+                    auto read=std::move(voice.pendingRead);
+                    if(read->stream==voice.music) {
+                        auto chunk=read->result.Take();
+                        voice.musicFinished=chunk.last;
+                        voice.Append(std::move(chunk.pcm));
+                    }
+                }
+                if(!voice.NeedsMusic())continue;
+                auto read=std::make_shared<MusicRead>();
+                read->stream=voice.music;
+                voice.pendingRead=read;reads[index]=read;any=true;
+            }
+        }
+        if(!any)return;
+        for(auto& read:reads) {
+            if(!read)continue;
+            try {read->result.value.emplace(read->stream->Read());}
+            catch(...) {read->result.error=std::current_exception();}
+            read->result.done.store(true,std::memory_order_release);
+        }
+        // Append now (not one period later) so a refill never waits 4 ms.
+        std::lock_guard<std::mutex> lock(mutex);
+        for(std::size_t index=0;index<voices.size();++index) {
+            auto& voice=voices[index];
+            if(!reads[index] || voice.pendingRead!=reads[index])continue;
+            auto read=std::move(voice.pendingRead);
+            if(read->stream==voice.music) {
+                auto chunk=read->result.Take();
+                voice.musicFinished=chunk.last;
+                voice.Append(std::move(chunk.pcm));
+            }
+        }
+    }
+
     void StopOutput() noexcept
     {
         worker.Stop();
@@ -492,8 +554,10 @@ struct AudioDevice::State {
                     if(live[core])wetBuffers[core].fill(0.0f);
                 }
                 std::uint32_t active=0,sending=0;
+                bool musicLow=false;
                 for(auto& voice:voices) {
                     std::lock_guard<std::mutex> lock(mutex);
+                    if(musicServiceSet && voice.NeedsMusic())musicLow=true;
                     if(voice.playing && !voice.paused && !voice.chunks.empty()) {
                         ++active;
                         float* wet=nullptr;
@@ -503,6 +567,9 @@ struct AudioDevice::State {
                         voice.Mix(mixBuffer,wet);
                     }
                 }
+                // Event-driven music refill: wake the worker only when a
+                // music voice is low (the refill's own predicate).
+                if(musicLow)worker.Kick();
                 std::uint32_t processed=0;
                 for(std::size_t core=0;core<2;++core) {
                     auto& bus=reverbs[core];
@@ -611,6 +678,7 @@ struct AudioDevice::State {
     std::shared_ptr<AsyncResult<JukeboxStart>> jukeboxOpen;
     uint64_t jukeboxOpenSequence{};
     AudioWorker worker;
+    std::atomic<bool> musicServiceSet{false};
     void PreDecode(const WorldAudioRequest&) {}
     // Stream/chain ranges (speech, scanner) read the memory card and decode
     // ADPCM on the worker; Apply returns Blocked until this request's PCM is
@@ -985,7 +1053,12 @@ WorldAudioResult AudioDevice::Pump()
         // Music decode runs outside the voice lock (the output thread keeps
         // mixing); only the chunk append is locked. Voices are reassigned
         // only by commands on this thread, so the pointer stays valid.
-        {
+        if(vitaAudioMusicOnWorker && !state_->musicServiceSet) {
+            state_->musicServiceSet=true;
+            state_->worker.SetService([state=state_.get()]() {state->ServiceMusic();});
+            state_->worker.Start();
+        }
+        if(!state_->musicServiceSet) {
             std::lock_guard<std::mutex> lock(state_->mutex);
             for(auto& voice:state_->voices) {
                 if(voice.pendingRead && voice.pendingRead->result.done.load(std::memory_order_acquire)) {

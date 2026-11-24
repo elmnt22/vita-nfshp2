@@ -961,6 +961,9 @@ struct OpaqueSceneryBatch {
     const EditorMarkerSolidGeometry* geometry{};
     std::uint64_t textureRevision{};
     bool eligible{};
+    // Census only: why the batch is ineligible (0 eligible, 2 no texture,
+    // 3 depth-sorted texture, 4 strip flag 0x100, 5 strip flag 0x40).
+    std::uint8_t rejectReason{};
     std::vector<const EditorMarkerTexture*> bindings;
     std::vector<Strip> strips;
     // Strip runs derived from strips for one (lit, in-game, fallback) state:
