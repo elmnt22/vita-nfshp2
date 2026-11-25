@@ -1166,6 +1166,11 @@ int main(int, char**)
             vitaAudioMusicOnWorker = 0;
             log.Line("vita.diag", "music refill on the game thread");
         }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/worker_boost_off.txt").c_str(), &probe) >= 0) {
+            extern int vitaAudioWorkerBoostLocks;
+            vitaAudioWorkerBoostLocks = 0;
+            log.Line("vita.diag", "audio worker locks at its own priority");
+        }
         if (sceIoGetstat((std::string(kDataDirectory) + "/victim_scan_full.txt").c_str(), &probe) >= 0) {
             hp2::ecstasyVictimPinScan = 0;
             log.Line("vita.diag", "resident victim scan unbounded");

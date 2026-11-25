@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 extern int vitaWatchedThreads[5];
+int vitaAudioWorkerBoostLocks=1; // worker_boost_off.txt clears
 // Music refill on the audio worker (Vita music_main.txt: game thread, old path).
 int vitaAudioMusicOnWorker=1;
 #include <utility>
@@ -312,6 +313,23 @@ private:
     std::atomic<bool> hasService_{false};
 };
 
+// The worker runs at 180 on core 2, below GL and the helpers. With no
+// priority inheritance, a preempted worker holding a lock the game thread
+// needs stalled it 5-15 ms (several times per bench window). Locks the
+// worker shares with the game or the mixer are taken at mixer priority.
+struct WorkerLock {
+    std::unique_lock<std::mutex> lock;
+    int restore=-1;
+    explicit WorkerLock(std::mutex& mutex)
+    {
+        if(::vitaAudioWorkerBoostLocks && ::vitaWatchedThreads[4]==sceKernelGetThreadId()) {
+            restore=180;sceKernelChangeThreadPriority(0,96);
+        }
+        lock=std::unique_lock<std::mutex>(mutex);
+    }
+    ~WorkerLock() {lock.unlock();if(restore>=0)sceKernelChangeThreadPriority(0,restore);}
+};
+
 struct MusicRead {
     std::shared_ptr<NativeJukeboxStream> stream;
     AsyncResult<NativeJukeboxStream::Chunk> result;
@@ -473,7 +491,7 @@ struct AudioDevice::State {
         std::array<std::shared_ptr<MusicRead>,48> reads{};
         bool any=false;
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            WorkerLock lock(mutex);
             for(std::size_t index=0;index<voices.size();++index) {
                 auto& voice=voices[index];
                 if(voice.pendingRead && voice.pendingRead->result.done.load(std::memory_order_acquire)) {
@@ -498,7 +516,7 @@ struct AudioDevice::State {
             read->result.done.store(true,std::memory_order_release);
         }
         // Append now (not one period later) so a refill never waits 4 ms.
-        std::lock_guard<std::mutex> lock(mutex);
+        WorkerLock lock(mutex);
         for(std::size_t index=0;index<voices.size();++index) {
             auto& voice=voices[index];
             if(!reads[index] || voice.pendingRead!=reads[index])continue;
@@ -984,7 +1002,7 @@ struct AudioDevice::State {
             }
             const auto first=warm->next;
             auto decoded=cache->DecodeResidentRange(first,slice);
-            {std::lock_guard<std::mutex> lock(warm->mutex);warm->ready.emplace_back(first,std::move(decoded));}
+            {WorkerLock lock(warm->mutex);warm->ready.emplace_back(first,std::move(decoded));}
             warm->next=first+slice;
             if(warm->next<warm->total && !warm->cancel.load(std::memory_order_acquire))PostWarmSlice(cache,warm);
             else warm->busy.store(false,std::memory_order_release);
