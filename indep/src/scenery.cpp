@@ -801,7 +801,10 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     // outside this view. Classify that same root once before deciding whether
     // useful visible work warrants waking the pool; the tree walk reuses the
     // exact result. No PVS list, admission, LOD or near-state rule changes.
-    std::vector<std::int32_t> rootClips(S.sectionScratch_.size(),0);
+    // Per-thread scratch reused across views and frames (the async mirror
+    // renders on a helper); contents are rebuilt exactly as fresh locals.
+    static thread_local std::vector<std::int32_t> rootClipsSlot;
+    auto& rootClips=rootClipsSlot;rootClips.assign(S.sectionScratch_.size(),0);
     for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal) {
         const auto number=S.sectionScratch_[ordinal];
         const auto& section=*native_.sections[number];
@@ -1109,8 +1112,12 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             std::vector<std::size_t> ordinals;
             std::vector<std::uint8_t> nearState;
         };
-        std::vector<SectionGroup> groups;
-        groups.reserve(S.sectionScratch_.size());
+        // Reused group records keep their vectors' capacity; groupCount
+        // are live, each reset to exactly the fresh {storage,{},{}} state.
+        static thread_local std::vector<SectionGroup> groupPoolSlot;
+        auto& groupPool=groupPoolSlot; // a reference: the job lambda runs on workers
+        std::size_t groupCount=0;
+        const auto groupsEnd=[&] {return groupPool.begin()+static_cast<std::ptrdiff_t>(groupCount);};
         for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal) {
             const auto number=S.sectionScratch_[ordinal];
             const auto& section=*native_.sections[number];
@@ -1121,18 +1128,20 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 chunks[ordinal].visited=1;continue;
             }
             auto* storage=sectionStorageByNumber_[number];
-            auto group=std::find_if(groups.begin(),groups.end(),
+            auto group=std::find_if(groupPool.begin(),groupsEnd(),
                 [storage](const SectionGroup& item){return item.storage==storage;});
-            if(group==groups.end()) {
-                groups.push_back({storage,{},{}});group=std::prev(groups.end());
-                if(viewId==1)group->nearState=storage->nearDetailState;
+            if(group==groupsEnd()) {
+                if(groupCount==groupPool.size())groupPool.emplace_back();
+                group=groupPool.begin()+static_cast<std::ptrdiff_t>(groupCount++);
+                group->storage=storage;group->ordinals.clear();group->nearState.clear();
+                if(viewId==1)group->nearState.assign(storage->nearDetailState.begin(),storage->nearDetailState.end());
             }
             // Repeated PVS sections stay in one job and see the same evolving
             // local hysteresis. Each occurrence keeps its source output slot.
             group->ordinals.push_back(ordinal);
         }
-        RunNativeSceneJobs(groups.size(),[&](std::size_t groupIndex) {
-            auto& group=groups[groupIndex];
+        RunNativeSceneJobs(groupCount,[&](std::size_t groupIndex) {
+            auto& group=groupPool[groupIndex];
             for(const auto ordinal:group.ordinals) {
                 auto& chunk=chunks[ordinal];
                 prepareSection(*group.storage,ordinal,rootClips[ordinal],chunk.draws,chunk.nodes,chunk.leaves,
@@ -1141,8 +1150,10 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         },2);
         // Every reader drains before this ordered owner commit. Each real
         // section has one hysteresis writer even for repeated PVS entries.
-        if(viewId==1)for(auto& group:groups)
+        if(viewId==1)for(std::size_t groupIndex=0;groupIndex<groupCount;++groupIndex) {
+            const auto& group=groupPool[groupIndex];
             std::copy(group.nearState.begin(),group.nearState.end(),group.storage->nearDetailState.begin());
+        }
         for(std::size_t ordinal=0;ordinal<S.sectionScratch_.size();++ordinal) {
             auto& chunk=chunks[ordinal];
             if(journalSample) {
@@ -1208,7 +1219,8 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     auto* resources=models_->resourceRegistry;
     std::optional<SceneLightContext> worldContext;
     std::uint64_t worldContextKey=0; // frame light key of *worldContext
-    std::vector<std::size_t> lightJobs;
+    static thread_local std::vector<std::size_t> lightJobsSlot;
+    auto& lightJobs=lightJobsSlot;lightJobs.clear();
     // Lighting is per-draw pure owner input (no shared writes), so the pool
     // takes it once there is enough work to amortize the wakeup.
     if(!async && resources && draws.size()>=32 && NativeSceneEffectiveHardwareConcurrency()>1) {

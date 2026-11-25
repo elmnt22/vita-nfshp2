@@ -21,6 +21,8 @@
 #include <cstring>
 #include <cstdint>
 #include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
 #include "alloccensus.hpp"
 
 extern "C" {
@@ -32,6 +34,7 @@ void* __real_memalign(size_t,size_t);
 void __real_free(void*);
 }
 
+extern int vitaWatchedThreads[5];
 namespace {
 constexpr std::size_t MinBytes=64u*1024u;
 constexpr int Depth=8;
@@ -40,6 +43,36 @@ struct Entry {void* p;std::uint32_t size,epoch;std::uintptr_t stack[Depth];};
 Entry table[Slots];
 std::atomic_flag spin=ATOMIC_FLAG_INIT;
 std::atomic<bool> enabled{false};
+// alloc_prof.txt: heap call counts and time per thread class (main, render,
+// GL, other) plus sampled call stacks (every 8th call on main/render/GL).
+bool profEnabled=false;
+constexpr int ProfClasses=4,ProfDepth=6,ProfStackSlots=4096;
+std::atomic<std::uint32_t> profCalls[ProfClasses][2]{},profMicros[ProfClasses]{};
+std::uint32_t profTick[ProfClasses]{};
+struct ProfStack {std::uint32_t hash,count;std::uintptr_t ip[ProfDepth];};
+ProfStack profStacks[3][ProfStackSlots];
+void ProfSample(int cls,std::uintptr_t caller);
+// No thread_local here: emulated TLS allocates on first use (recursion).
+volatile std::uintptr_t profCaller[ProfClasses]{}; // volatile: GCC assumes malloc reads no user globals; // set by operator new so malloc credits its caller
+int ProfClass()
+{
+    const int id=sceKernelGetThreadId();
+    return id==::vitaWatchedThreads[0] ? 0:id==::vitaWatchedThreads[1] ? 1:id==::vitaWatchedThreads[2] ? 2:3;
+}
+struct ProfScope {
+    int cls=-1,kind;std::uint32_t start=0;
+    explicit ProfScope(int k,std::uintptr_t caller):kind(k) {
+        if(!profEnabled)return;
+        cls=ProfClass();
+        if(cls<3 && ((++profTick[cls])&7u)==0)ProfSample(cls,profCaller[cls] ? profCaller[cls]:caller);
+        start=sceKernelGetProcessTimeLow();
+    }
+    ~ProfScope() {
+        if(cls<0)return;
+        profMicros[cls].fetch_add(sceKernelGetProcessTimeLow()-start,std::memory_order_relaxed);
+        profCalls[cls][kind].fetch_add(1,std::memory_order_relaxed);
+    }
+};
 std::atomic<std::uint32_t> epoch{0};
 std::uint32_t dropped{};
 thread_local bool inside=false;
@@ -133,6 +166,17 @@ _Unwind_Reason_Code Visit(_Unwind_Context* context,void* arg)
     return walk.n>=Depth ? _URC_END_OF_STACK:_URC_NO_REASON;
 }
 
+void ProfSample(int cls,std::uintptr_t caller)
+{
+    std::uintptr_t ip[ProfDepth]{};ip[0]=caller;
+    const std::uint32_t hash=(static_cast<std::uint32_t>(caller)*2654435761u)|1u;
+    // One writer thread per table (main/render/GL); the logger reads racily.
+    auto* table=profStacks[cls];
+    for(std::uint32_t at=hash&(ProfStackSlots-1),n=0;n<ProfStackSlots;at=(at+1)&(ProfStackSlots-1),++n) {
+        if(table[at].hash==hash && table[at].ip[0]==caller) {++table[at].count;break;}
+        if(!table[at].hash) {table[at].hash=hash;table[at].count=1;std::memcpy(table[at].ip,ip,sizeof(ip));break;}
+    }
+}
 void Track(void* p,std::size_t size)
 {
     if(!p || size<MinBytes || !enabled.load(std::memory_order_relaxed) || inside)return;
@@ -171,6 +215,7 @@ void Untrack(void* p)
 extern "C" {
 void* __wrap_malloc(size_t n)
 {
+    ProfScope prof(0,reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)));
     void* p=n>=BigBytes ? BigAlloc(n):nullptr;
     if(!p)p=__real_malloc(n);
     if(!p && n>=64u*1024u && (p=BigAlloc(n)))bigFallbacks.fetch_add(1,std::memory_order_relaxed);
@@ -178,6 +223,7 @@ void* __wrap_malloc(size_t n)
 }
 void* __wrap_calloc(size_t c,size_t n)
 {
+    ProfScope prof(0,reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)));
     if(n && c>SIZE_MAX/n)return nullptr;
     const size_t bytes=c*n;
     if(bytes>=BigBytes) {
@@ -197,6 +243,7 @@ void* __wrap_memalign(size_t a,size_t n)
 void __wrap_free(void* p)
 {
     if(!p)return;
+    ProfScope prof(1,reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)));
     Untrack(p);
     if(!BigFree(p))__real_free(p);
 }
@@ -225,6 +272,35 @@ void* __wrap_realloc(void* old,size_t n)
 }
 
 namespace vita_census {
+void EnableProfile() {profEnabled=true;}
+void ProfileLine(char* out,std::size_t size)
+{
+    static const char* const names[ProfClasses]={"main","render","gl","other"};
+    int at=0;
+    for(int c=0;c<ProfClasses;++c) {
+        const auto m=profCalls[c][0].exchange(0),f=profCalls[c][1].exchange(0),us=profMicros[c].exchange(0);
+        at+=std::snprintf(out+at,size-at,"%s_allocs=%u %s_frees=%u %s_ms=%.1f ",names[c],m,names[c],f,names[c],us/1000.0);
+        if(at>=static_cast<int>(size))break;
+    }
+}
+void ProfileStacks(void(*line)(const char*))
+{
+    static const char* const names[3]={"main","render","gl"};
+    static ProfStack copy[ProfStackSlots];
+    for(int c=0;c<3;++c) {
+        std::memcpy(copy,profStacks[c],sizeof(copy));
+        std::memset(profStacks[c],0,sizeof(copy)); // a racing writer only loses one sample
+        for(int rank=0;rank<40;++rank) {
+            int best=-1;
+            for(int i=0;i<ProfStackSlots;++i)if(copy[i].count && (best<0 || copy[i].count>copy[best].count))best=i;
+            if(best<0)break;
+            char text[200];
+            std::snprintf(text,sizeof(text),"alloc_caller %s n=%u anchor=%08x ip=%08x",names[c],copy[best].count*8,
+                static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(&ProfileStacks)),(unsigned)copy[best].ip[0]);
+            line(text);copy[best].count=0;
+        }
+    }
+}
 void Enable() {enabled.store(true);}
 bool Enabled() {return enabled.load();}
 void NextEpoch() {epoch.fetch_add(1);}
@@ -284,3 +360,26 @@ void Stats(char* out,std::size_t size)
         info.size_user/1024);
 }
 }
+
+// alloc_prof.txt: credit operator new/delete calls to their caller.
+#include <new>
+void* operator new(std::size_t n)
+{
+    const int cls=profEnabled ? ProfClass():3;
+    if(cls<3)profCaller[cls]=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+    void* p=std::malloc(n ? n:1);
+    if(cls<3)profCaller[cls]=0;
+    if(!p)throw std::bad_alloc();
+    return p;
+}
+void* operator new[](std::size_t n) {return operator new(n);}
+void operator delete(void* p) noexcept
+{
+    const int cls=profEnabled ? ProfClass():3;
+    if(cls<3)profCaller[cls]=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+    std::free(p);
+    if(cls<3)profCaller[cls]=0;
+}
+void operator delete[](void* p) noexcept {operator delete(p);}
+void operator delete(void* p,std::size_t) noexcept {operator delete(p);}
+void operator delete[](void* p,std::size_t) noexcept {operator delete(p);}

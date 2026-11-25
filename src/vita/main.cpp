@@ -84,6 +84,7 @@ namespace {
 // thread_cpu.txt diagnostic: CPU share of the main, render, GL and helper
 // threads (kernel runClocks deltas) every 5 s (vita.thread_cpu).
 void IdleLogLine(const char* text);
+bool g_allocProfile = false;
 void StartThreadCpuProbe()
 {
     const SceUID logger = sceKernelCreateThread("hp2_cpu_log", [](SceSize, void*) -> int {
@@ -107,6 +108,7 @@ void StartThreadCpuProbe()
                 if (at >= static_cast<int>(sizeof(text))) break;
             }
             IdleLogLine(text);
+            if (g_allocProfile) {char prof[320]; vita_census::ProfileLine(prof, sizeof(prof)); IdleLogLine(prof); vita_census::ProfileStacks(IdleLogLine);}
         }
         return 0;
     }, 64, 0x2000, 0, SCE_KERNEL_CPU_MASK_USER_2, nullptr);
@@ -717,6 +719,10 @@ int main(int, char**)
         if (sceIoGetstat((std::string(kDataDirectory) + "/alloc_census.txt").c_str(), &census) >= 0) {
             vita_census::Enable();
             log.Line("vita.diag", "alloc census on");
+        }
+        if (sceIoGetstat((std::string(kDataDirectory) + "/alloc_prof.txt").c_str(), &census) >= 0) {
+            vita_census::EnableProfile(); g_allocProfile = true;
+            log.Line("vita.diag", "heap call profile on (logged with thread_cpu.txt)");
         }
     }
     hp2::platform::BindHeapCheckpointHook([](const char* tag) noexcept {

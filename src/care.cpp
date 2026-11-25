@@ -1114,7 +1114,9 @@ std::size_t renderCarSunShadow(CarAppearance& render,Car* car,const CarCinematic
         frame.RenderWorldStrip(fan,3,*texture,eMathIdentityMatrix,view,hp2::EcstasyCarShadow::Sun);++submitted;
     }
     const auto third=count/3;
-    std::vector<hp2::frontend::FlailerPolyVertex> strip;strip.reserve((third+3)*2);
+    // Per-thread strip reused across cars/views (async mirror captures on a helper).
+    static thread_local std::vector<hp2::frontend::FlailerPolyVertex> sunStripSlot;
+    auto& strip=sunStripSlot;strip.reserve((third+3)*2);
     for(std::size_t group=0;group<3;++group) {
         const auto begin=group*third,end=group==2 ? count:begin+third;
         strip.clear();
@@ -1211,7 +1213,8 @@ std::size_t renderCarRoadShadow(CarAppearance& render,Car* car,const CarCinemati
     const auto alphaByte=std::min(static_cast<std::uint32_t>(convertFloatToInt32(alpha)),255u);
     const auto color=0x00808080u|(alphaByte<<24);
     std::size_t submitted=0;
-    std::vector<hp2::frontend::FlailerPolyVertex> strip;strip.reserve(grid*2);
+    static thread_local std::vector<hp2::frontend::FlailerPolyVertex> roadStripSlot;
+    auto& strip=roadStripSlot;strip.reserve(grid*2);
     for(std::size_t row=0;row+1<grid;++row) {
         if(invalidRows[row]+invalidRows[row+1]>=grid)continue;
         strip.clear();

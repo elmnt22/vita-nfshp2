@@ -381,6 +381,8 @@ struct EcstasyVulkanDevice::Storage {
     std::unordered_map<const EditorMarkerSolidGeometry::Strip*,VkModelRunRecord> sceneryRunRecords;
     std::vector<VkSceneryFirstRecord> sceneryFirstRecords;
     std::vector<const EditorMarkerSolidGeometry::Strip*> modelRunScratchStrips;
+    std::vector<const EditorMarkerSolidGeometry::Strip*> sceneryRunScratchStrips;
+    std::vector<VkResidentGeometryEntry*> sceneryRunScratchEntries;
     std::vector<VkResidentGeometryEntry*> modelRunScratchEntries,modelRunScratchReplay;
     VkResidentIndexCache residentIndexCache;
     VkSceneryPacketCache sceneryPackets;

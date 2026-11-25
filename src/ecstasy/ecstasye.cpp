@@ -8254,7 +8254,7 @@ class VkNativeFrameShading {
     };
 public:
     void Clear() {
-        materials_.clear();lastMaterial_=nullptr;lastMaterialIndex_=0;recordCount_=0;lastIndex_=0;
+        std::fill(materials_.begin(),materials_.end(),MaterialSlot{});materialCount_=0;lastMaterial_=nullptr;lastMaterialIndex_=0;recordCount_=0;lastIndex_=0;
         std::fill(records_.begin(),records_.end(),RecordSlot{});
         for(auto& input:inputs_)input.valid=false;
         lastInput_=inputs_.size();
@@ -8373,8 +8373,7 @@ private:
         // Consecutive lit strips usually share one material (exact: the map
         // value for a key never changes until Clear resets both).
         if(&material==lastMaterial_)return lastMaterialIndex_;
-        const auto found=materials_.find(&material);
-        if(found!=materials_.end()) {lastMaterial_=&material;lastMaterialIndex_=found->second;return found->second;}
+        if(const auto* found=FindMaterial(&material)) {lastMaterial_=&material;lastMaterialIndex_=found->index;return found->index;}
         constexpr std::size_t tableVectors=(EditorMarkerLightMaterial::kNativeResponseSamples+3)/4;
         constexpr std::size_t materialVectors=5+2*tableVectors;
         static_assert(EditorMarkerLightMaterial::kNativeResponseSamples==1025 && tableVectors==257,
@@ -8394,7 +8393,7 @@ private:
                 data[first+index/4][index%4]=coefficients[index];
             }
             data[first+4][0]=material.nativeSpecularReady ? 1.0f:0.0f;
-            materials_.emplace(&material,first);lastMaterial_=&material;lastMaterialIndex_=first;return first;
+            InsertMaterial(&material,first);lastMaterial_=&material;lastMaterialIndex_=first;return first;
         }
 #endif
         data.resize(data.size()+materialVectors);
@@ -8417,9 +8416,37 @@ private:
                 if(!std::isfinite(value))throw std::runtime_error("Native GPU specular response sample is nonfinite");
                 data[first+5+table*tableVectors+index/4][index%4]=value;
             }
-        materials_.emplace(&material,first);lastMaterial_=&material;lastMaterialIndex_=first;return first;
+        InsertMaterial(&material,first);lastMaterial_=&material;lastMaterialIndex_=first;return first;
     }
-    std::unordered_map<const EditorMarkerLightMaterial*,std::uint32_t> materials_;
+    // Flat open-addressed material table (pointer -> first row), kept across
+    // frames so a per-frame Clear allocates nothing (was an unordered_map).
+    struct MaterialSlot {const EditorMarkerLightMaterial* key{};std::uint32_t index{};};
+    static std::size_t MaterialHash(const EditorMarkerLightMaterial* key) noexcept {
+        const auto bits=static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(key))*0x9E3779B97F4A7C15ull;
+        return static_cast<std::size_t>(bits>>32);
+    }
+    const MaterialSlot* FindMaterial(const EditorMarkerLightMaterial* key) const noexcept {
+        if(materials_.empty())return nullptr;
+        for(auto slot=MaterialHash(key)&(materials_.size()-1);materials_[slot].key;slot=(slot+1)&(materials_.size()-1))
+            if(materials_[slot].key==key)return &materials_[slot];
+        return nullptr;
+    }
+    void InsertMaterial(const EditorMarkerLightMaterial* key,std::uint32_t index) {
+        if(materialCount_>=materials_.size()/2) {
+            std::vector<MaterialSlot> next(std::max<std::size_t>(64,materials_.size()*2));
+            for(const auto& entry:materials_)if(entry.key) {
+                auto slot=MaterialHash(entry.key)&(next.size()-1);
+                while(next[slot].key)slot=(slot+1)&(next.size()-1);
+                next[slot]=entry;
+            }
+            materials_.swap(next);
+        }
+        auto slot=MaterialHash(key)&(materials_.size()-1);
+        while(materials_[slot].key)slot=(slot+1)&(materials_.size()-1);
+        materials_[slot]={key,index};++materialCount_;
+    }
+    std::vector<MaterialSlot> materials_;
+    std::size_t materialCount_{};
     const EditorMarkerLightMaterial* lastMaterial_{};std::uint32_t lastMaterialIndex_{};
     std::vector<RecordSlot> records_;
     std::size_t recordCount_{};
@@ -9010,7 +9037,13 @@ public:
         }
         // Allocate payload before consuming a free range, so allocation
         // failures cannot leave a partially published GPU index entry.
-        VkResidentIndexEntry value;value.hash=hash;value.first=range->first;value.allocated=needed;
+        // An evicted entry's node and vectors are reused (spare_) so a miss
+        // allocates no list node and usually no token/index storage; every
+        // field is reset to a fresh entry's value.
+        if(spare_.empty())spare_.emplace_back();
+        auto& value=spare_.front();
+        value.tokens.clear();value.shadow.clear();
+        value.hash=hash;value.lastGather=0;value.first=range->first;value.allocated=needed;value.uploaded=false;
         value.tokens.reserve(count);value.shadow.reserve(static_cast<std::size_t>(indices));
         for(std::size_t at=first;at<static_cast<std::size_t>(first)+count;++at) {
             const auto& span=*spans[at];value.tokens.push_back(span.indexToken);
@@ -9018,7 +9051,7 @@ public:
         }
         const auto remaining=range->second-needed;const auto after=range->first+needed;
         // Publish both associative owners before removing the available range.
-        entries_.push_back(std::move(value));auto entry=std::prev(entries_.end());
+        entries_.splice(entries_.end(),spare_,spare_.begin());auto entry=std::prev(entries_.end());
         try {lookup_.emplace(hash,entry);}catch(...) {entries_.erase(entry);throw;}
         if(remaining) {
             try {free_.emplace(after,remaining);}catch(...) {
@@ -9072,12 +9105,13 @@ private:
         if(next!=free_.end() && first+count==next->first) {count+=next->second;free_.erase(next);}
         const auto merged=free_.emplace(first,count).first;EraseLookup(entry);
         if(auto& slot=front_[FrontIndex(entry->hash)];slot.live && slot.entry==entry)slot={};
-        entries_.erase(entry);
+        if(spare_.size()<64)spare_.splice(spare_.end(),entries_,entry);else entries_.erase(entry);
         return merged;
     }
     std::uint64_t gather_{};
     std::uint32_t capacity_{};
     Entries entries_;
+    Entries spare_; // evicted nodes kept for reuse (contents are dead)
     Ranges free_;
     std::unordered_multimap<std::uint64_t,Entries::iterator> lookup_;
     std::array<FrontSlot,FrontSize> front_{};
@@ -9592,6 +9626,8 @@ struct EcstasyVulkanDevice::Storage {
     std::vector<VkSceneryFirstRecord> sceneryFirstRecords;
     std::vector<const EditorMarkerSolidGeometry::Strip*> modelRunScratchStrips;
     std::vector<VkResidentGeometryEntry*> modelRunScratchEntries,modelRunScratchReplay;
+    std::vector<const EditorMarkerSolidGeometry::Strip*> sceneryRunScratchStrips;
+    std::vector<VkResidentGeometryEntry*> sceneryRunScratchEntries;
     VkResidentIndexCache residentIndexCache;
     VkSceneryPacketCache sceneryPackets;
     std::uint64_t nextTextureGeneration{};

@@ -824,8 +824,9 @@ void EcstasyVulkanDevice::Storage::Gather(const EcstasyFrame& frame,
     // the replay appends. Any changed entry takes the per-strip path.
     const EcstasyDrawCommand* sceneryRecording=nullptr;
     std::uint32_t sceneryRecordFrom=0;
-    std::vector<const EditorMarkerSolidGeometry::Strip*> sceneryRecordStrips;
-    std::vector<VkResidentGeometryEntry*> sceneryRecordEntries;
+    // Storage scratch: keeps capacity across frames (was per-Gather locals).
+    auto& sceneryRecordStrips=sceneryRunScratchStrips;auto& sceneryRecordEntries=sceneryRunScratchEntries;
+    sceneryRecordStrips.clear();sceneryRecordEntries.clear();
     const auto replaySceneryRun=[&](const EcstasyDrawCommand& run,std::uint32_t from)->bool {
         const std::size_t count=run.sceneryRunCount-from;
         const auto* strips=&runStrips[run.sceneryRunFirst+from];
