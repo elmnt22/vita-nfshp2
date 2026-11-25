@@ -154,6 +154,8 @@ namespace hp2 {extern std::atomic<std::uint32_t> textureOwnerDeaths;}
 // thread on the same core samples it at ~1 kHz and logs a histogram.
 namespace hp2 {
 int ecstasyGatherSampler=0;
+std::array<std::uint64_t,8> ecstasyShadingCounters{};
+int ecstasyShadingResponseTables=0; // Vita shading_tables_on.txt: copy the (unread) specular response tables again // shading capture: calls, last hits, slot hits, lit/unlit builds, dedupe
 int ecstasyTexturePrewarmFair=1; // texture prewarm: per-pack lookup budget + drop keys absent from a published pack
 int ecstasyRetireStamp=1; // vitaGL: 0 sorted-set retire, 1 stamp retire, 2 stamp + verify against sorted set
 volatile std::uint32_t ecstasyGatherPhase=0;
@@ -8170,7 +8172,7 @@ bool NativeResidentGeometryKey(const VkSolidStripJob& job,VkResidentGeometryKey&
 // SSBO. Its offsets never enter resident geometry. Each decoded material is
 // snapshotted once per frame; FE and IG variants retain their actual tables.
 // calls, last-input hits, slot hits, lit record builds, unlit builds, dedupe hits
-std::array<std::uint64_t,6> nativeShadingCounters{};
+std::array<std::uint64_t,8>& nativeShadingCounters=ecstasyShadingCounters;
 // Model-run cache (Vita model_run_cache_off.txt, PC HP2_RUN_CACHE=0 off,
 // 2 verify): a car part run's continuation strips, recorded with the exact
 // resident entries Acquire gave them, replayed as one span range + batch.
@@ -8376,6 +8378,22 @@ private:
             "Native GPU response-table addressing differs from the authored material");
         Require(data.size()<=UINT32_MAX-materialVectors,"Native GPU material table exceeds32-bit addressing");
         const auto first=static_cast<std::uint32_t>(data.size());
+        ++nativeShadingCounters[6];
+#if defined(__vita__)
+        // The Vita shaders use the programmatic pow fallback and read only
+        // rows 0..4 (coefficients + ready flag); the two 1025-sample response
+        // tables (8 KB per material per frame) are never read there.
+        if(!ecstasyShadingResponseTables) {
+            data.resize(data.size()+5);
+            const auto* coefficients=material.NativeCoefficients();
+            for(std::size_t index=0;index<16;++index) {
+                if(!std::isfinite(coefficients[index]))throw std::runtime_error("Native GPU material coefficient is nonfinite");
+                data[first+index/4][index%4]=coefficients[index];
+            }
+            data[first+4][0]=material.nativeSpecularReady ? 1.0f:0.0f;
+            materials_.emplace(&material,first);lastMaterial_=&material;lastMaterialIndex_=first;return first;
+        }
+#endif
         data.resize(data.size()+materialVectors);
         const auto* coefficients=material.NativeCoefficients();
         for(std::size_t index=0;index<16;++index) {

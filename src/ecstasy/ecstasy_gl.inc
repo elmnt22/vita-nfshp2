@@ -1579,7 +1579,7 @@ bool EcstasyVulkanDevice::Storage::Render(EcstasyFrame* frame)
                 n,8*steps[8]/n,8*steps[9]/n,8*steps[0]/n,8*steps[1]/n,8*steps[2]/n,8*steps[3]/n,8*steps[4]/n,8*steps[5]/n,8*steps[7]/n,milliseconds(Clock::now()-renderBegin),
                 (unsigned long long)nativeShadingCounters[0],(unsigned long long)nativeShadingCounters[1],(unsigned long long)nativeShadingCounters[2],
                 (unsigned long long)nativeShadingCounters[3],(unsigned long long)nativeShadingCounters[4],(unsigned long long)nativeShadingCounters[5]);
-            nativeShadingCounters={};
+            // (render.shading_cache in the window log resets these)
             platform::RecordSessionEvent("renderer.vitagl.gather_steps",detail);
             std::snprintf(detail,sizeof(detail),"per_sampled_frame template_ms=%.2f template_acquire_ms=%.2f template_timed=%.0f runs=%.1f run_strips=%.1f run_template_strips=%.1f",
                 8*steps[10]/n,8*steps[11]/n,steps[12]/n,steps[13]/n,steps[14]/n,steps[15]/n);

@@ -63,6 +63,7 @@
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 extern std::array<std::uint64_t,16> mellowSplitMicros;
+namespace hp2 {extern std::array<std::uint64_t,8> ecstasyShadingCounters;}
 extern uint32_t diagClockReads;
 extern void (*diagClockCensusDump)(char*,std::size_t);
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
@@ -1869,6 +1870,14 @@ bool ApplicationRuntime::Tick()
                 cpu.gatherVertexJobsMilliseconds/count,cpu.gatherIndicesMilliseconds/count,
                 cpu.coldVertexJobs/count,cpu.coldVertices/count);
             s.host.RecordSessionEvent("render.gather_detail",detail);
+            {
+                // Render-thread counters (diagnostic, read without a lock).
+                auto& c=hp2::ecstasyShadingCounters;
+                std::snprintf(detail,sizeof(detail),"captures=%.1f last_hit=%.1f slot_hit=%.1f lit_miss=%.1f unlit_miss=%.1f record_hit=%.1f material_builds=%.1f data_grows=%.2f",
+                    c[0]/count,c[1]/count,c[2]/count,c[3]/count,c[4]/count,c[5]/count,c[6]/count,c[7]/count);
+                c={};
+                s.host.RecordSessionEvent("render.shading_cache",detail);
+            }
             if(auto& r=hp2::ecstasyResidentStats;r[0]) {
                 std::snprintf(detail,sizeof(detail),
                     "acquires=%.1f front_hits=%.1f new=%.1f evict=%.1f capture_posed=%.1f capture_revisioned=%.1f variant=%.1f source_new=%.1f live=%llu capacity=%llu",
