@@ -835,6 +835,9 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     const bool leafEyeFinite=std::isfinite(camera.eye[0]) && std::isfinite(camera.eye[1]);
     const bool leafLodScaled=std::isfinite(leafQuality.sceneryLod) && leafQuality.sceneryLod>1.0f;
     const bool leafNearSurface=0.0f<=leafQuality.highDetailSurface;
+    // Approved visual cut (2026-11-25): projected scenery pixel size scale
+    // below retail (1 = retail): earlier LOD steps and pixel-size culling.
+    const float pixelCut=viewId==3 ? hp2::ecstasySceneryPixelCut[1]:hp2::ecstasySceneryPixelCut[0];
     const auto prepareSection=[&](const SectionStorage& storage,std::size_t ordinal,std::int32_t rootClip,
         std::vector<RenderDraw>& output,std::vector<RenderNode>& stack,std::vector<RenderNode>& nodeLeaves,
         std::vector<std::uint8_t>& nearState,std::size_t& visited,
@@ -859,7 +862,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             if(!async)++sceneryWalkCounters[2];
             if(leafFast) {
                 const float distance=std::sqrt((delta[0]*delta[0]+delta[1]*delta[1])+delta[2]*delta[2])-radius;
-                const float scale=radius<distance ? radius*sourcePixelScale/distance:sourcePixelScale;
+                const float scale=(radius<distance ? radius*sourcePixelScale/distance:sourcePixelScale)*pixelCut;
                 const auto pixels=sceneryLeafToInt32(scale);
                 const auto visibilityPixels=distanceScale==1.0f ? pixels:sceneryLeafToInt32(scale*distanceScale);
                 if (visibilityPixels<2)return;
@@ -916,7 +919,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             const float distance=std::sqrt((delta[0]*delta[0]+delta[1]*delta[1])+delta[2]*delta[2])-radius;
             // PAL150E04..150E14 copies eView+8 into CullInfo+C0; the thresholds
             // consume that source focal input, before native output enlargement.
-            const float scale=radius<distance ? radius*sourcePixelScale/distance:sourcePixelScale;
+            const float scale=(radius<distance ? radius*sourcePixelScale/distance:sourcePixelScale)*pixelCut;
             const auto pixels=convertFloatToInt32(scale);
             const auto visibilityPixels=distanceScale==1.0f ? pixels:convertFloatToInt32(scale*distanceScale);
             if (visibilityPixels<2)return;

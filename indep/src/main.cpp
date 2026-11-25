@@ -1422,6 +1422,16 @@ bool ApplicationRuntime::Tick()
     s.deferredCaptureMilliseconds=0.0;s.deferredSealMilliseconds=0.0;
     s.deferredLogicalUpdates=0;s.deferredSceneCaptures=0;
     applicationGpuTimingAvailable=hasRenderTiming && renderTiming.gpuTimeAvailable;
+    if(sceneryDynamicCut.enabled && hasRenderTiming) {
+        auto& cut=sceneryDynamicCut;
+        const float cost=static_cast<float>(std::max(updateMs,renderTiming.gatherMilliseconds+renderTiming.recordSubmitMilliseconds));
+        if(std::isfinite(cost)) cut.smoothed+=(std::min(cost,80.0f)-cut.smoothed)*0.15f;
+        float scale=ecstasySceneryPixelCut[0];
+        if(cut.smoothed>cut.high) scale=std::max(cut.minimum,scale-cut.down);
+        else if(cut.smoothed<cut.low) scale=std::min(1.0f,scale+cut.up);
+        ecstasySceneryPixelCut[0]=ecstasySceneryPixelCut[1]=scale;
+        ++cut.frames;if(scale<1.0f) {++cut.cutFrames;cut.cutSum+=scale;}
+    }
     if(s.clock.realTimeFrames>0 && (s.clock.realTimeFrames&8)!=((s.clock.realTimeFrames-1)&8)) {
         const auto rate=[](double milliseconds) {return static_cast<float>(1000.0/std::max(milliseconds,0.001));};
         applicationPreviousCpuFrameRate=rate(updateMs+renderTiming.gatherMilliseconds+renderTiming.recordSubmitMilliseconds);
@@ -1512,6 +1522,14 @@ bool ApplicationRuntime::Tick()
                 static_cast<unsigned long long>(s.renderCachedSceneryStrips),
                 static_cast<unsigned long long>(s.renderSceneryPipelineHits));
             s.host.RecordSessionEvent("render.timing_window",detail);
+            if(sceneryDynamicCut.enabled) {
+                auto& cut=sceneryDynamicCut;
+                std::snprintf(detail,sizeof(detail),"frames=%llu cut_frames=%llu mean_cut=%.3f now=%.3f smoothed_ms=%.2f",
+                    static_cast<unsigned long long>(cut.frames),static_cast<unsigned long long>(cut.cutFrames),
+                    cut.cutFrames?cut.cutSum/cut.cutFrames:1.0,ecstasySceneryPixelCut[0],cut.smoothed);
+                s.host.RecordSessionEvent("render.scenery_cut",detail);
+                cut.frames=cut.cutFrames=0;cut.cutSum=0.0;
+            }
             const auto milliseconds=[](std::uint64_t ns){return static_cast<double>(ns)*1.0e-6;};
             std::snprintf(detail,sizeof(detail),
                 "world_loop=%d scenario=%d world_steps=%llu world_ms=%.3f world_step_peak_ms=%.3f "

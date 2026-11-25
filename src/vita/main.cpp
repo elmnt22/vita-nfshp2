@@ -1068,6 +1068,38 @@ int main(int, char**)
             hp2::ecstasyAlphaElide = 0;
             log.Line("vita.diag", "alpha elide off");
         }
+        // Approved visual cut 2026-11-25: heavy frames only, the scenery
+        // pixel-size scale ramps toward a minimum (earlier LOD steps, smaller
+        // objects culled). scenery_cut_off.txt = retail; scenery_cut.txt =
+        // "minimum high_ms low_ms" overrides.
+        hp2::sceneryDynamicCut.enabled = 1;
+        if (sceIoGetstat((std::string(kDataDirectory) + "/scenery_cut_off.txt").c_str(), &probe) >= 0)
+            hp2::sceneryDynamicCut.enabled = 0;
+        if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/scenery_cut.txt").c_str(), "r")) {
+            float minimum = 0.0f, high = 0.0f, low = 0.0f;
+            const int read = std::fscanf(file, "%f %f %f", &minimum, &high, &low);
+            std::fclose(file);
+            if (read >= 1 && minimum >= 0.3f && minimum <= 1.0f) hp2::sceneryDynamicCut.minimum = minimum;
+            if (read >= 3 && high > low && low > 0.0f) {hp2::sceneryDynamicCut.high = high; hp2::sceneryDynamicCut.low = low;}
+        }
+        {
+            char text[96]; std::snprintf(text, sizeof(text), "scenery heavy-frame cut %s min %.2f high %.1f low %.1f",
+                hp2::sceneryDynamicCut.enabled ? "on" : "off", hp2::sceneryDynamicCut.minimum,
+                hp2::sceneryDynamicCut.high, hp2::sceneryDynamicCut.low);
+            log.Line("vita.diag", text);
+        }
+        // Diagnostic: fixed scale "main mirror" (disables the dynamic cut).
+        if (std::FILE* file = std::fopen((std::string(kDataDirectory) + "/scenery_fixed_cut.txt").c_str(), "r")) {
+            hp2::sceneryDynamicCut.enabled = 0;
+            float main = 1.0f, mirror = 1.0f;
+            const int read = std::fscanf(file, "%f %f", &main, &mirror);
+            std::fclose(file);
+            if (read >= 1 && main >= 0.3f && main <= 1.0f) hp2::ecstasySceneryPixelCut[0] = main;
+            if (read >= 2 && mirror >= 0.3f && mirror <= 1.0f) hp2::ecstasySceneryPixelCut[1] = mirror;
+            char text[96]; std::snprintf(text, sizeof(text), "scenery pixel cut main %.2f mirror %.2f",
+                hp2::ecstasySceneryPixelCut[0], hp2::ecstasySceneryPixelCut[1]);
+            log.Line("vita.diag", text);
+        }
         // Diagnostic only (visual change, not a default): retail pixel-size
         // scenery LOD without the native near-detail LOD0 guard.
         if (sceIoGetstat((std::string(kDataDirectory) + "/diag_lod_retail.txt").c_str(), &probe) >= 0) {

@@ -2,6 +2,7 @@
 #define NFSHP2_NATIVE_RENDER_SETTINGS_HPP
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 
@@ -64,6 +65,22 @@ inline NativeSceneQuality nativeSceneQualityStorage=vitaSceneQuality;
 inline NativeSceneQuality nativeSceneQualityStorage=upstreamSceneQuality;
 #endif
 inline const NativeSceneQuality& nativeSceneQuality() noexcept {return nativeSceneQualityStorage;}
+
+// Approved visual cut (2026-11-25): scenery projected pixel-size scale below
+// retail ([0] main views, [1] mirror; 1 = retail): earlier LOD steps and
+// pixel-size culling. Driven per frame by SceneryDynamicCut (heavy frames
+// only), written on the application thread before the scene is built.
+inline std::array<float,2> ecstasySceneryPixelCut{{1.0f,1.0f}};
+// Ramps the scale toward `minimum` while the smoothed CPU frame cost (max of
+// game thread and render gather+record) exceeds `high` ms, back to 1 below
+// `low`. enabled=0 keeps retail.
+struct SceneryDynamicCut {
+    int enabled=0;
+    float minimum=0.6f,high=31.0f,low=27.0f,down=0.04f,up=0.01f;
+    float smoothed=0.0f;
+    std::uint64_t cutFrames=0,frames=0;double cutSum=0.0;
+};
+inline SceneryDynamicCut sceneryDynamicCut{};
 inline bool configureNativeFrameLimitQuality(int limit) noexcept {
 #ifdef __SWITCH2__
     const bool reduced=limit==120 || limit==0;
