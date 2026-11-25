@@ -1176,7 +1176,10 @@ static int32_t collisionWitnessQueryWalk(CollisionWitness* witness, const float 
     // positions; consecutive walks (restarts, memo misses from other start
     // features) often share them, so keep the last pair per thread.
     struct TransformCache {bool valid;float pose[40];float firstToSecond[16],secondToFirst[16];};
-    static thread_local TransformCache transformCache{};
+    static thread_local TransformCache transformCacheSlot{};
+    // One emulated-TLS lookup per query (Vita GCC otherwise re-derives the
+    // TLS address at every step's call site); the walk reads stack copies.
+    TransformCache& transformCache=transformCacheSlot;
     float pose[40];
     memcpy(pose,firstFrame,64);memcpy(pose+16,firstPosition,16);memcpy(pose+20,secondFrame,64);memcpy(pose+36,secondPosition,16);
     if (!transformCache.valid || memcmp(transformCache.pose,pose,sizeof(pose))!=0) {
@@ -1184,8 +1187,9 @@ static int32_t collisionWitnessQueryWalk(CollisionWitness* witness, const float 
         collisionRelativeTransform(transformCache.secondToFirst, firstFrame, firstPosition, secondFrame, secondPosition);
         memcpy(transformCache.pose,pose,sizeof(pose));transformCache.valid=true;
     }
-    const float* firstToSecond=transformCache.firstToSecond;
-    const float* secondToFirst=transformCache.secondToFirst;
+    alignas(16) float firstToSecond[16],secondToFirst[16];
+    memcpy(firstToSecond,transformCache.firstToSecond,sizeof(firstToSecond));
+    memcpy(secondToFirst,transformCache.secondToFirst,sizeof(secondToFirst));
     CollisionTransformedVertex firstVertex{}, secondVertex{};
     CollisionTransformedEdge firstEdge{}, secondEdge{};
     CollisionFeature* firstHistory[80];

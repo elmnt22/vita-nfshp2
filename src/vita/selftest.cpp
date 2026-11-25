@@ -11,8 +11,7 @@
 extern "C" std::int32_t ecstasyClassifyBounds(const float minimum[3], const float maximum[3], const float matrix[16]);
 #include "bware/inc/bMath.hpp" // vectorMatrixTransform/Point (header-inline on Vita)
 void vectorMatrixTransformScalar(float output[4], const float matrix[16], const float input[4]);
-extern "C" void vectorMatrixMultiply(float output[16], const float left[16], const float right[16]);
-extern "C" void eMulVector3(float output[4], const float matrix[16], const float input[3]);
+#include "indep/inc/eMath.hpp"
 extern "C" float eUnitVector4[4];
 #include "bware/inc/bMathNeon.hpp"
 

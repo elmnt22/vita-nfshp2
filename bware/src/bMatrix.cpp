@@ -35,6 +35,7 @@ void rotationMatrixIdentity(float matrix[16])
 }
 
 
+#if !HP2_BMATRIX_TRANSFORM_INLINE
 void vectorMatrixMultiply(float output[16], const float left[16], const float right[16])
 {
 #if NFSHP2_NATIVE_NEON
@@ -53,6 +54,7 @@ void vectorMatrixMultiply(float output[16], const float left[16], const float ri
     for (int column = 0; column < 4; ++column) vectorMatrixTransform(result + column * 4, left, right + column * 4);
     memcpy(output, result, sizeof(result));
 }
+#endif
 void vectorMatrixInverseAffine(float output[16], const float matrix[16])
 {
     const float a = matrix[0], b = matrix[1], c = matrix[2];

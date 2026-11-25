@@ -131,7 +131,6 @@ float* vectorQuaternionMultiply(float output[4], const float first[4], const flo
 void vectorMatrixFromQuaternion(float matrix[16], const float quaternion[4]);
 void vectorQuaternionFromMatrixCopy(float output[4], const float matrix[16]);
 void vectorMatrixInverseAffine(float output[16], const float matrix[16]);
-void vectorMatrixMultiply(float output[16], const float left[16], const float right[16]);
 #if !HP2_BSCALAR_OUTLINE && defined(__ARM_NEON) && !(defined(_M_X64) || defined(__SSE2__))
 // Vita: header-inline (identical arithmetic to bMatrix.cpp; NEON VMLA is not
 // fused). The scalar fallback is used until the boot self-test passes.
@@ -162,14 +161,44 @@ static inline void vectorMatrixTransformPoint(float output[4], const float matri
     const float point[4] = {input[0], input[1], input[2], 1.0f};
     vectorMatrixTransform(output, matrix, point);
 }
+static inline void vectorMatrixMultiply(float output[16], const float left[16], const float right[16])
+{
+    if (bMatrixNeonEnabled) {
+        const float32x4_t c0 = vld1q_f32(left), c1 = vld1q_f32(left + 4), c2 = vld1q_f32(left + 8), c3 = vld1q_f32(left + 12);
+        // All right columns are read before any store (output may alias).
+        const float32x4_t r0 = vld1q_f32(right), r1 = vld1q_f32(right + 4), r2 = vld1q_f32(right + 8), r3 = vld1q_f32(right + 12);
+        vst1q_f32(output, bNeonTransform(c0, c1, c2, c3, r0));
+        vst1q_f32(output + 4, bNeonTransform(c0, c1, c2, c3, r1));
+        vst1q_f32(output + 8, bNeonTransform(c0, c1, c2, c3, r2));
+        vst1q_f32(output + 12, bNeonTransform(c0, c1, c2, c3, r3));
+        return;
+    }
+    float result[16];
+    for (int column = 0; column < 4; ++column) vectorMatrixTransform(result + column * 4, left, right + column * 4);
+    memcpy(output, result, sizeof(result));
+}
 #else
 #define HP2_BMATRIX_TRANSFORM_INLINE 0
+void vectorMatrixMultiply(float output[16], const float left[16], const float right[16]);
 void vectorMatrixTransform(float output[4], const float matrix[16], const float value[4]);
 void vectorMatrixTransformPoint(float output[4], const float matrix[16], const float value[4]);
 #endif
 float* vectorMatrixTranspose(float output[16], const float matrix[16]);
 
+#if HP2_BSCALAR_OUTLINE
 uint32_t vectorRandomBounded(uint32_t bound, uint32_t* state);
+#else
+static inline uint32_t vectorRandomBounded(uint32_t bound, uint32_t* state)
+{
+    const uint32_t previous = *state;
+    const uint32_t remainder = previous % bound;
+    const uint32_t mixed = previous ^ 0x1d872b41u;
+    const uint32_t shifted = mixed ^ (mixed >> 5);
+    const uint32_t rotatedPart = mixed ^ (shifted << 27);
+    *state = shifted ^ rotatedPart;
+    return remainder;
+}
+#endif
 float vectorRandomFloat(uint32_t* state, float maximum);
 uint32_t vectorRandomSeed(uint32_t seed, uint32_t* state);
 extern uint32_t vectorDefaultRandomState;
@@ -190,8 +219,46 @@ VectorPolar2* vectorPolarFromCartesian2(VectorPolar2* output, const float input[
 
 // One turn occupies all 16 bits. The game's polynomial and angular
 // quantization are preserved instead of substituting a host sine function.
+#if HP2_BSCALAR_OUTLINE
 float rotationSineAngle(uint16_t angle);
+#else
+static inline float rotationSineAngle(uint16_t angle)
+{
+    float radians = bScalarMultiply((float)angle, 0.0000958738019107841f);
+    float sign = 1.0f;
+    if (4.71238899230957f <= radians) {
+        radians = bScalarAdd(radians, -6.2831854820251465f);
+    } else if (1.5707963705062866f <= radians) {
+        sign = -sign;
+        radians = bScalarAdd(radians, -3.1415927410125732f);
+    }
+
+    const float squared = bScalarMultiply(radians, radians);
+    const float cubed = bScalarMultiply(radians, squared);
+    const float fifth = bScalarMultiply(cubed, squared);
+    const float cubicTerm = bScalarMultiply(cubed, 0.1666666716337204f);
+    const float seventh = bScalarMultiply(fifth, squared);
+    float result = bScalarAdd(radians, -cubicTerm);
+    const float fifthTerm = bScalarMultiply(fifth, 0.008333333767950535f);
+    const float ninth = bScalarMultiply(seventh, squared);
+    const float seventhTerm = bScalarMultiply(seventh, 0.00019841270113829523f);
+    result = bScalarAdd(result, fifthTerm);
+    const float ninthTerm = bScalarMultiply(ninth, 0.0000027557318844628753f);
+    result = bScalarAdd(result, -seventhTerm);
+    result = bScalarAdd(result, ninthTerm);
+    return bScalarMultiply(result, sign);
+}
+#endif
+#if HP2_BSCALAR_OUTLINE
 float rotationSineRadians(float radians);
+#else
+static inline float rotationSineRadians(float radians)
+{
+    const float angularCoordinate = bScalarMultiply(radians, 10430.3779296875f);
+    const int32_t angle = convertFloatToInt32(angularCoordinate);
+    return rotationSineAngle((uint16_t)angle);
+}
+#endif
 void rotationMatrixIdentity(float matrix[16]);
 
 /* Keep multiplication and accumulation as separate float operations. */

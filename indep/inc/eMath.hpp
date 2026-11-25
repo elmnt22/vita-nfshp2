@@ -30,11 +30,38 @@ void eMathInit(void);
 void eIdentity(float output[16]);
 void eZeroMatrix(float output[16]);
 /* The original e-API multiplies second * first. Both inputs may alias output. */
+extern float eUnitVector4[4];
+#ifdef __cplusplus
+}
+#endif
+#include "bware/inc/bMath.hpp"
+#ifdef __cplusplus
+extern "C" {
+#endif
+#if HP2_BMATRIX_TRANSFORM_INLINE
+/* Vita: header-inline, the same calls/arithmetic as emathe.cpp. */
+static inline void eMulMatrix(float output[16],const float first[16],const float second[16])
+{
+    vectorMatrixMultiply(output,second,first);
+}
+static inline void eMulVector4(float output[4],const float matrix[16],const float input[4])
+{
+    vectorMatrixTransform(output,matrix,input);
+}
+/* ActualVector3 API writes four output lanes; input W is ignored. */
+static inline void eMulVector3(float output[4],const float matrix[16],const float input[3])
+{
+    if(bMatrixNeonEnabled) {vst1q_f32(output,bNeonTransformMatrix(matrix,bNeonPoint3(eUnitVector4,input)));return;}
+    const float point[4]={eUnitVector4[0]+input[0],eUnitVector4[1]+input[1],
+        eUnitVector4[2]+input[2],eUnitVector4[3]};
+    eMulVector4(output,matrix,point);
+}
+#else
 void eMulMatrix(float output[16],const float first[16],const float second[16]);
 void eMulVector4(float output[4],const float matrix[16],const float input[4]);
-extern float eUnitVector4[4];
 /* ActualVector3 API writes four output lanes; input W is ignored. */
 void eMulVector3(float output[4],const float matrix[16],const float input[3]);
+#endif
 /* Original direction normalization uses XY length; its VU W result was
  * unwritten. Native directions define W=0. Inputs must be finite. */
 void eNormalizedDirection(float output[4],const float first[4],const float second[4]);

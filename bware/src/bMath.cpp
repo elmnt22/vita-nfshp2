@@ -336,6 +336,7 @@ static const uint16_t fixedAtanLargeSamples[129] = {
 
 uint32_t vectorDefaultRandomState = 0x12345678u;
 
+#if HP2_BSCALAR_OUTLINE
 float rotationSineAngle(uint16_t angle)
 {
     float radians = bScalarMultiply((float)angle, 0.0000958738019107841f);
@@ -362,13 +363,16 @@ float rotationSineAngle(uint16_t angle)
     result = bScalarAdd(result, ninthTerm);
     return bScalarMultiply(result, sign);
 }
+#endif
 
+#if HP2_BSCALAR_OUTLINE
 float rotationSineRadians(float radians)
 {
     const float angularCoordinate = bScalarMultiply(radians, 10430.3779296875f);
     const int32_t angle = convertFloatToInt32(angularCoordinate);
     return rotationSineAngle((uint16_t)angle);
 }
+#endif
 
 int32_t vectorFixedReciprocal(int32_t value)
 {
@@ -389,6 +393,7 @@ uint32_t vectorRandomSeed(uint32_t seed, uint32_t* state)
     return vectorRandomBounded(1, state);
 }
 
+#if HP2_BSCALAR_OUTLINE
 uint32_t vectorRandomBounded(uint32_t bound, uint32_t* state)
 {
     const uint32_t previous = *state;
@@ -399,6 +404,7 @@ uint32_t vectorRandomBounded(uint32_t bound, uint32_t* state)
     *state = shifted ^ rotatedPart;
     return remainder;
 }
+#endif
 
 float vectorRandomFloat(uint32_t* state, float maximum)
 {

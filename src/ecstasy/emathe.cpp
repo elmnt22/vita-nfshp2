@@ -289,15 +289,19 @@ void eMathInit(void)
     eZeroMatrix(eMathZeroMatrix);
 }
 
+#if !HP2_BMATRIX_TRANSFORM_INLINE
 void eMulMatrix(float output[16],const float first[16],const float second[16])
 {
     vectorMatrixMultiply(output,second,first);
 }
+#endif
 
+#if !HP2_BMATRIX_TRANSFORM_INLINE
 void eMulVector4(float output[4],const float matrix[16],const float input[4])
 {
     vectorMatrixTransform(output,matrix,input);
 }
+#endif
 
 void eNormalizedDirection(float output[4],const float first[4],const float second[4])
 {
@@ -342,6 +346,7 @@ uint32_t eGetClipFlags(const float input[4],const float matrix[16])
 // eMath static producer. Future writers borrow this object, not another unit.
 float eUnitVector4[4]={0.0f,0.0f,0.0f,1.0f};
 
+#if !HP2_BMATRIX_TRANSFORM_INLINE
 void eMulVector3(float output[4],const float matrix[16],const float input[3])
 {
 #if NFSHP2_BMATH_NEON
@@ -351,6 +356,7 @@ void eMulVector3(float output[4],const float matrix[16],const float input[3])
         eUnitVector4[2]+input[2],eUnitVector4[3]};
     eMulVector4(output,matrix,point);
 }
+#endif
 
 void motionMatrixYaw(float output[16], uint16_t angle)
 {
