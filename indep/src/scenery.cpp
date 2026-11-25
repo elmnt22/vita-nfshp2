@@ -100,6 +100,7 @@ inline float sceneryLeafSquaredXY(const SceneryInstance& instance,const float fo
 #endif
 namespace hp2 { extern std::atomic<int> ecstasyAsyncMirrorPhase; extern std::atomic<std::int64_t> ecstasyMirrorZonesNs,ecstasyMirrorSeenNs; extern int ecstasyFastSceneryCapture; extern int ecstasySceneryRuns; extern int ecstasySceneryStripCull; extern int ecstasyParallelSceneryEmit; extern int ecstasyParallelSceneryPrepare; }
 namespace hp2 { extern std::array<std::uint64_t,8> ecstasySceneryRejectReasons,ecstasySceneryModelStateReasons; extern std::uint64_t ecstasyRigidSceneryBatched; }
+namespace hp2 {int ecstasyParallelEmitRigid=1;} // parallel emit defers rejected rigid models (Vita emit_rigid_off.txt)
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
 
 SceneryInstance* sceneryFindInstanceByIndex(const Scenery* scenery,int32_t section,int32_t instance)
@@ -705,6 +706,8 @@ std::size_t sceneryNativeSelectDetailLod(const SceneryModel& model,
         std::numeric_limits<float>::infinity());
 }
 
+// Diagnostic: why the parallel emit fell back (logged as render.scenery_emit_bail).
+static std::array<std::uint64_t,5> sceneryEmitBail{};
 void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame,
     std::uint32_t viewMask,std::int32_t worldFrames,bool emitGeometry,AsyncCapture* async)
 {
@@ -1319,6 +1322,8 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         const auto pass=++S.emitPass_;
         auto& plan=S.emitPlanScratch_;
         plan.assign(draws.size(),EmitPlan{});
+        static thread_local std::vector<const void*> rigidRejectedSlot;
+        auto& rigidRejected=rigidRejectedSlot;rigidRejected.clear();
         if(preparedLights.size()<draws.size())preparedLights.resize(draws.size());
         for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
             auto& draw=draws[drawIndex];
@@ -1333,7 +1338,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             if(solid && (draw.clip==2 || gpuClip)) {
                 auto& batch=S.opaqueBatches_[draw.model->solid];
                 const bool lit=context!=nullptr;
-                if(batch.emitPass==pass && batch.emitPassLit!=lit)return false;
+                if(batch.emitPass==pass && batch.emitPassLit!=lit) {++sceneryEmitBail[0];return false;}
                 if(frame.PrepareOpaqueSceneryBatch(batch,*draw.model,lit)) {
                     batch.emitPass=pass;batch.emitPassLit=lit;
                     plan[drawIndex].batch=&batch;plan[drawIndex].stripCull=stripCull;
@@ -1341,7 +1346,24 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 }
                 if(merge) {++splitRejected;splitRejectedStrips+=solid->geometry->strips.size();}
             } else if(merge && solid && solid->geometry) {++splitOverLimit;splitOverLimitStrips+=solid->geometry->strips.size();}
-            if(draw.model->replacement || !solid || solid->rigidAnimation || solid->vertexAnimation)return false;
+            // A rejected rigid-animated model changes only its own animation
+            // start (read by its own deferred RenderModel), so it renders at
+            // the ordered merge like the async mirror's, unless the same
+            // solid is batched in this view or extended-range dedup reads it.
+            if(solid && solid->rigidAnimation && !solid->vertexAnimation && !draw.model->replacement &&
+                !extendedRange && hp2::ecstasyParallelEmitRigid) {
+                rigidRejected.push_back(solid);continue;
+            }
+            if(draw.model->replacement || !solid || solid->rigidAnimation || solid->vertexAnimation) {
+                ++sceneryEmitBail[draw.model->replacement ? 1:!solid ? 2:solid->rigidAnimation ? 3:4];return false;
+            }
+        }
+        if(!rigidRejected.empty()) {
+            for(const auto& entry:plan)
+                if(entry.batch && std::find(rigidRejected.begin(),rigidRejected.end(),
+                    draws[static_cast<std::size_t>(&entry-plan.data())].model->solid)!=rigidRejected.end()) {
+                    ++sceneryEmitBail[0];return false;
+                }
         }
         Require(view.target && view.target->enabled && view.matricesCalculated,"Opaque scenery batch lost its live view");
         phase(0);
@@ -1619,6 +1641,10 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 static_cast<unsigned long long>(hp2::ecstasySceneryLeafChecks[1]));
             sceneryWalkCounters={};sceneryWalkPhaseMs={};
             platform::RecordSessionEvent("render.scenery_prepare",text);
+            std::snprintf(text,sizeof(text),"two_lit=%llu replacement=%llu no_solid=%llu rigid=%llu vertex=%llu",
+                (unsigned long long)sceneryEmitBail[0],(unsigned long long)sceneryEmitBail[1],(unsigned long long)sceneryEmitBail[2],
+                (unsigned long long)sceneryEmitBail[3],(unsigned long long)sceneryEmitBail[4]);
+            platform::RecordSessionEvent("render.scenery_emit_bail",text);sceneryEmitBail={};
             {
                 std::size_t length=0;text[0]=0;
                 for(std::size_t id=0;id<perTarget.size();++id) {

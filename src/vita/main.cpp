@@ -1068,6 +1068,12 @@ int main(int, char**)
             hp2::ecstasyAlphaElide = 0;
             log.Line("vita.diag", "alpha elide off");
         }
+        // Diagnostic only (visual change, not a default): retail pixel-size
+        // scenery LOD without the native near-detail LOD0 guard.
+        if (sceIoGetstat((std::string(kDataDirectory) + "/diag_lod_retail.txt").c_str(), &probe) >= 0) {
+            hp2::nativeSceneQualityStorage.highDetailSurface = -1.0f;
+            log.Line("vita.diag", "near-detail LOD guard off (diagnostic)");
+        }
         if (FILE* timeline = std::fopen((std::string(kDataDirectory) + "/gpu_timeline.txt").c_str(), "r")) {
             hp2::ecstasyGpuTimeline = 1;
             int mode = 0, shots = 0;
