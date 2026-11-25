@@ -155,6 +155,7 @@ namespace hp2 {extern std::atomic<std::uint32_t> textureOwnerDeaths;}
 namespace hp2 {
 int ecstasyGatherSampler=0;
 std::array<std::uint64_t,8> ecstasyShadingCounters{};
+std::atomic<std::uint64_t> ecstasySkidQuads{0}; // diagnostic: skid quads captured
 int ecstasyShadingResponseTables=0; // Vita shading_tables_on.txt: copy the (unread) specular response tables again // shading capture: calls, last hits, slot hits, lit/unlit builds, dedupe
 int ecstasyTexturePrewarmFair=1; // texture prewarm: per-pack lookup budget + drop keys absent from a published pack
 int ecstasyRetireStamp=1; // vitaGL: 0 sorted-set retire, 1 stamp retire, 2 stamp + verify against sorted set
@@ -5275,9 +5276,11 @@ void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame)
         // live SkidSets on primary views1..3. The source1AACC0 polygons
         // already contain world positions and the authored material texture.
         if(i<4 && simulation && simulation->world) {
-            std::vector<SkidRenderQuad> skidQuads;
+            // Reused across views/frames; per thread (the async mirror captures on a helper).
+            static thread_local std::vector<SkidRenderQuad> skidQuadsSlot;auto& skidQuads=skidQuadsSlot;skidQuads.clear();
             WorldClans(*simulation->world).PrepareRender(view.matrices.worldToClip,view,skidQuads,
                 scene.advancePresentation,scene.emitRaceGeometry);
+            ecstasySkidQuads.fetch_add(skidQuads.size(),std::memory_order_relaxed);
             for(const auto& quad:skidQuads) {
                 frontend::FlailerPoly polygon;polygon.rasterState=quad.rasterState;
                 for(std::size_t vertex=0;vertex<quad.vertices.size();++vertex) {

@@ -63,7 +63,7 @@
 // WeatherMan.hpp retains its inherited scope; no new header identity is claimed.
 extern "C" WeatherManResult weatherManUnbindClock(const GameTime* clock);
 extern std::array<std::uint64_t,16> mellowSplitMicros;
-namespace hp2 {extern std::array<std::uint64_t,8> ecstasyShadingCounters;}
+namespace hp2 {extern std::array<std::uint64_t,8> ecstasyShadingCounters;extern std::atomic<std::uint64_t> ecstasySkidQuads;}
 extern uint32_t diagClockReads;
 extern void (*diagClockCensusDump)(char*,std::size_t);
 static double nativeDiscardedCaptureMs{};static unsigned long long nativeDiscardedCaptures{};
@@ -1801,8 +1801,10 @@ bool ApplicationRuntime::Tick()
                 }
                 for(int pass=0;pass<2;++pass) {
                     auto& w=pass ? hp2::ecstasyDiscardWorldSplitMs:hp2::ecstasyWorldSplitMs;
-                    std::snprintf(detail,sizeof(detail),"matrices=%.3f scenery=%.3f nis=%.3f sun=%.3f skids=%.3f movers=%.3f players=%.3f objects=%.3f",
-                        w[0]/count,w[1]/count,w[2]/count,w[3]/count,w[4]/count,w[5]/count,w[6]/count,w[7]/count);
+                    std::snprintf(detail,sizeof(detail),"matrices=%.3f scenery=%.3f nis=%.3f sun=%.3f skids=%.3f movers=%.3f players=%.3f objects=%.3f skid_quads=%.1f",
+                        w[0]/count,w[1]/count,w[2]/count,w[3]/count,w[4]/count,w[5]/count,w[6]/count,w[7]/count,
+                        pass ? 0.0:hp2::ecstasySkidQuads.load()/count);
+                    if(pass)hp2::ecstasySkidQuads=0;
                     s.host.RecordSessionEvent(pass ? "render.discarded_world_split":"render.world_split",detail);
                     w={};
                 }
