@@ -5,7 +5,7 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "NFS Hot Pursuit 2")
 set(VITA_TITLEID  "NFSHP2002")
-set(VITA_VERSION  "00.01")
+set(VITA_VERSION  "00.12")
 
 foreach(hp2_target IN ITEMS NFSHP2Core NFSHP2Engine)
     target_compile_options(${hp2_target} PRIVATE -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard)
