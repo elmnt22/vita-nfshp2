@@ -54,9 +54,10 @@ struct NativeSceneQuality {
 };
 inline constexpr NativeSceneQuality switchSceneQuality{1.0f,1.75f,35.0f,35.0f,50.0f,true};
 inline constexpr NativeSceneQuality upstreamSceneQuality{3.0f,2.5f,125.0f,125.0f,165.0f,false};
-// Vita: retail PAL LOD selection (multipliers 1.0, all opponents full
-// detail) plus the Switch near-detail guard against large-structure pops.
-inline constexpr NativeSceneQuality vitaSceneQuality{1.0f,1.0f,35.0f,35.0f,50.0f,false};
+// Vita: retail PAL LOD selection (multipliers 1.0) plus the Switch
+// near-detail guard against large-structure pops. AI opponents use the
+// Switch reduced car detail (user-approved 2026-11-25, always on).
+inline constexpr NativeSceneQuality vitaSceneQuality{1.0f,1.0f,35.0f,35.0f,50.0f,true};
 #if defined(__SWITCH__) && !defined(__SWITCH2__)
 inline NativeSceneQuality nativeSceneQualityStorage=switchSceneQuality;
 #elif defined(__vita__)
