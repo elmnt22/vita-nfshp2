@@ -1100,6 +1100,12 @@ int main(int, char**)
                 hp2::ecstasySceneryPixelCut[0], hp2::ecstasySceneryPixelCut[1]);
             log.Line("vita.diag", text);
         }
+        // Diagnostic (visual change, not a default): AI opponents use the
+        // reduced body/wheel LOD of the Switch profile.
+        if (sceIoGetstat((std::string(kDataDirectory) + "/reduced_opponents.txt").c_str(), &probe) >= 0) {
+            hp2::nativeSceneQualityStorage.reducedOpponents = true;
+            log.Line("vita.diag", "reduced opponent car detail (diagnostic)");
+        }
         // Diagnostic only (visual change, not a default): retail pixel-size
         // scenery LOD without the native near-detail LOD0 guard.
         if (sceIoGetstat((std::string(kDataDirectory) + "/diag_lod_retail.txt").c_str(), &probe) >= 0) {
