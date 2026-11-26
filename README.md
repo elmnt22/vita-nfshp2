@@ -43,10 +43,13 @@ Disclosure: Whilst I know a bit of programming and coding, I used AI to help acc
 - **Graphics.** A Vita renderer that draws straight to the GPU (GXM), at
   960×544 in 16:9. The original world, car and particle effects are kept.
   Smoke, dust and other screen-filling particles are drawn at half or
-  quarter resolution to hold the frame rate.
+  quarter resolution to hold the frame rate. AI opponent cars use their
+  simpler detail level (no driver or road shadow), and in the heaviest
+  frames distant scenery switches to lower detail a little earlier.
 - **Audio.** Engine, collision, cop, speech, music and ambient sounds from the
   game's own banks. The voice mixer uses the PS2 sound chip's Gaussian
-  interpolation, and tunnels get the PS2's hardware reverb.
+  interpolation, and tunnels get the PS2's hardware reverb. A peak limiter
+  keeps busy race moments from clipping.
 - **Movies.** The game's MV3 movies are decoded on the Vita.
 - **Multicore.** Game logic, rendering, GPU submission, audio and helper
   jobs (scenery, skinning, particles, collision queries) are spread across
@@ -118,6 +121,10 @@ needs none of them.
 | `audio_dry.txt` | Turn the reverb off |
 | `audio_linear.txt` | Use plain linear voice interpolation instead of the PS2 Gaussian one |
 | `speedtrap_retail.txt` | Keep the PS2's original race-start behaviour for the parked speed-trap cop (costs a slow first second on some tracks) |
+| `reduced_opponents_off.txt` | Draw AI opponent cars at full detail (costs frame rate in busy scenes) |
+| `scenery_cut_off.txt` | Never lower scenery detail in heavy frames (costs frame rate) |
+| `audio_limiter_off.txt` | Turn the peak limiter off (loud moments clip) |
+| `audio_gain.txt` | Not empty: a number such as `0.6` sets the overall volume before the limiter (default `1.0`) |
 
 The other `*_off.txt` and `*_serial.txt` files turn individual optimisations off
 for testing. See `src/vita/main.cpp`.
