@@ -70,6 +70,7 @@ bool linearInterpolation=false; // audio_linear.txt restores the 2-point blend
 bool reverbDisabled=false;      // audio_dry.txt mixes dry only (previous behaviour)
 bool reverbForced=false;        // audio_reverb_force.txt: diagnostic, 0.85 depth everywhere
 bool limiterDisabled=false;     // audio_limiter_off.txt: hard int16 clamp only (previous behaviour)
+float masterPreGain=1.0f;       // audio_gain.txt "<float>": master level before the limiter (retail staging = 1.0)
 
 // Output peak limiter (2026-11-25). Many full-gain voices summed overflow
 // int16 and were hard-clamped (audible clipping). Below the threshold the
@@ -507,6 +508,11 @@ struct AudioDevice::State {
         reverbDisabled=exists("ux0:data/NFSHP2/audio_dry.txt");
         reverbForced=exists("ux0:data/NFSHP2/audio_reverb_force.txt");
         limiterDisabled=exists("ux0:data/NFSHP2/audio_limiter_off.txt");
+        if(auto* f=std::fopen("ux0:data/NFSHP2/audio_gain.txt","rb")) {
+            float value=1.0f;
+            if(std::fscanf(f,"%f",&value)==1 && std::isfinite(value) && value>0.0f && value<=4.0f)masterPreGain=value;
+            std::fclose(f);
+        }
         port=sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM,framesPerBuffer,sampleRate,SCE_AUDIO_OUT_MODE_STEREO);
         if(port<0)throw AudioFailure{WORLD_AUDIO_BACKEND_FAILURE,"sceAudioOutOpenPort ("+std::to_string(port)+")"};
         int volume[2]={SCE_AUDIO_VOLUME_0DB,SCE_AUDIO_VOLUME_0DB};
@@ -650,6 +656,7 @@ struct AudioDevice::State {
             }
             {
                 float rawPeak=0.0f,minimumGain=1.0f;std::uint32_t over=0;
+                if(masterPreGain!=1.0f)for(auto& sample:mixBuffer)sample*=masterPreGain;
                 if(!limiterDisabled)over=limiter.Process(mixBuffer,rawPeak,minimumGain);
                 std::uint32_t clipped=0;
                 for(std::size_t i=0;i<framesPerBuffer;++i) {
