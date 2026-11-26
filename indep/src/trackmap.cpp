@@ -76,10 +76,10 @@ void TrackMap::SetMode(std::int32_t mode)
 }
 TrackMap::TrackMap(const TrackResourceInfo* track,CarMovement* car,CarFramePlayerState* player,
     frontend::FlailerResources& resources,frontend::FlailerRenderManager& renderer,
-    CarCinematicServices& cameras,std::int32_t overlayViewNumber,
+    CarCinematicServices& cameras,std::int32_t viewNumber,
     const RaceParameters& parameters)
     :track_(track),car_(car),player_(player),resources_(resources),renderer_(renderer),
-    cameras_(cameras),parameters_(parameters),overlayViewNumber_(overlayViewNumber)
+    cameras_(cameras),parameters_(parameters),viewNumber_(viewNumber)
 {
     valid_=track_ && car_ && player_;
     if (!valid_)return;
@@ -136,7 +136,7 @@ void TrackMap::EvalCubic(float& position,float& velocity,float target,float elap
 }
 bool TrackMap::GetCameraDirection(std::array<float,4>& direction)
 {
-    auto* screen=ecstasyViewAt(&cameras_,overlayViewNumber_);
+    auto* screen=ecstasyViewAt(&cameras_,viewNumber_);
     Require(screen,"TrackMap camera screen is absent");
     auto* camera=screen->first;
     if (!camera || camera->kind!=1) {

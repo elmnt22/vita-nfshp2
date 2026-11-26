@@ -32,7 +32,7 @@ class TrackMap final {
 public:
     TrackMap(const TrackResourceInfo* track,CarMovement* car,CarFramePlayerState* player,
         frontend::FlailerResources& resources,frontend::FlailerRenderManager& renderer,
-        CarCinematicServices& cameras,std::int32_t overlayViewNumber,
+        CarCinematicServices& cameras,std::int32_t viewNumber,
         const RaceParameters& parameters);
     bool Valid() const noexcept {return valid_;}
     void SetMode(std::int32_t mode);
@@ -66,7 +66,7 @@ private:
     frontend::FlailerRenderManager& renderer_;
     CarCinematicServices& cameras_;
     const RaceParameters& parameters_;
-    std::int32_t overlayViewNumber_{};
+    std::int32_t viewNumber_{};
     const EditorMarkerTexture *mapTexture_{},*marker_{},*orientedMarker_{},*frame_{},*background_{},*startLine_{},*roadBlock_{};
     float upperExtent_{},lowerExtent_{};
     bool valid_{};

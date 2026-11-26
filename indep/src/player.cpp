@@ -3336,7 +3336,7 @@ int32_t carFramePlayerSetHudFeatures(CarFramePlayerState* player,uint32_t reques
     if (changed&1u) {
         if (requested&1u) {
             own.trackMap=std::make_unique<hp2::TrackMap>(own.bindings.track,player->car,player,ui,
-                *own.bindings.renderManager,*player->cameras->context->services,own.overlayViewNumber,
+                *own.bindings.renderManager,*player->cameras->context->services,own.viewNumber,
                 parameters);
             const auto& display=parameters.runtimeSettings->display;
             int32_t mode=parameters.specialPursuit?display.pursuitTrackMapMode:
