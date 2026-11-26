@@ -69,6 +69,44 @@ const GaussWeights gaussWeights;
 bool linearInterpolation=false; // audio_linear.txt restores the 2-point blend
 bool reverbDisabled=false;      // audio_dry.txt mixes dry only (previous behaviour)
 bool reverbForced=false;        // audio_reverb_force.txt: diagnostic, 0.85 depth everywhere
+bool limiterDisabled=false;     // audio_limiter_off.txt: hard int16 clamp only (previous behaviour)
+
+// Output peak limiter (2026-11-25). Many full-gain voices summed overflow
+// int16 and were hard-clamped (audible clipping). Below the threshold the
+// gain is exactly 1 (bit-identical output). Over it, the per-frame gain
+// needed to stay under the threshold is smoothed with a lookahead attack
+// inside the buffer (backward pass: the gain falls at most kAttack per frame
+// before a peak) and a slow release (forward pass, from the previous buffer).
+struct OutputLimiter {
+    static constexpr float kThreshold=31000.0f;
+    static constexpr float kAttack=1.0f/96.0f;      // full range in 2 ms at 48 kHz
+    static constexpr float kRelease=1.0f/9600.0f;   // full range in 200 ms
+    float gain=1.0f;
+    std::array<float,framesPerBuffer> required{};
+    // Returns raw-over frame count; applies gain in place.
+    std::uint32_t Process(std::array<float,framesPerBuffer*2>& mix,float& rawPeak,float& minimumGain) noexcept
+    {
+        std::uint32_t over=0;float peakAll=0.0f;
+        for(std::size_t i=0;i<framesPerBuffer;++i) {
+            const float peak=std::max(std::fabs(mix[2*i]),std::fabs(mix[2*i+1]));
+            peakAll=std::max(peakAll,peak);
+            over+=peak>32767.0f;
+            required[i]=peak>kThreshold ? kThreshold/peak:1.0f;
+        }
+        rawPeak=std::max(rawPeak,peakAll);
+        if(peakAll<=kThreshold && gain>=1.0f)return over;
+        for(std::size_t i=framesPerBuffer-1;i>0;--i)required[i-1]=std::min(required[i-1],required[i]+kAttack);
+        float g=gain;
+        for(std::size_t i=0;i<framesPerBuffer;++i) {
+            g=std::min(g+kRelease,required[i]);
+            g=std::min(g,1.0f);
+            mix[2*i]*=g;mix[2*i+1]*=g;
+            minimumGain=std::min(minimumGain,g);
+        }
+        gain=g;
+        return over;
+    }
+};
 
 // SPU2 reverb, one per core. The PS2 runs it at half the 48 kHz output rate
 // with the 39-tap half-band FIR on both sides. Formula and presets are the
@@ -468,6 +506,7 @@ struct AudioDevice::State {
         linearInterpolation=exists("ux0:data/NFSHP2/audio_linear.txt");
         reverbDisabled=exists("ux0:data/NFSHP2/audio_dry.txt");
         reverbForced=exists("ux0:data/NFSHP2/audio_reverb_force.txt");
+        limiterDisabled=exists("ux0:data/NFSHP2/audio_limiter_off.txt");
         port=sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM,framesPerBuffer,sampleRate,SCE_AUDIO_OUT_MODE_STEREO);
         if(port<0)throw AudioFailure{WORLD_AUDIO_BACKEND_FAILURE,"sceAudioOutOpenPort ("+std::to_string(port)+")"};
         int volume[2]={SCE_AUDIO_VOLUME_0DB,SCE_AUDIO_VOLUME_0DB};
@@ -609,8 +648,26 @@ struct AudioDevice::State {
                 statistics.voiceBuffers+=active;++statistics.buffers;
                 statistics.mixMilliseconds+=std::chrono::duration<double,std::milli>(Clock::now()-mixStarted).count();
             }
-            for(std::size_t i=0;i<mixBuffer.size();++i)
-                buffer.samples[i]=static_cast<int16_t>(std::clamp(mixBuffer[i],-32768.0f,32767.0f));
+            {
+                float rawPeak=0.0f,minimumGain=1.0f;std::uint32_t over=0;
+                if(!limiterDisabled)over=limiter.Process(mixBuffer,rawPeak,minimumGain);
+                std::uint32_t clipped=0;
+                for(std::size_t i=0;i<framesPerBuffer;++i) {
+                    const float l=mixBuffer[2*i],r=mixBuffer[2*i+1];
+                    if(limiterDisabled) {
+                        const float peak=std::max(std::fabs(l),std::fabs(r));
+                        rawPeak=std::max(rawPeak,peak);over+=peak>32767.0f;
+                    }
+                    clipped+=std::fabs(l)>32767.0f || std::fabs(r)>32767.0f;
+                    buffer.samples[2*i]=static_cast<int16_t>(std::clamp(l,-32768.0f,32767.0f));
+                    buffer.samples[2*i+1]=static_cast<int16_t>(std::clamp(r,-32768.0f,32767.0f));
+                }
+                std::lock_guard<std::mutex> lock(mutex);
+                statistics.overFrames+=over;statistics.clippedFrames+=clipped;
+                statistics.limitedBuffers+=minimumGain<1.0f;
+                statistics.rawPeak=std::max(statistics.rawPeak,rawPeak);
+                statistics.minimumGain=std::min(statistics.minimumGain,minimumGain);
+            }
             sceAudioOutOutput(port,buffer.samples.data());
         }
         sceAudioOutOutput(port,nullptr); // drain the queued buffer before release
@@ -1040,6 +1097,7 @@ struct AudioDevice::State {
     bool threadStarted{};
     int port{-1};
     std::array<float,framesPerBuffer*2> mixBuffer{};
+    OutputLimiter limiter;
     // Reverb control is written by commands under `mutex`; the output thread
     // copies it per buffer and owns the reverb work areas.
     std::array<EffectControl,2> effects{};

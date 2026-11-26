@@ -546,6 +546,11 @@ public:
                 audio.reverbPreset[0], audio.reverbPreset[1], audio.reverbVolume[0], audio.reverbVolume[1]);
             pumpPeakUs_ = 0;
             log_.Line("audio.backend_window", detail);
+            std::snprintf(detail, sizeof(detail), "buffers=%llu over_frames=%llu clipped_frames=%llu limited_buffers=%llu raw_peak=%.0f min_gain=%.3f",
+                static_cast<unsigned long long>(audio.buffers), static_cast<unsigned long long>(audio.overFrames),
+                static_cast<unsigned long long>(audio.clippedFrames), static_cast<unsigned long long>(audio.limitedBuffers),
+                audio.rawPeak, audio.minimumGain);
+            log_.Line("audio.level", detail);
             {
                 // Top request kinds by apply time (per pump averages).
                 int order[40];for (int k = 0; k < 40; ++k) order[k] = k;

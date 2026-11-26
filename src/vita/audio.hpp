@@ -23,6 +23,9 @@ struct AudioStatistics {
     // Per request kind: apply ms and count; PreDecode and request totals.
     double kindMilliseconds[40]{};std::uint32_t kindCounts[40]{};
     double preDecodeMilliseconds{},applyMilliseconds{},lockWaitMilliseconds{};std::uint64_t requests{};
+    // Output level: frames whose raw mix exceeded int16 full scale, frames
+    // the int16 clamp still cut after the limiter, raw peak, lowest gain.
+    std::uint64_t overFrames{},clippedFrames{},limitedBuffers{};float rawPeak{},minimumGain{1.0f};
 };
 class AudioDevice final {
 public:
